@@ -1,0 +1,26 @@
+# IDE / venv
+.idea/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# data
+data/**/*.bsp
+data/**/*.bsp.*
+data/**/*.lbl
+data/**/*.dat
+*.dat

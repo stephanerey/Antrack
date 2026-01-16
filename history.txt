@@ -1,0 +1,8 @@
+#########
+# History
+#########
+
+# v1.0.2
+# =======
+- Query Antenna Data splitted in two : AZ + EL values called every 0.2s and endstop/modbus status every 1s
+- Added parameter MIN_MOVE_DURATION to set the minimum time between two move/stop commands

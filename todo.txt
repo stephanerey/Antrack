@@ -1,0 +1,19 @@
+###################
+BUGS or CORRECTIONS
+###################
+- solve errors colors swaps
+- add filter on axis rates
+- manage connection when antenna is moving (stopped vs in move)
+- tracked object configuration
+
+
+##################
+NEW FEATURES
+##################
+- park position
+- multi-observer management
+- plots
+- calibration plot vitesse
+- vitesse variable sur approche target et pas par seuil
+- basemaps + calculate object apparent lon/lat
+- manage scan around tracking + noise measurement
