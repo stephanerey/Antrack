@@ -1,18 +1,19 @@
 # Repository Guidelines - Antrack (Antenna Noise Tracker)
 
 ## Project Overview
-Antrack is a Python 3.12 desktop app (PyQt5 + qasync) for antenna tracking and radio/astronomy.
+Antrack is a Python 3.12 desktop app (PyQt5 + qasync) for antenna tracking.
 
 ## Project Structure & Module Organization
 - `pyproject.toml` metadata, dependencies, `antrack` entry point.
-- `src/antrack/` main package: `core/` (hardware I/O), `gui/` (Qt UI), `tracking/` (tracking logic), `threading_utils/`, `utils/`, `settings.cfg`.
-- `data/` assets (ephemeris `*.bsp`, TLEs `*.tle`, catalogs `*.csv`).
+- `src/antrack/` main package: `core/` (hardware I/O), `gui/` (Qt UI), `tracking/` (tracking logic), `threading_utils/`, `utils/`.
+- `settings.txt` repo-local configuration file (override with `ANTRACK_CONFIG_PATH`).
+- `src/data/` assets (ephemeris `*.bsp`, TLEs `*.tle`, catalogs `*.csv`).
 - `tests/` pytest tests; `logs/` runtime logs; `docs/` docs.
 
 ## Build, Install, and Run
 ### Environment
 - Python 3.12.x only
-- Target Windows; keep paths OS-neutral
+- Windows target; keep paths neutral
 
 ### Commands (PowerShell)
 ```powershell
@@ -37,9 +38,8 @@ python -m pytest -q
 
 ## Path, Data, and Configuration
 - Build paths via `pathlib.Path`; never assume the current working directory.
-- Use `skyfield.iokit.load_file` for local `.bsp` files; do not mix URLs with paths.
-- `src/antrack/settings.cfg` is the default; avoid hard-coded IPs, ports, or device IDs.
-- Large files under `data/` must never be auto-downloaded or overwritten without explicit user intent.
+- `settings.txt` is the default; avoid hard-coded IPs, ports, or device IDs.
+- Large files under `src/data/` must never be auto-downloaded or overwritten without explicit user intent.
 
 ## Testing Guidelines
 - Use pytest; name tests `test_*.py` under `tests/`.

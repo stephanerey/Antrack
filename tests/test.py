@@ -2,6 +2,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Circle, Wedge
 
+if __name__ != "__main__":
+    import pytest
+
+    pytest.skip("Manual plot demo; skip during automated tests.", allow_module_level=True)
+
 def plot_circular_gauge(angle_inner, angle_outer, radius=1):
     fig, ax = plt.subplots()
 

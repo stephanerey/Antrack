@@ -63,7 +63,7 @@ def to_float(v) -> Optional[float]:
 
 class RadioSourceCatalog:
     """
-    Charge des CSV dans data/radiosources/*.csv
+    Charge des CSV dans src/data/radiosources/*.csv
     Fournit :
       - list_groups() -> ['ATNF', 'RFC', ...] (nom = base du fichier)
       - list_sources(group) -> [ '3C 273', '3C 286', ... ]

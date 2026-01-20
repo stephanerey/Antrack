@@ -13,6 +13,9 @@ build/
 logs/
 *.log
 *.log.*
+src/logs/
+src/logs/*.log
+src/logs/*.log.*
 
 # OS
 .DS_Store
@@ -24,3 +27,6 @@ data/**/*.bsp.*
 data/**/*.lbl
 data/**/*.dat
 *.dat
+src/data/**/*.bsp
+src/data/**/*.bsp.*
+src/data/**/*.lbl

@@ -16,8 +16,8 @@ _DEFAULT_NAMES = [
 class SpacecraftRepo:
     """
     Gestionnaire des kernels SPICE pour les sondes spatiales.
-    Les fichiers .bsp doivent être placés dans data/spacecrafts/.
-    Optionnel: data/spacecrafts/spacecrafts.txt (une sonde par ligne)
+    Les fichiers .bsp doivent être placés dans src/data/spacecrafts/.
+    Optionnel: src/data/spacecrafts/spacecrafts.txt (une sonde par ligne)
     """
     def __init__(self, base_dir: str, logger=None):
         self.base_dir = os.path.abspath(base_dir)
@@ -46,7 +46,7 @@ class SpacecraftRepo:
     def list_spacecrafts(self) -> List[str]:
         """
         Retourne une liste de noms “probables”.
-        Si data/spacecrafts/spacecrafts.txt existe → on l’utilise.
+        Si src/data/spacecrafts/spacecrafts.txt existe → on l’utilise.
         Sinon on fournit une liste par défaut. Le succès effectif
         dépendra des kernels chargés (bodn2c doit réussir).
         """

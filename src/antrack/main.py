@@ -1,65 +1,59 @@
-# Antenna Noise Tracker
-# Author : Stephane Rey
-# Date   : 07.07.2023
+"""Application entry point for Antenna Noise Tracker."""
 
+from __future__ import annotations
 
-from antrack.app_info import version
-
-import sys
-import os
 import logging
+import sys
 from logging.handlers import TimedRotatingFileHandler
-from PyQt5.QtWidgets import QApplication, QMessageBox
-from PyQt5.QtCore import QTimer
+from pathlib import Path
 
-from antrack.threading_utils.thread_manager import ThreadManager
-from antrack.utils.settings_loader import load_settings
+from antrack.gui.app_runtime import get_or_create_app, show_startup_error
 from antrack.gui.main_ui import MainUi
-
-# Configuration du logging (console + fichier tournant quotidien, conservation 7 jours)
-log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, 'antenna_tracker.log')
-
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-
-# Nettoyer d'éventuels handlers déjà présents (si basicConfig a été appelé ailleurs)
-if root_logger.handlers:
-    for h in list(root_logger.handlers):
-        root_logger.removeHandler(h)
-
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-
-file_handler = TimedRotatingFileHandler(
-    log_file, when='midnight', backupCount=7, encoding='utf-8', utc=False
-)
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-
-root_logger.addHandler(console_handler)
-root_logger.addHandler(file_handler)
+from antrack.threading_utils.thread_manager import ThreadManager
+from antrack.utils.paths import get_log_file, get_logs_dir
+from antrack.utils.settings_loader import load_settings, resolve_settings_path
 
 logger = logging.getLogger("main")
 
 
-def _resolve_settings_path() -> str:
-    """Return an absolute path to settings.cfg (prefer package-local, fallback one level up)."""
-    base_dir = os.path.abspath(os.path.dirname(__file__))
-    candidate_paths = [
-        os.path.join(base_dir, "settings.cfg"),
-        os.path.abspath(os.path.join(base_dir, "..", "settings.cfg")),
-    ]
-    return next((p for p in candidate_paths if os.path.exists(p)), candidate_paths[0])
+def _init_logging() -> Path:
+    """Initialize console + rotating file logging and return log file path."""
+    log_dir = get_logs_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = get_log_file()
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    if root_logger.handlers:
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+
+    file_handler = TimedRotatingFileHandler(
+        log_file, when="midnight", backupCount=7, encoding="utf-8", utc=False
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+    return log_file
 
 
 def main() -> int:
+    _init_logging()
     logger.info(
         "\n"
         "================================================\n"
-        "Démarrage de l'application Antenna Noise Tracker\n"
+        "Demarrage de l'application Antenna Noise Tracker\n"
         "================================================"
     )
 
@@ -67,57 +61,45 @@ def main() -> int:
     thread_manager = None
 
     try:
-        # Settings
-        settings_path = _resolve_settings_path()
-        logger.info(f"Chargement des paramètres depuis: {settings_path}")
+        settings_path = resolve_settings_path()
+        logger.info("Chargement des parametres depuis: %s", settings_path)
         settings = load_settings(settings_path)
-        logger.info("Paramètres chargés avec succès")
+        logger.info("Parametres charges avec succes")
 
         ip = settings["AXIS_SERVER"]["ip_address"]
         port = settings["AXIS_SERVER"]["port"]
-        logger.info(f"Configuration serveur: {ip}:{port}")
+        logger.info("Configuration serveur: %s:%s", ip, port)
 
-        # Qt app
-        app = QApplication(sys.argv)
+        app = get_or_create_app()
         app.setApplicationName("Antenna Noise Tracker")
 
-        # Thread manager
         thread_manager = ThreadManager()
-        logger.info("Gestionnaire de threads initialisé")
+        logger.info("Gestionnaire de threads initialise")
 
-        # UI
         ui = MainUi(thread_manager=thread_manager, settings=settings, ip_address=ip, port=port)
         ui.show()
-        logger.info("Interface graphique initialisée")
+        logger.info("Interface graphique initialisee")
 
-        # Cleanup hook
-        app.aboutToQuit.connect(thread_manager.stop_all_threads)
+        app.aboutToQuit.connect(thread_manager.shutdown)
 
         exit_code = app.exec_()
 
         logger.info("Fermeture de l'application...")
-        thread_manager.stop_all_threads()
+        thread_manager.shutdown()
 
         return int(exit_code)
 
     except Exception as e:
         logger.exception("Erreur lors de l'initialisation de l'application")
-
-        # Ensure a QApplication exists before showing a QMessageBox
-        if QApplication.instance() is None:
-            app = QApplication(sys.argv)
-
-        QMessageBox.critical(
-            None,
-            "Erreur de démarrage",
-            f"L'application n'a pas pu démarrer correctement: {str(e)}\n\n"
-            "Veuillez consulter les logs pour plus de détails."
+        show_startup_error(
+            "L'application n'a pas pu demarrer correctement:\n"
+            f"{str(e)}\n\nVeuillez consulter les logs pour plus de details.",
+            title="Erreur de demarrage",
         )
 
-        # Best-effort cleanup
         if thread_manager is not None:
             try:
-                thread_manager.stop_all_threads()
+                thread_manager.shutdown()
             except Exception:
                 logger.exception("Erreur pendant le nettoyage des threads")
 
@@ -126,6 +108,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-if __name__ == "__main__":
-    main()

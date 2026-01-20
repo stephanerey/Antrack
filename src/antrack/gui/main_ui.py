@@ -2,31 +2,30 @@
 # Interface principale de l'application avec intégration du client Axis Qt
 
 import logging
-from pathlib import Path
 
 from PyQt5.uic import loadUi
 import os
-from collections import deque
 from PyQt5.QtWidgets import (QMainWindow, QLabel, QMessageBox, QAction, QStatusBar, QComboBox, QLineEdit, QHBoxLayout, QPushButton,
-    QPlainTextEdit, QVBoxLayout, QDialog)
-from PyQt5.QtWidgets import QVBoxLayout, QGridLayout, QPushButton
+    QVBoxLayout, QDialog)
+from PyQt5.QtWidgets import QGridLayout
 
 
-from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtCore import QUrl, QTimer
-from antrack.core.axis_client_qt import AxisClientQt
+from PyQt5.QtCore import QTimer
+from antrack.gui.axis_client_qt import AxisClientQt
 from antrack.core.axis_client import AxisClientPollingAdapter
 from antrack.app_info import version
 from antrack.tracking.observer import Observer
-from skyfield.api import load as sf_load
-from skyfield.iokit import load_file
 from antrack.tracking.tracking import TrackedObject, Tracker
-from antrack.tracking.ephemeris_service import EphemerisService
+from antrack.tracking.ephemeris_service import EphemerisService, load_planets
+from antrack.gui.ephemeris_qt import EphemerisQtAdapter
 from antrack.gui.angle_gauge_widget import AngleGauge
 from antrack.gui.multi_track_card import MultiTrackStrip
 from antrack.gui.multi_track_card import MultiTrackTabsManager
-from antrack.core.powermeter import Powermeter
+from antrack.gui.powermeter import Powermeter
 from antrack.gui.calibration import CalibrationPlots
+from antrack.gui.diagnostics_ui import ThreadDiagnosticsUI
+from antrack.gui.log_viewer_ui import LogViewerDialog
+from antrack.utils.paths import get_tle_dir
 
 
 # local stylesheets
@@ -137,27 +136,25 @@ class MainUi(QMainWindow):
         self.logger.info("Interface principale initialisée")
 
 
-        # Charger les éphémérides (Skyfield) et initialiser l'observateur depuis les settings
+        # Charger les ephemerides (Skyfield) et initialiser l'observateur depuis les settings
         try:
-            project_root = Path(__file__).resolve().parents[3]  # .../AntennaTracker
-            ephem_path = project_root / "data" / "Ephemeris" / "de440s.bsp"
-
-            self.logger.info(f"Ephemeris path: {ephem_path} (exists={ephem_path.exists()})")
-
-            self.planets = load_file(str(ephem_path))  # <-- local only, no download
+            self.planets = load_planets(logger=self.logger)
             earth = self.planets["earth"]
-
-            self.logger.info("Ephémérides chargées")
-
+            self.logger.info("Ephemerides chargees")
         except Exception as e:
             self.planets = None
             earth = None
-            self.logger.exception("Impossible de charger les éphémérides")
+            self.logger.exception("Impossible de charger les ephemerides: %s", e)
+            QMessageBox.warning(
+                self,
+                "Ephemeris",
+                f"Ephemeris loading failed:\n{e}",
+            )
 
-        # --- Dossier TLE local (data/tle) ---
+        # --- Dossier TLE local (src/data/tle) ---
         try:
-            self.tle_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'tle'))
-            os.makedirs(self.tle_dir, exist_ok=True)
+            self.tle_dir = get_tle_dir()
+            self.tle_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             self.tle_dir = None
             self.logger.error(f"Impossible d'initialiser le dossier TLE: {e}")
@@ -177,7 +174,7 @@ class MainUi(QMainWindow):
             self.observer = None
             self.logger.error(f"Impossible d'initialiser l'observateur: {e}")
 
-        # Service d'éphémérides multi-objets
+        # Service d'ephemerides multi-objets
         #self.ephem = EphemerisService(self.thread_manager, self.observer, self.planets, logger=self.logger)
         # Tu peux surcharger les groupes via settings: SETTINGS["TLE_GROUPS"] = ["stations","active","amateur","weather","starlink"]
         tle_groups = None
@@ -186,19 +183,17 @@ class MainUi(QMainWindow):
         except Exception:
             pass
 
-        self.ephem = EphemerisService(
+        base_ephem = EphemerisService(
             self.thread_manager,
             self.observer,
             self.planets,
             logger=self.logger,
-            tle_dir=self.tle_dir,  # ← data/tle
-            tle_groups=tle_groups,  # ← optionnel
-            tle_refresh_hours=6.0  # ← refresh périodique
+            tle_dir=self.tle_dir,
+            tle_groups=tle_groups,
+            tle_refresh_hours=6.0,
         )
+        self.ephem = EphemerisQtAdapter(base_ephem)
         self.ephem.pose_updated.connect(self._on_pose_updated)
-
-        self.ephem.pose_updated.connect(self._on_pose_updated)
-
         # cree le multitracking cards
         self.multi_cards = MultiTrackTabsManager(
             ephem=self.ephem,
@@ -261,61 +256,14 @@ class MainUi(QMainWindow):
 
 
     def show_thread_diagnostics(self):
-        """
-        Affiche un diagnostic détaillé des threads (stats ThreadManager) dans une fenêtre défilable.
-        """
+        """Show the thread diagnostics dialog."""
         try:
-            # Préparer le texte à afficher (utiliser diagnostics_summary s'il est disponible)
-            if hasattr(self.thread_manager, "diagnostics_summary") and callable(self.thread_manager.diagnostics_summary):
-                def build_summary():
-                    try:
-                        return self.thread_manager.diagnostics_summary()
-                    except Exception as e:
-                        return f"Erreur lors de la récupération des diagnostics: {e}"
-                summary_text = build_summary()
-            else:
-                # Fallback: ancienne vue minimaliste
-                thread_names = list(self.thread_manager.threads.keys())
-                summary_text = "Threads actifs:\n" + "\n".join([f"- {name}" for name in thread_names]) if thread_names else "Aucun thread actif"
-
-            # Construire le dialogue
             dlg = QDialog(self)
-            dlg.setWindowTitle("Diagnostic des threads")
-            dlg.resize(900, 600)
+            dlg.setWindowTitle("Thread diagnostics")
+            dlg.resize(900, 650)
             layout = QVBoxLayout(dlg)
-
-            text = QPlainTextEdit(dlg)
-            text.setReadOnly(True)
-            text.setPlainText(summary_text)
-            text.moveCursor(text.textCursor().End)
-            layout.addWidget(text)
-
-            # Barre des boutons
-            btns = QHBoxLayout()
-            refresh_btn = QPushButton("Rafraîchir", dlg)
-            close_btn = QPushButton("Fermer", dlg)
-
-            def refresh():
-                try:
-                    if hasattr(self.thread_manager, "diagnostics_summary") and callable(self.thread_manager.diagnostics_summary):
-                        text.setPlainText(self.thread_manager.diagnostics_summary())
-                    else:
-                        # Fallback si la méthode n'existe pas
-                        names = list(self.thread_manager.threads.keys())
-                        text.setPlainText("Threads actifs:\n" + "\n".join([f"- {n}" for n in names]) if names else "Aucun thread actif")
-                    text.moveCursor(text.textCursor().End)
-                except Exception as e2:
-                    QMessageBox.warning(self, "Diagnostic", f"Impossible de rafraîchir les diagnostics:\n{e2}")
-
-            refresh_btn.clicked.connect(refresh)
-            close_btn.clicked.connect(dlg.close)
-
-            btns.addWidget(refresh_btn)
-            btns.addWidget(close_btn)
-            layout.addLayout(btns)
-
+            layout.addWidget(ThreadDiagnosticsUI(self.thread_manager, parent=dlg))
             dlg.exec_()
-
         except Exception as e:
             self.logger.error(f"Erreur lors de l'affichage du diagnostic des threads: {e}")
             QMessageBox.warning(self, "Erreur",
@@ -332,68 +280,12 @@ class MainUi(QMainWindow):
                         f"Date: 10.09.2025")
 
     def show_log_viewer(self):
-        """
-        Affiche le fichier de log courant dans une fenêtre défilable.
-        """
+        """Show the log viewer dialog."""
         try:
-            # Chemin cohérent avec la configuration de /src/main.py
-            log_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
-            log_file = os.path.join(log_dir, 'antenna_tracker.log')
-
-            if not os.path.exists(log_file):
-                QMessageBox.information(self, "Journal", "Fichier de log introuvable.")
-                return
-
-            max_lines = 2000  # Limiter l'affichage aux dernières lignes pour éviter les gros fichiers
-            try:
-                with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
-                    lines = list(deque(f, maxlen=max_lines))
-            except Exception as e:
-                self.logger.error(f"Impossible de lire le log: {e}")
-                QMessageBox.warning(self, "Journal", f"Impossible de lire le log:\n{e}")
-                return
-
-            dlg = QDialog(self)
-            dlg.setWindowTitle("Journal de l'application")
-            dlg.resize(900, 600)
-            layout = QVBoxLayout(dlg)
-
-            text = QPlainTextEdit(dlg)
-            text.setReadOnly(True)
-            text.setPlainText("".join(lines))
-            text.moveCursor(text.textCursor().End)
-            layout.addWidget(text)
-
-            # Barre de boutons
-            btns = QHBoxLayout()
-            refresh_btn = QPushButton("Rafraîchir", dlg)
-            open_btn = QPushButton("Ouvrir le dossier…", dlg)
-            close_btn = QPushButton("Fermer", dlg)
-
-            def refresh():
-                try:
-                    with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
-                        text.setPlainText("".join(deque(f, maxlen=max_lines)))
-                        text.moveCursor(text.textCursor().End)
-                except Exception as e2:
-                    QMessageBox.warning(self, "Journal", f"Impossible de relire le log:\n{e2}")
-
-            def open_folder():
-                QDesktopServices.openUrl(QUrl.fromLocalFile(log_dir))
-
-            refresh_btn.clicked.connect(refresh)
-            open_btn.clicked.connect(open_folder)
-            close_btn.clicked.connect(dlg.close)
-
-            for b in (refresh_btn, open_btn, close_btn):
-                btns.addWidget(b)
-            layout.addLayout(btns)
-
-            dlg.exec_()
-
+            LogViewerDialog(self).exec_()
         except Exception as e:
             self.logger.error(f"Erreur show_log_viewer: {e}")
-            QMessageBox.warning(self, "Journal", f"Erreur lors de l'affichage du journal:\n{e}")
+            QMessageBox.warning(self, "Journal", f"Erreur lors de l'affichage du journal:{e}")
 
     def setup_tracker_tab(self):
         """
@@ -2136,6 +2028,5 @@ class MainUi(QMainWindow):
         #         self.calib_plots.clear()
         # w = self.thread_manager.start_thread("CalibPassTrack", _work)
         # w.result.connect(_on_result)
-
 
 

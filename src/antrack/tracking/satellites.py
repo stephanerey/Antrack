@@ -18,7 +18,7 @@ def _norm_name(name: str) -> str:
 
 class TLERepository:
     """
-    - Cache disque dans data/tle
+    - Cache disque dans src/data/tle
     - Un fichier par groupe (filename unique)
     - Refresh périodique
     - Résolution par nom / NORAD
@@ -56,37 +56,54 @@ class TLERepository:
         with self._lock:
             if not force and datetime.utcnow() < self._next_refresh:
                 return
-            try:
-                by_name: Dict[str, EarthSatellite] = {}
-                by_norad: Dict[int, EarthSatellite] = {}
-                by_group: Dict[str, List[EarthSatellite]] = {}
 
-                total = 0
-                for grp in self.groups:
-                    url = CELESTRAK_URL_TMPL.format(grp=grp)
+            by_name: Dict[str, EarthSatellite] = {}
+            by_norad: Dict[int, EarthSatellite] = {}
+            by_group: Dict[str, List[EarthSatellite]] = {}
+            total = 0
+            any_loaded = False
+
+            for grp in self.groups:
+                url = CELESTRAK_URL_TMPL.format(grp=grp)
+                sats = None
+                try:
                     sats = self.loader.tle_file(url, filename=f"celestrak_{grp}.tle", reload=True)
-                    total += len(sats)
-                    by_group[grp] = sats
-                    for s in sats:
-                        try:
-                            by_name[_norm_name(s.name)] = s
-                        except Exception:
-                            pass
-                        try:
-                            satnum = int(s.model.satnum)
-                            by_norad[satnum] = s
-                        except Exception:
-                            pass
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"[TLE] refresh failed for group={grp}: {e}")
+                    try:
+                        sats = self.loader.tle_file(url, filename=f"celestrak_{grp}.tle", reload=False)
+                        if self.logger:
+                            self.logger.info(f"[TLE] fallback cache used for group={grp}")
+                    except Exception as e2:
+                        if self.logger:
+                            self.logger.error(f"[TLE] fallback cache failed for group={grp}: {e2}")
+                        sats = []
 
+                total += len(sats)
+                any_loaded = any_loaded or bool(sats)
+                by_group[grp] = sats
+                for s in sats:
+                    try:
+                        by_name[_norm_name(s.name)] = s
+                    except Exception:
+                        pass
+                    try:
+                        satnum = int(s.model.satnum)
+                        by_norad[satnum] = s
+                    except Exception:
+                        pass
+
+            if any_loaded:
                 self.by_name = by_name
                 self.by_norad = by_norad
                 self.by_group = by_group
                 self._next_refresh = datetime.utcnow() + self.refresh_delta
                 if self.logger:
                     self.logger.info(f"[TLE] loaded groups={self.groups} total={total} cached={len(self.by_name)}")
-            except Exception as e:
+            else:
                 if self.logger:
-                    self.logger.error(f"[TLE] refresh failed: {e}")
+                    self.logger.error("[TLE] refresh failed for all groups")
                 self._next_refresh = datetime.utcnow() + timedelta(hours=1)
 
     # ----- resolve -----

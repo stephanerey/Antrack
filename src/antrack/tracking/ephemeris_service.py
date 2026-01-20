@@ -1,35 +1,104 @@
-from PyQt5.QtCore import QObject, pyqtSignal
-from skyfield.api import load as sf_load, Star, Angle
-from skyfield.data import hipparcos
-from typing import Dict, Optional, List, Tuple
-import time
-import numpy as np
-import os
+import threading
 import math
+import time
+from typing import Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+from skyfield.api import Angle, Loader, Star, load as sf_load
+from skyfield.data import hipparcos
+from skyfield.iokit import load_file
 
 from antrack.tracking.tracking import convert_float_to_hms, decimal_degrees_to_dms
 from antrack.tracking.satellites import TLERepository, DEFAULT_GROUPS as DEFAULT_TLE_GROUPS
 from antrack.tracking.radiosources import RadioSourceCatalog
 from antrack.tracking.spacecrafts import SpacecraftRepo
+from antrack.utils.paths import (
+    get_ephemeris_dir,
+    get_radiosources_dir,
+    get_spacecrafts_dir,
+    get_tle_dir,
+)
 
-class EphemerisService(QObject):
-    pose_updated = pyqtSignal(str, dict)  # key, payload
 
-    def __init__(self, thread_manager, observer, planets, logger=None, parent=None,
-                 tle_dir: Optional[str] = None, tle_groups: Optional[List[str]] = None,
-                 tle_refresh_hours: float = 6.0,
-                 radiosrc_dir: Optional[str] = None,
-                 spacecraft_dir: Optional[str] = None):
-        super().__init__(parent)
+class SimpleSignal:
+    """Minimal signal helper for connect/emit without Qt dependencies."""
+
+    def __init__(self) -> None:
+        self._callbacks: List[Callable[[str, dict], None]] = []
+
+    def connect(self, callback: Callable[[str, dict], None]) -> None:
+        """Register a callback."""
+        self._callbacks.append(callback)
+
+    def emit(self, key: str, payload: dict) -> None:
+        """Invoke all callbacks."""
+        for callback in list(self._callbacks):
+            try:
+                callback(key, payload)
+            except Exception:
+                pass
+
+
+def load_planets(ephemeris_name: str = "de440s.bsp", logger=None):
+    """Load Skyfield ephemeris, downloading it if missing.
+
+    Args:
+        ephemeris_name: BSP file name (e.g., de440s.bsp).
+        logger: Optional logger for diagnostics.
+
+    Returns:
+        The loaded ephemeris kernel.
+
+    Raises:
+        FileNotFoundError: If the BSP is missing and download fails.
+    """
+    ephem_dir = get_ephemeris_dir()
+    ephem_dir.mkdir(parents=True, exist_ok=True)
+    ephem_path = ephem_dir / ephemeris_name
+    if ephem_path.exists():
+        return load_file(str(ephem_path))
+
+    loader = Loader(str(ephem_dir))
+    try:
+        return loader(ephemeris_name)
+    except Exception as exc:
+        msg = (
+            "Missing ephemeris file. Expected: "
+            f"{ephem_path}. An automatic download was attempted and failed."
+        )
+        if logger:
+            logger.error(msg)
+        raise FileNotFoundError(msg) from exc
+
+class EphemerisService:
+    """Compute tracking ephemerides and manage background updates."""
+
+    def __init__(
+        self,
+        thread_manager,
+        observer,
+        planets,
+        logger=None,
+        parent=None,
+        tle_dir: Optional[str] = None,
+        tle_groups: Optional[List[str]] = None,
+        tle_refresh_hours: float = 6.0,
+        radiosrc_dir: Optional[str] = None,
+        spacecraft_dir: Optional[str] = None,
+    ):
+        del parent
         self.thread_manager = thread_manager
         self.observer = observer
         self.planets = planets
         self.logger = logger
 
+        self.pose_updated = SimpleSignal()
+
         self._workers: Dict[str, bool] = {}
         self._targets: Dict[str, Dict] = {}
 
         self._hip_df = None
+        self._hip_lock = threading.Lock()
 
         # caches objets résolus
         self._star_cache: Dict[str, Star] = {}
@@ -39,7 +108,7 @@ class EphemerisService(QObject):
 
         # --- TLE repo ---
         if not tle_dir:
-            tle_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'tle'))
+            tle_dir = str(get_tle_dir())
         try:
             self._tle_repo = TLERepository(
                 tle_dir=tle_dir,
@@ -54,7 +123,7 @@ class EphemerisService(QObject):
 
         # --- Radio sources catalog ---
         if not radiosrc_dir:
-            radiosrc_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'radiosources'))
+            radiosrc_dir = str(get_radiosources_dir())
         try:
             self._rs_catalog = RadioSourceCatalog(radiosrc_dir, logger=self.logger)
             self._rs_catalog.refresh(force=False)
@@ -65,7 +134,7 @@ class EphemerisService(QObject):
 
         # --- Spacecraft (SPICE) ---
         if not spacecraft_dir:
-            spacecraft_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'spacecrafts'))
+            spacecraft_dir = str(get_spacecrafts_dir())
         try:
             self._sc_repo = SpacecraftRepo(spacecraft_dir, logger=self.logger)
         except Exception as e:
@@ -169,6 +238,25 @@ class EphemerisService(QObject):
         return []
 
     # ---------- Boucle worker ----------
+    def _ensure_hipparcos_loaded(self):
+        if self._hip_df is not None:
+            return
+        with self._hip_lock:
+            if self._hip_df is not None:
+                return
+            ephem_dir = get_ephemeris_dir()
+            ephem_dir.mkdir(parents=True, exist_ok=True)
+            loader = Loader(str(ephem_dir))
+            try:
+                with loader.open(hipparcos.URL) as handle:
+                    self._hip_df = hipparcos.load_dataframe(handle)
+                if self.logger:
+                    self.logger.info("[Ephemeris] Hipparcos catalog loaded")
+            except Exception as exc:
+                if self.logger:
+                    self.logger.error(f"[Ephemeris] Hipparcos load failed: {exc}")
+                self._hip_df = None
+
     def _object_loop(self, key: str):
         last_type = None
         while self._workers.get(key, False):
@@ -184,13 +272,7 @@ class EphemerisService(QObject):
 
                 if obj_type != last_type:
                     if obj_type == "Star" and self._hip_df is None:
-                        try:
-                            with sf_load.open(hipparcos.URL) as f:
-                                self._hip_df = hipparcos.load_dataframe(f)
-                        except Exception as e:
-                            if self.logger:
-                                self.logger.error(f"[Ephemeris] Hipparcos load failed: {e}")
-                            self._hip_df = None
+                        self._ensure_hipparcos_loaded()
                     last_type = obj_type
 
                 t_now = self.observer.timescale.now()
