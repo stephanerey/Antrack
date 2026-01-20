@@ -12,9 +12,6 @@ Provide safe steps to migrate the repository layout without breaking runtime.
 - Replace any project-root guessing (e.g. `Path(__file__).resolve().parents[...]`) with `antrack/utils/paths.py`.
 - Pay special attention to ephemeris/BSP loading: it MUST point to `src/data/...` after Phase 1.
 
-## Configuration
-- Rename `settings.cfg` to repo-root `settings.txt` and update overrides to use `ANTRACK_CONFIG_PATH`.
-
 ## ThreadManager migration
 - Keep existing `start_thread/stop_thread/stop_all_threads/get_diagnostics` usage working.
 - Add `shutdown(graceful, timeout_s)` and wire it into app exit.

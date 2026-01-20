@@ -32,7 +32,22 @@ Phase 1 MUST be behavior-preserving and focuses on:
 4) Deterministic, canonical runtime paths for data and logs.
 5) Consistent docstrings and readable code (no over-engineering).
 
-### Phase 2+ — Features (explicitly out of Phase 1)
+#
+
+## Phase 1.1 — Architecture cleanup (post-refactor)
+After Phase 1 (tag 2.1.0), we run a short Phase 1.1 to make the package layout consistent and scalable.
+
+Goals:
+- Move/split remaining non-UI code out of `gui/` into `core/` (drivers/clients).
+- Keep `tracking/` as a separate domain package (Option A).
+- Introduce explicit GUI subpackages (`gui/axis`, `gui/instruments`, `gui/widgets`, `gui/dialogs`, `gui/diagnostics`).
+- No behavior changes, no new dependencies.
+
+Specs:
+- `docs/prd/10_architecture/package_layout.md`
+- `docs/prd/20_refactor/phase_1_1_arch_cleanup.md`
+
+## Phase 2+ — Features (explicitly out of Phase 1)
 - Tracking enhancements (object catalogs, pass prediction improvements, plotting improvements).
 - Calibration workflow (sun scan, acquisition, persistence, result display).
 
@@ -207,3 +222,7 @@ Scope limitation:
 - Quality:
   - `90_quality/testing.md`
   - `90_quality/definition_of_done.md`
+
+
+### Task tracking
+During each phase, maintain `docs/prd/tasks_current.md` as the live task checklist. Archive it at phase end as `tasks_phaseX.md`.

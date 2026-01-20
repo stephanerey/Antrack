@@ -51,3 +51,13 @@ This folder contains the Product Requirements and Technical Specs that drive:
 ### Quality
 - [90_quality/testing.md](90_quality/testing.md)
 - [90_quality/definition_of_done.md](90_quality/definition_of_done.md)
+
+
+## Added in Phase 1.1
+- 10_architecture/package_layout.md
+- 20_refactor/phase_1_1_arch_cleanup.md
+
+
+## Task tracking
+- Use `tasks_current.md` for the active phase.
+- Archive at the end of each phase as `tasks_phase1.md`, `tasks_phase1_1.md`, `tasks_phase2.md`, etc.

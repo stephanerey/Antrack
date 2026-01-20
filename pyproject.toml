@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "antrack"
-version = "2.01"
+version = "2.11"
 authors = [{name = "Stephane REY"}]
 description = "Antenna tracking and control application"
 readme = "README.md"
