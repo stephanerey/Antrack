@@ -9,7 +9,7 @@ import logging
 # Reduce Tracker logger verbosity globally (keep WARNING and above)
 logging.getLogger("Tracker").setLevel(logging.WARNING)
 
-from antrack.core.axis_client import AxisStatus
+from antrack.core.axis.axis_client import AxisStatus
 
 
 # --- Utilitaires simples ---

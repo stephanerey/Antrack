@@ -5,7 +5,7 @@ import logging
 import time
 import time
 from PyQt5.QtCore import QObject, pyqtSignal
-from antrack.core.axis_client import Axis, AxisCommand, ServerStatus
+from antrack.core.axis.axis_client import Axis, AxisCommand, ServerStatus
 
 logger = logging.getLogger("AxisClientQt")
 

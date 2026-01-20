@@ -11,20 +11,20 @@ from PyQt5.QtWidgets import QGridLayout
 
 
 from PyQt5.QtCore import QTimer
-from antrack.gui.axis_client_qt import AxisClientQt
-from antrack.core.axis_client import AxisClientPollingAdapter
+from antrack.gui.axis.axis_client_qt import AxisClientQt
+from antrack.core.axis.axis_client import AxisClientPollingAdapter
 from antrack.app_info import version
 from antrack.tracking.observer import Observer
 from antrack.tracking.tracking import TrackedObject, Tracker
 from antrack.tracking.ephemeris_service import EphemerisService, load_planets
 from antrack.gui.ephemeris_qt import EphemerisQtAdapter
-from antrack.gui.angle_gauge_widget import AngleGauge
-from antrack.gui.multi_track_card import MultiTrackStrip
-from antrack.gui.multi_track_card import MultiTrackTabsManager
-from antrack.gui.powermeter import Powermeter
-from antrack.gui.calibration import CalibrationPlots
-from antrack.gui.diagnostics_ui import ThreadDiagnosticsUI
-from antrack.gui.log_viewer_ui import LogViewerDialog
+from antrack.gui.widgets.angle_gauge_widget import AngleGauge
+from antrack.gui.widgets.multi_track_card import MultiTrackStrip
+from antrack.gui.widgets.multi_track_card import MultiTrackTabsManager
+from antrack.gui.instruments.powermeter_qt import Powermeter
+from antrack.gui.widgets.calibration import CalibrationPlots
+from antrack.gui.diagnostics.diagnostics_ui import ThreadDiagnosticsUI
+from antrack.gui.dialogs.log_viewer_ui import LogViewerDialog
 from antrack.utils.paths import get_tle_dir
 
 

@@ -1,13 +1,11 @@
-# powermeter.py
+# powermeter_client.py
 # Lecteur RS232 pour powermeter avec parsing du champ Power=... [dBm]
 # Auteur: Stéphane Rey (structure orientée ThreadManager)
 
 import re
 import time
 import logging
-from typing import Optional
-
-from PyQt5.QtCore import QObject, pyqtSignal
+from typing import Callable, Optional
 
 try:
     import serial  # pyserial
@@ -24,7 +22,7 @@ _PWR_REGEX = re.compile(
 )
 
 
-class Powermeter(QObject):
+class PowermeterClient:
     """
     Driver minimal pour un powermeter RS232.
     - Port série défini dans settings['POWERMETER']['comport'] (ex: 'COM7' ou '/dev/ttyUSB0')
@@ -41,17 +39,18 @@ class Powermeter(QObject):
             'overall_timeout_s': 1.5     # timeout global pour récupérer une mesure parsable
         }
     - Méthode principale threadable: read_power() → float (dBm)
-    - Signaux (si vous voulez les consommer côté Qt): power_ready, error, status
+    - Client sans Qt. Utiliser un wrapper Qt si nécessaire.
     """
 
-    power_ready = pyqtSignal(float)
-    error = pyqtSignal(str)
-    status = pyqtSignal(str)
-
-    def __init__(self, settings: dict, logger: Optional[logging.Logger] = None, parent=None):
-        super().__init__(parent)
+    def __init__(
+        self,
+        settings: dict,
+        logger: Optional[logging.Logger] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ):
         self.settings = settings or {}
         self.logger = logger or logging.getLogger("Powermeter")
+        self._status_callback = status_callback
         self._ser: Optional[Serial] = None
 
     # ---------- Public API (threadable) ----------
@@ -97,10 +96,6 @@ class Powermeter(QObject):
                     val = self._try_parse_power(buff)
                     if val is not None:
                         self._emit_status(f"read_power: parsed {val:.2f} dBm")
-                        try:
-                            self.power_ready.emit(val)
-                        except Exception:
-                            pass
                         return val
                 else:
                     time.sleep(0.01)  # évite busy-wait
@@ -109,10 +104,6 @@ class Powermeter(QObject):
             val = self._try_parse_power(buff)
             if val is not None:
                 self._emit_status(f"read_power: parsed (late) {val:.2f} dBm")
-                try:
-                    self.power_ready.emit(val)
-                except Exception:
-                    pass
                 return val
 
             raise TimeoutError("Timeout: aucune valeur 'Power=... [dBm]' parsable reçue")
@@ -120,10 +111,6 @@ class Powermeter(QObject):
         except Exception as e:
             msg = f"read_power: ERROR: {e}"
             self.logger.error(msg)
-            try:
-                self.error.emit(str(e))
-            except Exception:
-                pass
             raise
         finally:
             self._emit_status("read_power: finish")
@@ -239,9 +226,13 @@ class Powermeter(QObject):
     def _emit_status(self, msg: str):
         try:
             self.logger.info(msg)
-            self.status.emit(msg)
         except Exception:
             pass
+        if self._status_callback:
+            try:
+                self._status_callback(msg)
+            except Exception:
+                pass
 
     @staticmethod
     def _to_bytesize(n: int):
