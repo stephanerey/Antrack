@@ -12,6 +12,7 @@ from antrack.gui.calibration_ui import CalibrationUiMixin
 from antrack.gui.connection_ui import ConnectionUiMixin
 from antrack.gui.diagnostics_ui import DiagnosticsUiMixin
 from antrack.gui.instrument_ui import InstrumentUiMixin
+from antrack.gui.time_ui import TimeUiMixin
 from antrack.gui.tracking_ui import TrackingUiMixin
 from antrack.gui.ephemeris_qt import EphemerisQtAdapter
 from antrack.gui.widgets.angle_gauge_widget import AngleGauge
@@ -28,11 +29,12 @@ class MainUi(
     TrackingUiMixin,
     CalibrationUiMixin,
     InstrumentUiMixin,
+    TimeUiMixin,
     ConnectionUiMixin,
 ):
     def __init__(self, thread_manager, settings, ip_address, port, parent=None):
         super().__init__(parent)
-        ui_path = Path(__file__).with_name("main.ui")
+        ui_path = Path(__file__).with_name("main_3.ui")
         loadUi(str(ui_path), self)
         self.setWindowTitle("Antenna Tracker")
 
@@ -94,11 +96,14 @@ class MainUi(
 
         self.pushButton_server_connect.clicked.connect(self.on_connect_button_clicked)
         self.pushButton_antenna_track.clicked.connect(self.on_track_button_clicked)
+        if hasattr(self, "pushButton_antenna_park"):
+            self.pushButton_antenna_park.clicked.connect(self.on_park_button_clicked)
         self.pushButton_antenna_track.setEnabled(False)
 
         self.ui_set_default_state()
         self._user_requested_disconnect = False
         self._connect_toggle_in_progress = False
+        self.setup_time_ui()
 
         self.tracked_object = TrackedObject()
         self.tracker = None

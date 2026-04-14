@@ -145,7 +145,14 @@ class EphemerisService:
     # ---------- API publique ----------
 
     def start_object(self, key: str, obj_type: str, name: str, interval: float = 0.1):
+        previous = self._targets.get(key) or {}
+        target_changed = (
+            previous.get("obj_type") != obj_type
+            or previous.get("name") != name
+        )
         self._targets[key] = {'obj_type': obj_type, 'name': name, 'interval': float(interval)}
+        if target_changed:
+            self._pass_cache[key] = {'last_tt': 0.0, 'payload': self._empty_pass_info()}
         if self._workers.get(key, False):
             if self.logger:
                 self.logger.info(f"[Ephemeris] target updated key='{key}' type='{obj_type}' name='{name}'")
@@ -280,9 +287,20 @@ class EphemerisService:
                 payload = self._compute_payload(obj_type, name, t_now)
                 payload['name'] = name
 
-                # --- throttling du calcul de passes ---
                 cache = self._pass_cache.setdefault(key, {'last_tt': 0.0, 'payload': self._empty_pass_info()})
                 now_tt = float(t_now.tt)
+
+                # Emit the fast payload immediately so target info updates without
+                # waiting for the heavier pass/AOS-LOS computation.
+                fast_payload = dict(payload)
+                if float(cache.get('last_tt') or 0.0) > 0.0:
+                    fast_payload.update(cache.get('payload') or {})
+                try:
+                    self.pose_updated.emit(key, fast_payload)
+                except Exception:
+                    pass
+
+                # --- throttling du calcul de passes ---
                 if obj_type == "Artificial Satellite":
                     min_period_s = 1.0
                 elif obj_type == "Spacecraft":
@@ -293,13 +311,12 @@ class EphemerisService:
                 if (now_tt - float(cache['last_tt'])) * 86400.0 >= min_period_s:
                     cache['payload'] = self._compute_pass_info(obj_type, name, t_now)
                     cache['last_tt'] = now_tt
-
-                payload.update(cache['payload'])
-
-                try:
-                    self.pose_updated.emit(key, payload)
-                except Exception:
-                    pass
+                    detailed_payload = dict(payload)
+                    detailed_payload.update(cache['payload'])
+                    try:
+                        self.pose_updated.emit(key, detailed_payload)
+                    except Exception:
+                        pass
 
             except Exception as e:
                 if self.logger:
@@ -503,7 +520,7 @@ class EphemerisService:
             elev_thresh = 0.0
 
             if obj_type == "Artificial Satellite":
-                hours_fwd, step_s, lookback_s = 12.0, 10.0, 3600.0
+                hours_fwd, step_s, lookback_s = 24.0, 10.0, 3600.0
             elif obj_type == "Spacecraft":
                 hours_fwd, step_s, lookback_s = 24.0, 120.0, 6 * 3600.0
             elif obj_type == "Solar System":
@@ -1031,10 +1048,18 @@ class EphemerisService:
         return best_i
 
     def _build_time_array(self, ts, t_now, hours_fwd: float, step_s: float, lookback_s: float):
+        step_days = float(step_s) / 86400.0
         start_tt = float(t_now.tt) - float(lookback_s) / 86400.0
-        end_tt   = float(t_now.tt) + float(hours_fwd) / 24.0
-        n = int(max(2, round((end_tt - start_tt) * 86400.0 / float(step_s)))) + 1
-        tt = np.linspace(start_tt, end_tt, n)
+        end_tt = float(t_now.tt) + float(hours_fwd) / 24.0
+
+        # Snap the sampling grid to fixed step boundaries so pass maxima do not
+        # drift simply because "now" advanced by a few seconds between refreshes.
+        start_tt = math.floor(start_tt / step_days) * step_days
+        end_tt = math.ceil(end_tt / step_days) * step_days
+
+        tt = np.arange(start_tt, end_tt + (step_days * 0.5), step_days, dtype=float)
+        if tt.size < 2:
+            tt = np.array([start_tt, start_tt + step_days], dtype=float)
         return ts.tt_jd(tt)
 
     @staticmethod

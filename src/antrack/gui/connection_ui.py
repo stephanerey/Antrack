@@ -351,20 +351,19 @@ class ConnectionUiMixin:
     def set_data_labels_enabled(self, enabled: bool):
         """Enable or disable live data labels."""
         try:
-            for label in (
-                self.label_axisapp_version,
-                self.label_axisaz_version,
-                self.label_axisel_version,
-                self.label_antenna_az_deg,
-                self.label_antenna_el_deg,
-                self.label_antenna_az_rate,
-                self.label_antenna_el_rate,
-                self.label_antenna_az_setrate,
-                self.label_antenna_el_setrate,
-                self.label_antenna_endstop_az,
-                self.label_antenna_endstop_el,
+            for attr in (
+                "label_axisapp_version",
+                "label_axisaz_version",
+                "label_axisel_version",
+                "label_antenna_az_rate",
+                "label_antenna_el_rate",
+                "label_antenna_az_setrate",
+                "label_antenna_el_setrate",
+                "label_antenna_endstop_az",
+                "label_antenna_endstop_el",
             ):
-                label.setEnabled(enabled)
+                if hasattr(self, attr):
+                    getattr(self, attr).setEnabled(enabled)
         except Exception as exc:
             self.logger.error(f"Erreur set_data_labels_enabled: {exc}")
 
@@ -389,17 +388,34 @@ class ConnectionUiMixin:
     def ui_set_default_state(self):
         """Apply the default disconnected UI state."""
         try:
-            self.label_axisapp_version.setText("")
-            self.label_axisaz_version.setText("")
-            self.label_axisel_version.setText("")
-            self.label_antenna_az_deg.setText("---.--°")
-            self.label_antenna_el_deg.setText("---.--°")
-            self.label_antenna_az_rate.setText("0.00 °/s")
-            self.label_antenna_el_rate.setText("0.00 °/s")
-            self.label_antenna_az_setrate.setText("--")
-            self.label_antenna_el_setrate.setText("--")
-            self.label_antenna_endstop_az.setText("-")
-            self.label_antenna_endstop_el.setText("-")
+            if hasattr(self, "label_axisapp_version"):
+                self.label_axisapp_version.setText("")
+            if hasattr(self, "label_axisaz_version"):
+                self.label_axisaz_version.setText("")
+            if hasattr(self, "label_axisel_version"):
+                self.label_axisel_version.setText("")
+            # self.label_antenna_az_deg.setText("---.--°")
+            # self.label_antenna_el_deg.setText("---.--°")
+            if hasattr(self, "label_antenna_az_rate"):
+                self.label_antenna_az_rate.setText("0.00 °/s")
+            if hasattr(self, "label_antenna_el_rate"):
+                self.label_antenna_el_rate.setText("0.00 °/s")
+            if hasattr(self, "label_antenna_az_setrate"):
+                self.label_antenna_az_setrate.setText("--")
+            if hasattr(self, "label_antenna_el_setrate"):
+                self.label_antenna_el_setrate.setText("--")
+            if hasattr(self, "label_antenna_endstop_az"):
+                self.label_antenna_endstop_az.setText("-")
+            if hasattr(self, "label_antenna_endstop_el"):
+                self.label_antenna_endstop_el.setText("-")
+            if hasattr(self, "label_antenna_az_set_deg"):
+                self.label_antenna_az_set_deg.setText("---.--°")
+            if hasattr(self, "label_antenna_el_set_deg"):
+                self.label_antenna_el_set_deg.setText("---.--°")
+            if hasattr(self, "label_object_distance_km"):
+                self.label_object_distance_km.setText("-")
+            if hasattr(self, "label_tracked_object"):
+                self.label_tracked_object.setText("-")
 
             self.g1.set_setpoint(None)
             self.g1.set_angle(None)
@@ -448,9 +464,12 @@ class ConnectionUiMixin:
         try:
             if not isinstance(versions, dict):
                 return
-            self.label_axisapp_version.setText(str(versions.get("server_version") or ""))
-            self.label_axisaz_version.setText(str(versions.get("driver_version_az") or ""))
-            self.label_axisel_version.setText(str(versions.get("driver_version_el") or ""))
+            if hasattr(self, "label_axisapp_version"):
+                self.label_axisapp_version.setText(str(versions.get("server_version") or ""))
+            if hasattr(self, "label_axisaz_version"):
+                self.label_axisaz_version.setText(str(versions.get("driver_version_az") or ""))
+            if hasattr(self, "label_axisel_version"):
+                self.label_axisel_version.setText(str(versions.get("driver_version_el") or ""))
         except Exception as exc:
             self.logger.error(f"Erreur ui_display_versions: {exc}")
 
@@ -461,9 +480,9 @@ class ConnectionUiMixin:
                 return
             az = data.get("az")
             el = data.get("el")
-            self.label_antenna_az_deg.setText(f"{az:.2f}°" if isinstance(az, (int, float)) else "---.--°")
+            # self.label_antenna_az_deg.setText(f"{az:.2f}°" if isinstance(az, (int, float)) else "---.--°")
             self.g1.set_angle(az)
-            self.label_antenna_el_deg.setText(f"{el:.2f}°" if isinstance(el, (int, float)) else "---.--°")
+            # self.label_antenna_el_deg.setText(f"{el:.2f}°" if isinstance(el, (int, float)) else "---.--°")
             self.g2.set_angle(el)
 
             az_rate = data.get("az_rate")

@@ -1,20 +1,33 @@
 # gui/multi_track_card.py
-from PyQt5.QtCore import Qt, pyqtSignal, QEvent
-from PyQt5.QtWidgets import (
-    QWidget, QGroupBox, QFormLayout, QLabel, QHBoxLayout, QVBoxLayout,
-    QScrollArea, QFrame, QSizePolicy, QTabWidget
-)
 from datetime import datetime, timezone
 import time
 
+from PyQt5.QtCore import QEvent, Qt, pyqtSignal
+from PyQt5.QtWidgets import (
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from antrack.gui.event_countdown import format_next_event_countdown, next_event_tooltip
+
 PASTEL_GREEN = "#CCFFCC"
-PASTEL_RED   = "#FFCCCC"
-BORDER_CSS   = "border:1px solid #A0A0A0; border-radius:8px;"
-CARD_WIDTH   = 130  # largeur fixe des cartes
+PASTEL_RED = "#FFCCCC"
+BORDER_CSS = "border:1px solid #A0A0A0; border-radius:8px;"
+CARD_WIDTH = 135
+
 
 class MultiTrackCard(QGroupBox):
-    """Carte compacte (cliquable) affichant AOS/LOS/DUR/MAX EL/EL NOW pour un objet."""
-    clicked = pyqtSignal(str, str)  # obj_type, name
+    """Compact clickable card showing pass summary for one object."""
+
+    clicked = pyqtSignal(str, str)
 
     def __init__(self, ephem, key: str, obj_type: str, name: str, parent=None):
         super().__init__(name, parent)
@@ -23,7 +36,6 @@ class MultiTrackCard(QGroupBox):
         self.obj_type = obj_type
         self.target_name = name
 
-        # largeur fixe + size policy
         self.setMinimumWidth(CARD_WIDTH)
         self.setMaximumWidth(CARD_WIDTH)
         sp = self.sizePolicy()
@@ -39,37 +51,51 @@ class MultiTrackCard(QGroupBox):
         )
 
         form = QFormLayout()
-        form.setContentsMargins(8, 10, 8, 8)
-        form.setSpacing(6)
+        form.setContentsMargins(8, 8, 8, 6)
+        form.setHorizontalSpacing(6)
+        form.setVerticalSpacing(2)
 
-        self.lbl_aos = QLabel("—")
-        self.lbl_los = QLabel("—")
-        self.lbl_dur = QLabel("—")
-        self.lbl_maxel = QLabel("—")
-        self.lbl_now = QLabel("—")
-        for l in (self.lbl_aos, self.lbl_los, self.lbl_dur, self.lbl_maxel, self.lbl_now):
-            l.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_aos = QLabel("-")
+        self.lbl_los = QLabel("-")
+        self.lbl_next = QLabel("-")
+        self.lbl_dur = QLabel("-")
+        self.lbl_maxel = QLabel("-")
+        self.lbl_now = QLabel("-")
+        for label in (
+            self.lbl_aos,
+            self.lbl_los,
+            self.lbl_next,
+            self.lbl_dur,
+            self.lbl_maxel,
+            self.lbl_now,
+        ):
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         form.addRow("AOS:", self.lbl_aos)
         form.addRow("LOS:", self.lbl_los)
+        form.addRow("NEXT:", self.lbl_next)
         form.addRow("DUR:", self.lbl_dur)
         form.addRow("MAX EL:", self.lbl_maxel)
         form.addRow("EL NOW:", self.lbl_now)
         self.setLayout(form)
 
-        # Rendre toute la carte cliquable, labels inclus (sans casser le drag pour sélectionner du texte)
         self._press_ts = None
         self._press_pos = None
-        for w in (self.lbl_aos, self.lbl_los, self.lbl_dur, self.lbl_maxel, self.lbl_now):
-            w.installEventFilter(self)
+        for label in (
+            self.lbl_aos,
+            self.lbl_los,
+            self.lbl_next,
+            self.lbl_dur,
+            self.lbl_maxel,
+            self.lbl_now,
+        ):
+            label.installEventFilter(self)
 
-        # branchements
         self.ephem.pose_updated.connect(self._on_pose_updated)
         self.ephem.start_object(self.key, self.obj_type, self.target_name, interval=0.5)
 
-    # ---- formatage compact des heures AOS/LOS ----
-    def _compact_time(self, utc_str: str) -> str:
-        """Convertit 'YYYY-MM-DD HH:MM:SS' (UTC) en 'HH:MM' ou '+1j HH:MM' pour gagner de la place."""
+    def _compact_time(self, utc_str: str) -> str | None:
+        """Convert full UTC time to a compact card display."""
         if not utc_str:
             return None
         try:
@@ -80,14 +106,12 @@ class MultiTrackCard(QGroupBox):
             if d_days == 0:
                 return hhmm
             if -2 <= d_days <= 2:
-                sign = "+" if d_days > 0 else "−"
+                sign = "+" if d_days > 0 else "-"
                 return f"{sign}{abs(d_days)}j {hhmm}"
-            # plus éloigné → mois-jour HH:MM (toujours étroit)
             return dt.strftime("%m-%d %H:%M")
         except Exception:
-            return utc_str  # fallback
+            return utc_str
 
-    # Event filter : clic court sur un label -> clicked
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
             self._press_ts = time.monotonic()
@@ -107,18 +131,19 @@ class MultiTrackCard(QGroupBox):
         aos_full = payload.get("aos_utc")
         los_full = payload.get("los_utc")
 
-        self.lbl_aos.setText(self._compact_time(aos_full) or "—")
-        self.lbl_los.setText(self._compact_time(los_full) or "—")
+        self.lbl_aos.setText(self._compact_time(aos_full) or "-")
+        self.lbl_los.setText(self._compact_time(los_full) or "-")
+        self.lbl_aos.setToolTip(aos_full or "-")
+        self.lbl_los.setToolTip(los_full or "-")
 
-        # tooltips avec l'heure complète UTC
-        self.lbl_aos.setToolTip(aos_full or "—")
-        self.lbl_los.setToolTip(los_full or "—")
+        self.lbl_next.setText(format_next_event_countdown(payload))
+        self.lbl_next.setToolTip(next_event_tooltip(payload))
 
-        self.lbl_dur.setText(payload.get("dur_str") or "—")
+        self.lbl_dur.setText(payload.get("dur_str") or "-")
         max_el = payload.get("max_el_deg")
-        self.lbl_maxel.setText(f"{max_el:.1f}°" if isinstance(max_el, (int, float)) else "—")
+        self.lbl_maxel.setText(f"{max_el:.1f}°" if isinstance(max_el, (int, float)) else "-")
         el_now = payload.get("el_now_deg", payload.get("el"))
-        self.lbl_now.setText(f"{el_now:.1f}°" if isinstance(el_now, (int, float)) else "—")
+        self.lbl_now.setText(f"{el_now:.1f}°" if isinstance(el_now, (int, float)) else "-")
 
         vis = payload.get("visible_now")
         self._set_bg(PASTEL_GREEN if vis is True else PASTEL_RED)
@@ -130,23 +155,22 @@ class MultiTrackCard(QGroupBox):
             "QLabel { background: transparent; }"
         )
 
-    # clic sur la zone “vide” de la carte
-    def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
             self.clicked.emit(self.obj_type, self.target_name)
-        super().mousePressEvent(e)
+        super().mousePressEvent(event)
 
-    def closeEvent(self, e):
-        # coupe le worker de cette carte si le widget est détruit
+    def closeEvent(self, event):
         try:
             self.ephem.stop_object(self.key)
         except Exception:
             pass
-        super().closeEvent(e)
+        super().closeEvent(event)
 
 
 class MultiTrackStrip(QWidget):
-    """Une barre horizontale scrollable de cartes."""
+    """Horizontal scrollable strip of cards."""
+
     def __init__(self, ephem, on_pick, parent=None):
         super().__init__(parent)
         self.ephem = ephem
@@ -161,6 +185,8 @@ class MultiTrackStrip(QWidget):
 
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(content)
 
@@ -180,40 +206,37 @@ class MultiTrackStrip(QWidget):
         return card
 
     def stop_all(self):
-        for k in list(self.cards):
+        for key in list(self.cards):
             try:
-                self.ephem.stop_object(k)
+                self.ephem.stop_object(key)
             except Exception:
                 pass
 
 
 class MultiTrackTabsManager:
-    """
-    Gère plusieurs MultiTrackStrip — une par onglet d’un QTabWidget — et fournit
-    add_target(tab=..., obj_type=..., name=...) pour ajouter une carte dans l’onglet voulu.
-    """
+    """Manage one MultiTrackStrip per page in a QTabWidget."""
+
     def __init__(self, ephem, on_pick, tab_widget: QTabWidget):
         self.ephem = ephem
         self.on_pick = on_pick
         self.tab_widget = tab_widget
-        self._strips_by_page = {}  # QWidget page -> MultiTrackStrip
+        self._strips_by_page = {}
 
-    def _page_for(self, tab) -> QWidget:
-        """tab: titre d’onglet (str) ou QWidget page."""
+    def _page_for(self, tab) -> QWidget | None:
         if isinstance(tab, QWidget):
             return tab
         if isinstance(tab, str):
             text = tab.strip().lower()
-            for i in range(self.tab_widget.count()):
-                if self.tab_widget.tabText(i).strip().lower() == text:
-                    return self.tab_widget.widget(i)
+            for index in range(self.tab_widget.count()):
+                if self.tab_widget.tabText(index).strip().lower() == text:
+                    return self.tab_widget.widget(index)
         return None
 
-    def _ensure_strip(self, page: QWidget) -> 'MultiTrackStrip':
+    def _ensure_strip(self, page: QWidget) -> MultiTrackStrip:
         strip = self._strips_by_page.get(page)
         if strip is not None:
             return strip
-        # crée la strip et l’insère dans la page (créé un layout si absent)
+
         strip = MultiTrackStrip(self.ephem, self.on_pick, parent=page)
         layout = page.layout()
         if layout is None:
@@ -225,7 +248,6 @@ class MultiTrackTabsManager:
         return strip
 
     def add_target(self, tab, obj_type: str, name: str, key: str = None):
-        """Ajoute une carte dans l’onglet `tab` (titre ou QWidget), pour obj_type/name."""
         page = self._page_for(tab)
         if page is None:
             raise ValueError(f"Onglet introuvable: {tab!r}")
@@ -233,5 +255,5 @@ class MultiTrackTabsManager:
         return strip.add_target(obj_type=obj_type, name=name, key=key)
 
     def stop_all(self):
-        for _, strip in list(self._strips_by_page.items()):
+        for strip in list(self._strips_by_page.values()):
             strip.stop_all()

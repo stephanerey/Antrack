@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QComboBox, QGridLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout
+from PyQt5.QtGui import QFont
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtWidgets import (
+    QComboBox,
+    QGridLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from antrack.gui.ui_styles import (
     green_label_color,
@@ -12,12 +22,251 @@ from antrack.gui.ui_styles import (
     red_label_color,
     standard_label_color,
 )
+from antrack.gui.event_countdown import format_next_event_countdown, next_event_tooltip
 from antrack.gui.widgets.multi_track_card import MultiTrackStrip
 from antrack.tracking.tracking import Tracker
 
 
 class TrackingUiMixin:
     """Keep tracking selection and tracking-state UI logic out of main_ui.py."""
+
+    def _antenna_settings(self) -> dict:
+        if not isinstance(self.settings, dict):
+            return {}
+        return self.settings.get("ANTENNA", self.settings.get("antenna", {})) or {}
+
+    def _stop_tracking_loop_from_ui(self):
+        """Stop the motor tracking loop and restore the idle UI state."""
+        self._auto_restart_tracking = False
+        try:
+            self.logger.info("[UI] STOP tracking")
+        except Exception:
+            pass
+        try:
+            if getattr(self, "tracker", None) is not None:
+                self.tracker.stop()
+        except Exception:
+            pass
+        self.stop_tracking_ui_timer()
+        self._ui_show_tracking_stopped()
+        try:
+            self.pushButton_antenna_track.setText("Track")
+        except Exception:
+            pass
+
+    def _apply_manual_setpoints(self, az_set: float, el_set: float):
+        """Load explicit AZ/EL setpoints into the shared tracking state and UI."""
+        self.tracked_object.az_set = float(az_set)
+        self.tracked_object.el_set = float(el_set)
+        self.tracked_object.az_error = 0.0
+        self.tracked_object.el_error = 0.0
+
+        if hasattr(self, "label_antenna_az_set_deg"):
+            self.label_antenna_az_set_deg.setText(f"{float(az_set):.2f}°")
+        if hasattr(self, "label_antenna_el_set_deg"):
+            self.label_antenna_el_set_deg.setText(f"{float(el_set):.2f}°")
+
+        try:
+            self.g1.set_setpoint(float(az_set))
+            self.g2.set_setpoint(float(el_set))
+        except Exception:
+            pass
+
+    def _clear_selected_target_details(self):
+        """Clear non-pointing fields when the target context is no longer an ephemeris object."""
+        try:
+            text_fields = (
+                "label_object_distance_km",
+                "target_ra_label",
+                "target_dec_label",
+                "target_dist_au_label",
+                "target_el_now_label",
+                "target_next_event_label",
+                "target_dur_label",
+                "target_aos_label",
+                "target_los_label",
+                "target_max_el_label",
+                "target_max_el_time_label",
+            )
+            for attr in text_fields:
+                if hasattr(self, attr):
+                    widget = getattr(self, attr)
+                    widget.setText("-")
+                    widget.setStyleSheet("")
+                    try:
+                        widget.setToolTip("-")
+                    except Exception:
+                        pass
+            if hasattr(self, "target_visible_now_label"):
+                self.target_visible_now_label.setText("-")
+                self.target_visible_now_label.setStyleSheet("")
+                try:
+                    self.target_visible_now_label.setToolTip("-")
+                except Exception:
+                    pass
+        except Exception as exc:
+            self.logger.error(f"_clear_selected_target_details error: {exc}")
+
+    def _start_park_motion(self, attempts_left: int = 20):
+        """Start the standard tracking loop toward the already-loaded park setpoints."""
+        try:
+            if getattr(self, "tracker", None) and self.tracker.is_running():
+                if attempts_left > 0:
+                    QTimer.singleShot(100, lambda: self._start_park_motion(attempts_left - 1))
+                else:
+                    self.logger.warning("[Park] Tracker still running; park restart abandoned")
+                return
+
+            if hasattr(self, "pushButton_antenna_track"):
+                self.pushButton_antenna_track.setEnabled(True)
+                self.pushButton_antenna_track.setText("Track")
+            self.on_track_button_clicked()
+        except Exception as exc:
+            self.logger.error(f"_start_park_motion error: {exc}")
+
+        try:
+            self._update_tracking_ui()
+        except Exception:
+            pass
+
+    def _apply_selected_target_header_style(self):
+        """Keep the selected-target header centered and visually prominent."""
+        if not hasattr(self, "label_tracked_object"):
+            return
+        self.label_tracked_object.setAlignment(Qt.AlignCenter)
+        font = self.label_tracked_object.font() or QFont()
+        base_size = getattr(self, "_selected_target_header_base_point_size", None)
+        if not isinstance(base_size, int) or base_size <= 0:
+            base_size = font.pointSize()
+            if base_size <= 0:
+                base_size = 9
+            self._selected_target_header_base_point_size = base_size
+        font.setBold(True)
+        font.setPointSize(base_size + 2)
+        self.label_tracked_object.setFont(font)
+        self.label_tracked_object.setStyleSheet(orange_label_color)
+
+    def _select_target_from_card(self, obj_type: str, name: str):
+        """Map a quick-pick card click back to the target-selection UI."""
+        if not hasattr(self, "object_dropdown"):
+            return
+
+        if (self.object_dropdown.currentText() or "") != obj_type:
+            self.object_dropdown.setCurrentText(obj_type)
+
+        if obj_type == "Artificial Satellite":
+            if hasattr(self, "tle_query_edit"):
+                self.tle_query_edit.setText(name)
+            if hasattr(self, "apply_target_btn"):
+                self.apply_target_btn.setEnabled(bool(name))
+            return
+
+        if obj_type == "Radio Source":
+            if hasattr(self, "rs_query_edit"):
+                self.rs_query_edit.setText(name)
+            if hasattr(self, "apply_target_btn"):
+                self.apply_target_btn.setEnabled(bool(name))
+            return
+
+        if hasattr(self, "specific_object_dropdown"):
+            index = -1
+            for current in range(self.specific_object_dropdown.count()):
+                if self.specific_object_dropdown.itemText(current).lower() == name.lower():
+                    index = current
+                    break
+            if index >= 0:
+                self.specific_object_dropdown.setCurrentIndex(index)
+            else:
+                self.specific_object_dropdown.addItem(name)
+                self.specific_object_dropdown.setCurrentText(name)
+
+    def _prime_selected_target_display(self, name: str):
+        """Show the newly selected target immediately while fresh ephemeris is loading."""
+        try:
+            if hasattr(self, "label_tracked_object"):
+                self.label_tracked_object.setText(str(name or "-"))
+                self._apply_selected_target_header_style()
+
+            self._clear_selected_target_details()
+
+            running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
+            if not running:
+                for attr in ("label_antenna_az_set_deg", "label_antenna_el_set_deg"):
+                    if hasattr(self, attr):
+                        widget = getattr(self, attr)
+                        widget.setText("-")
+                        widget.setStyleSheet("")
+        except Exception as exc:
+            self.logger.error(f"_prime_selected_target_display error: {exc}")
+
+    def _setup_selected_target_groupbox(self) -> bool:
+        """Create the live target-info labels inside groupBox_SelectedTarget when available."""
+        group = getattr(self, "groupBox_SelectedTarget", None)
+        if group is None:
+            return False
+        if getattr(self, "_selected_target_groupbox_ready", False):
+            return True
+
+        self._selected_target_groupbox_ready = True
+
+        if not hasattr(self, "label_tracked_object"):
+            self.label_tracked_object = QLabel("-", group)
+            self.label_tracked_object.setGeometry(10, 30, 121, 21)
+        self._apply_selected_target_header_style()
+
+        for attr in (
+            "label_LocalTime_10",
+            "label_LocalTime_11",
+            "label_LocalTime_19",
+            "label_antenna_az_set_deg",
+            "label_antenna_el_set_deg",
+            "label_object_distance_km",
+        ):
+            if hasattr(self, attr):
+                try:
+                    getattr(self, attr).hide()
+                except Exception:
+                    pass
+
+        panel = QWidget(group)
+        panel.setObjectName("selected_target_info_panel")
+        panel.setGeometry(10, 60, 231, 275)
+
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(3)
+        layout.setColumnStretch(1, 1)
+
+        def add_row(row: int, title: str, attr_name: str):
+            title_label = QLabel(title, panel)
+            value_label = QLabel("-", panel)
+            title_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            title_label.setMinimumWidth(82)
+            value_label.setStyleSheet("")
+            setattr(self, attr_name, value_label)
+            layout.addWidget(title_label, row, 0)
+            layout.addWidget(value_label, row, 1)
+
+        add_row(0, "Azimuth", "label_antenna_az_set_deg")
+        add_row(1, "Elevation", "label_antenna_el_set_deg")
+        add_row(2, "Distance (km)", "label_object_distance_km")
+        add_row(3, "RA", "target_ra_label")
+        add_row(4, "DEC", "target_dec_label")
+        add_row(5, "Distance (AU)", "target_dist_au_label")
+        add_row(6, "Visible", "target_visible_now_label")
+        add_row(7, "EL Now", "target_el_now_label")
+        add_row(8, "Next Event", "target_next_event_label")
+        add_row(9, "Duration", "target_dur_label")
+        add_row(10, "AOS", "target_aos_label")
+        add_row(11, "LOS", "target_los_label")
+        add_row(12, "Max EL", "target_max_el_label")
+        add_row(13, "Max EL @", "target_max_el_time_label")
+
+        self.target_max_el_time_label.setWordWrap(True)
+        self._selected_target_info_panel = panel
+        return True
 
     def has_setpoints(self) -> bool:
         az = getattr(self.tracked_object, "az_set", None)
@@ -101,32 +350,34 @@ class TrackingUiMixin:
             self.apply_target_btn.clicked.connect(self.on_apply_target_clicked)
             layout.addWidget(self.apply_target_btn)
 
-            grid = QGridLayout()
-            row = 0
+            if not self._setup_selected_target_groupbox():
+                grid = QGridLayout()
+                row = 0
 
-            def add_row(title: str, attr_name: str):
-                nonlocal row
-                grid.addWidget(QLabel(title), row, 0)
-                value = QLabel("-")
-                setattr(self, attr_name, value)
-                grid.addWidget(value, row, 1)
-                row += 1
+                def add_row(title: str, attr_name: str):
+                    nonlocal row
+                    grid.addWidget(QLabel(title), row, 0)
+                    value = QLabel("-")
+                    setattr(self, attr_name, value)
+                    grid.addWidget(value, row, 1)
+                    row += 1
 
-            add_row("Azimuth:", "azimuth_label")
-            add_row("Elevation:", "elevation_label")
-            add_row("Distance (km):", "distance_label")
-            add_row("RA (hms):", "target_ra_label")
-            add_row("DEC (dms):", "target_dec_label")
-            add_row("Distance (AU):", "target_dist_au_label")
-            add_row("Visible now:", "target_visible_now_label")
-            add_row("AOS (UTC):", "target_aos_label")
-            add_row("LOS (UTC):", "target_los_label")
-            add_row("Duration:", "target_dur_label")
-            add_row("Max EL:", "target_max_el_label")
-            add_row("Max EL @ (UTC):", "target_max_el_time_label")
-            add_row("EL NOW:", "target_el_now_label")
+                add_row("Azimuth:", "azimuth_label")
+                add_row("Elevation:", "elevation_label")
+                add_row("Distance (km):", "distance_label")
+                add_row("RA (hms):", "target_ra_label")
+                add_row("DEC (dms):", "target_dec_label")
+                add_row("Distance (AU):", "target_dist_au_label")
+                add_row("Visible now:", "target_visible_now_label")
+                add_row("Next event:", "target_next_event_label")
+                add_row("AOS (UTC):", "target_aos_label")
+                add_row("LOS (UTC):", "target_los_label")
+                add_row("Duration:", "target_dur_label")
+                add_row("Max EL:", "target_max_el_label")
+                add_row("Max EL @ (UTC):", "target_max_el_time_label")
+                add_row("EL NOW:", "target_el_now_label")
 
-            layout.addLayout(grid)
+                layout.addLayout(grid)
 
             try:
                 self.object_dropdown.setCurrentText("Solar System")
@@ -337,6 +588,8 @@ class TrackingUiMixin:
         try:
             if key != "primary":
                 return
+            if getattr(self, "_manual_setpoint_mode", False):
+                return
 
             az = payload.get("az")
             el = payload.get("el")
@@ -382,6 +635,7 @@ class TrackingUiMixin:
     def start_object_selection_tracking(self):
         """Start the periodic position computation for the selected object."""
         try:
+            self._manual_setpoint_mode = False
             selected_type = self.object_dropdown.currentText() if hasattr(self, "object_dropdown") else "Select Type"
             selected_object = (
                 self.specific_object_dropdown.currentText() if hasattr(self, "specific_object_dropdown") else ""
@@ -428,7 +682,7 @@ class TrackingUiMixin:
 
             if hasattr(self, "label_tracked_object"):
                 self.label_tracked_object.setText(str(name))
-                self.label_tracked_object.setStyleSheet(orange_label_color)
+                self._apply_selected_target_header_style()
 
             if hasattr(self, "azimuth_label"):
                 self.azimuth_label.setText(f"Azimuth: {az:.2f}°" if isinstance(az, (int, float)) else "Azimuth: N/A")
@@ -440,6 +694,11 @@ class TrackingUiMixin:
                 self.distance_label.setText(
                     f"Distance: {dist_km:.0f} km" if isinstance(dist_km, (int, float)) else "Distance: N/A"
                 )
+            if hasattr(self, "label_object_distance_km"):
+                self.label_object_distance_km.setText(
+                    f"{dist_km:.0f}" if isinstance(dist_km, (int, float)) else "-"
+                )
+                self.label_object_distance_km.setStyleSheet("")
 
             running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
             if not running:
@@ -464,14 +723,14 @@ class TrackingUiMixin:
             if isinstance(ra_hms, tuple) and hasattr(self, "label_antenna_ra_set"):
                 hour, minute, second = ra_hms
                 self.label_antenna_ra_set.setText(f"{int(hour)}h {int(minute)}m {second:04.1f}s")
-                self.label_antenna_ra_set.setStyleSheet(standard_label_color)
+                self.label_antenna_ra_set.setStyleSheet("")
             if isinstance(dec_dms, tuple) and hasattr(self, "label_antenna_dec_set"):
                 degree, minute, second = dec_dms
                 self.label_antenna_dec_set.setText(f"{int(degree)}° {int(minute)}' {second:04.1f}\"")
-                self.label_antenna_dec_set.setStyleSheet(standard_label_color)
+                self.label_antenna_dec_set.setStyleSheet("")
             if isinstance(dist_au, (int, float)) and hasattr(self, "label_object_distance_au"):
                 self.label_object_distance_au.setText(f"{dist_au:.3f}")
-                self.label_object_distance_au.setStyleSheet(standard_label_color)
+                self.label_object_distance_au.setStyleSheet("")
 
             visible = payload.get("visible_now", None)
             if hasattr(self, "target_visible_now_label"):
@@ -483,7 +742,7 @@ class TrackingUiMixin:
                     self.target_visible_now_label.setStyleSheet(red_label_color)
                 else:
                     self.target_visible_now_label.setText("-")
-                    self.target_visible_now_label.setStyleSheet(standard_label_color)
+                    self.target_visible_now_label.setStyleSheet("")
 
             if hasattr(self, "target_aos_label"):
                 self.target_aos_label.setText(payload.get("aos_utc") or "-")
@@ -493,6 +752,9 @@ class TrackingUiMixin:
             if hasattr(self, "target_dur_label"):
                 duration = payload.get("dur_str")
                 self.target_dur_label.setText(duration if duration else "-")
+            if hasattr(self, "target_next_event_label"):
+                self.target_next_event_label.setText(format_next_event_countdown(payload))
+                self.target_next_event_label.setToolTip(next_event_tooltip(payload))
 
             if hasattr(self, "target_max_el_label"):
                 max_el = payload.get("max_el_deg")
@@ -740,6 +1002,7 @@ class TrackingUiMixin:
 
     def on_apply_target_clicked(self):
         try:
+            self._manual_setpoint_mode = False
             selected_type = (self.object_dropdown.currentText() or "").strip()
             if selected_type == "Artificial Satellite":
                 selected_object = self._current_sat_query()
@@ -765,6 +1028,7 @@ class TrackingUiMixin:
                     QMessageBox.information(self, "Target Object", "Veuillez selectionner un objet.")
                     return
 
+            self._prime_selected_target_display(selected_object)
             self.ephem.start_object("primary", selected_type, selected_object, interval=0.1)
             self.status_bar.showMessage(f"Consignes demarrees pour: {selected_type} / {selected_object}", 3000)
             try:
@@ -845,21 +1109,76 @@ class TrackingUiMixin:
                 self._start_tracker_when_ready(attempts_left=20)
 
             else:
-                self._auto_restart_tracking = False
-                try:
-                    self.logger.info("[UI] STOP tracking (user action)")
-                except Exception:
-                    pass
-                self.tracker.stop()
-                self.stop_tracking_ui_timer()
-                self._ui_show_tracking_stopped()
-                try:
-                    self.pushButton_antenna_track.setText("Track")
-                except Exception:
-                    pass
+                self._stop_tracking_loop_from_ui()
 
         except Exception as exc:
             self.logger.error(f"Erreur on_track_button_clicked: {exc}")
+
+    def on_park_button_clicked(self):
+        """Toggle out of target tracking and drive the antenna toward park setpoints."""
+        try:
+            if not self.has_connection():
+                QMessageBox.warning(self, "Park", "Veuillez d'abord vous connecter au serveur Axis.")
+                return
+
+            self._manual_setpoint_mode = True
+
+            if getattr(self, "tracker", None) and self.tracker.is_running():
+                self._stop_tracking_loop_from_ui()
+
+            try:
+                self.ephem.stop_object("primary")
+            except Exception:
+                pass
+
+            antenna_settings = self._antenna_settings()
+            park_az = antenna_settings.get("PARK_AZ", antenna_settings.get("park_az"))
+            park_el = antenna_settings.get("PARK_EL", antenna_settings.get("park_el"))
+            if park_az is None or park_el is None:
+                QMessageBox.warning(
+                    self,
+                    "Park",
+                    "Parametres PARK_AZ / PARK_EL manquants dans la section ANTENNA.",
+                )
+                return
+
+            try:
+                park_az = float(park_az)
+                park_el = float(park_el)
+            except Exception:
+                QMessageBox.warning(
+                    self,
+                    "Park",
+                    "Parametres PARK_AZ / PARK_EL invalides dans la section ANTENNA.",
+                )
+                return
+
+            self._apply_manual_setpoints(park_az, park_el)
+            if hasattr(self, "pushButton_antenna_track"):
+                self.pushButton_antenna_track.setEnabled(True)
+                self.pushButton_antenna_track.setText("Track")
+
+            try:
+                if hasattr(self, "label_tracked_object"):
+                    self.label_tracked_object.setText("Park")
+                    self._apply_selected_target_header_style()
+            except Exception:
+                pass
+
+            self._clear_selected_target_details()
+            QTimer.singleShot(100, lambda: self._start_park_motion(attempts_left=20))
+
+            try:
+                self.status_bar.showMessage(
+                    f"Park en cours: AZ={park_az:.2f}° EL={park_el:.2f}°",
+                    5000,
+                )
+            except Exception:
+                pass
+
+        except Exception as exc:
+            self.logger.error(f"Erreur on_park_button_clicked: {exc}")
+            QMessageBox.warning(self, "Park", f"Impossible de charger le park:\n{exc}")
 
     def setup_multi_tracking_tab_in_tabwidget3(self):
         """
@@ -897,22 +1216,7 @@ class TrackingUiMixin:
 
     def _on_multitrack_pick(self, obj_type: str, name: str):
         try:
-            if hasattr(self, "object_dropdown"):
-                self.object_dropdown.setCurrentText(obj_type)
-                self.update_secondary_dropdown()
-
-            if hasattr(self, "specific_object_dropdown"):
-                index = -1
-                for current in range(self.specific_object_dropdown.count()):
-                    if self.specific_object_dropdown.itemText(current).lower() == name.lower():
-                        index = current
-                        break
-                if index >= 0:
-                    self.specific_object_dropdown.setCurrentIndex(index)
-                else:
-                    self.specific_object_dropdown.addItem(name)
-                    self.specific_object_dropdown.setCurrentText(name)
-
+            self._select_target_from_card(obj_type, name)
             self.on_apply_target_clicked()
             self.status_bar.showMessage(f"Objet selectionne: {obj_type} / {name}", 3000)
         except Exception as exc:
@@ -920,12 +1224,7 @@ class TrackingUiMixin:
 
     def _on_multi_pick(self, obj_type: str, name: str):
         try:
-            self.object_dropdown.setCurrentText(obj_type)
-            self.update_secondary_dropdown()
-            for index in range(self.specific_object_dropdown.count()):
-                if self.specific_object_dropdown.itemText(index).lower() == name.lower():
-                    self.specific_object_dropdown.setCurrentIndex(index)
-                    break
+            self._select_target_from_card(obj_type, name)
             self.on_apply_target_clicked()
         except Exception as exc:
             self.logger.error(f"_on_multi_pick error: {exc}")
