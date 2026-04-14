@@ -1,8 +1,8 @@
 # Migration Notes
 
-> **PRD Policy:** **PROJECT (editable)** — Fill and update this file for the current project.
+> **PRD Policy:** **PROJECT (editable)** - Fill and update this file for the current project.
 
-**Last updated:** 2026-04-10
+**Last updated:** 2026-04-14
 
 Track breaking changes and how to migrate.
 
@@ -35,3 +35,22 @@ Track breaking changes and how to migrate.
   - Removal condition: replace the powermeter backend/widgets during the future SDR phase.
 - Shutdown handling was tightened in `MainUi.closeEvent` to stop polling/ephemeris work before GUI teardown.
 - No `.ui` redesign was required for this phase.
+
+## 2026-04-14 integration notes
+- `src/antrack/tracking/positioning.py` was added to separate fixed-position moves from continuous target tracking.
+  - Current users of the controller: `Park` and manual `Goto`.
+  - Removal condition: none planned; this is now the intended path for future presets and fixed-point goto flows.
+- `src/antrack/tracking/motion_constraints.py` was added to centralize forbidden-range parsing and path selection.
+  - `Tracker` and `PositioningController` now both consume the same constraint helpers.
+  - `AZ_FORBIDDEN_RANGES` and `EL_FORBIDDEN_RANGES` are now configured from `settings.txt` and shown on the gauges.
+- Time-sensitive event fields now follow the `groupBox_Time` mode:
+  - multitrack cards
+  - selected-target `AOS`
+  - selected-target `LOS`
+  - selected-target `Max EL @`
+  - `Sidereal` mode keeps event timestamps displayed in local civil time.
+- Manual antenna control is now wired from the existing UI without redesigning the `.ui` file:
+  - `pushButton_antenna_manual` toggles `Auto` and `Manual`
+  - jog buttons drive the antenna only while pressed
+  - manual goto reuses the fixed-position controller
+- `main_3.ui` is now the active main-window layout loaded by `MainUi`.

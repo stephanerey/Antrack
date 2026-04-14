@@ -18,6 +18,7 @@ from antrack.gui.ephemeris_qt import EphemerisQtAdapter
 from antrack.gui.widgets.angle_gauge_widget import AngleGauge
 from antrack.gui.widgets.multi_track_card import MultiTrackTabsManager
 from antrack.tracking.ephemeris_service import EphemerisService, load_planets
+from antrack.tracking.motion_constraints import parse_forbidden_ranges
 from antrack.tracking.observer import Observer
 from antrack.tracking.tracking import TrackedObject
 from antrack.utils.paths import get_tle_dir
@@ -56,9 +57,21 @@ class MainUi(
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Pret")
 
+        antenna_settings = {}
+        if isinstance(self.settings, dict):
+            antenna_settings = self.settings.get("ANTENNA", self.settings.get("antenna", {})) or {}
+        az_forbidden = parse_forbidden_ranges(
+            antenna_settings.get("az_forbidden_ranges"),
+            default=[(45.0, 90.0), (270.0, 300.0)],
+        )
+        el_forbidden = parse_forbidden_ranges(
+            antenna_settings.get("el_forbidden_ranges"),
+            default=[(-10.0, 0.0), (95.0, 100.0)],
+        )
+
         self.g1 = AngleGauge(
             span_angle=360,
-            forbidden_ranges=[(45, 90), (270, 300)],
+            forbidden_ranges=az_forbidden,
             decimals=2,
             origin_screen_deg=90,
             clockwise=True,
@@ -77,7 +90,7 @@ class MainUi(
             span_angle=110,
             minor_step_deg=10,
             major_step_deg=30,
-            forbidden_ranges=[(-10, 0), (95, 100)],
+            forbidden_ranges=el_forbidden,
             decimals=2,
             origin_screen_deg=0,
             clockwise=False,
@@ -107,6 +120,7 @@ class MainUi(
 
         self.tracked_object = TrackedObject()
         self.tracker = None
+        self.positioner = None
         self.telemetry_ready = False
         self._auto_restart_tracking = False
         self._last_tel_az = None
@@ -114,6 +128,7 @@ class MainUi(
 
         try:
             self.setup_tracker_tab()
+            self.setup_manual_antenna_controls()
             self._setup_calibration_tab()
         except Exception as exc:
             self.logger.error(f"setup_tracker_tab ou calibration a echoue: {exc}")
@@ -179,6 +194,8 @@ class MainUi(
             ephem=self.ephem,
             on_pick=self._on_multi_pick,
             tab_widget=self.tabWidget_3,
+            time_formatter=self.format_event_time_for_ui,
+            time_tooltip_formatter=self.format_event_tooltip_for_ui,
         )
 
         for body in ["Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]:

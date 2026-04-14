@@ -10,6 +10,11 @@ import logging
 logging.getLogger("Tracker").setLevel(logging.WARNING)
 
 from antrack.core.axis.axis_client import AxisStatus
+from antrack.tracking.motion_constraints import (
+    constrained_azimuth_error,
+    constrained_elevation_error,
+    parse_forbidden_ranges,
+)
 
 
 # --- Utilitaires simples ---
@@ -167,6 +172,14 @@ class Tracker:
             el_speed_far = float(ant.get('el_speed_far_tracking', 500))
             el_speed_approach = float(ant.get('el_speed_approach_tracking', 100))
             el_speed_close = float(ant.get('el_speed_close_tracking', 20))
+            az_forbidden = parse_forbidden_ranges(
+                ant.get("az_forbidden_ranges"),
+                default=[(45.0, 90.0), (270.0, 300.0)],
+            )
+            el_forbidden = parse_forbidden_ranges(
+                ant.get("el_forbidden_ranges"),
+                default=[(-10.0, 0.0), (95.0, 100.0)],
+            )
 
             interval = float(interval or min_move_duration)
             log = logging.getLogger("Tracker")
@@ -223,9 +236,14 @@ class Tracker:
                         tel_state_prev = True
                     none_tel_streak = 0
 
+                az_route_error = constrained_azimuth_error(az_cur, self.tracked_object.az_set, az_forbidden)
+                el_route_error = constrained_elevation_error(el_cur, self.tracked_object.el_set, el_forbidden)
+                az_blocked = az_route_error is None
+                el_blocked = el_route_error is None
+
                 # Calcul des erreurs
-                self.tracked_object.az_error = (az_cur - self.tracked_object.az_set) if self.tracked_object.az_set is not None else 0.0
-                self.tracked_object.el_error = (el_cur - self.tracked_object.el_set) if self.tracked_object.el_set is not None else 0.0
+                self.tracked_object.az_error = float(az_route_error or 0.0)
+                self.tracked_object.el_error = float(el_route_error or 0.0)
 
                 # RA/DEC (si disponibles via un état antenne/astro ailleurs)
                 try:
@@ -241,9 +259,9 @@ class Tracker:
                 except Exception:
                     pass
 
-                # Seuils de correction
-                need_az = abs(self.tracked_object.az_error) > az_err_th
-                need_el = abs(self.tracked_object.el_error) > el_err_th
+                # Seuils de correction + blocage par zones interdites
+                need_az = (not az_blocked) and abs(self.tracked_object.az_error) > az_err_th
+                need_el = (not el_blocked) and abs(self.tracked_object.el_error) > el_err_th
 
                 # Préparer les décisions pour le log diagnostic (1/s)
                 desired_az = "STOP"
@@ -260,7 +278,12 @@ class Tracker:
                     pass
 
                 # Ajuster vitesses + mouvements via le core (Axis) en utilisant l'event loop asyncio
-                if need_az or need_el:
+                if az_blocked or el_blocked:
+                    try:
+                        self._stop_motors()
+                    except Exception:
+                        pass
+                elif need_az or need_el:
                     # AZ speed
                     try:
                         if abs(self.tracked_object.az_error) > approach_deg:

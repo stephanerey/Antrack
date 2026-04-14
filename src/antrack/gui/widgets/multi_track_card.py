@@ -29,12 +29,14 @@ class MultiTrackCard(QGroupBox):
 
     clicked = pyqtSignal(str, str)
 
-    def __init__(self, ephem, key: str, obj_type: str, name: str, parent=None):
+    def __init__(self, ephem, key: str, obj_type: str, name: str, parent=None, time_formatter=None, time_tooltip_formatter=None):
         super().__init__(name, parent)
         self.ephem = ephem
         self.key = key
         self.obj_type = obj_type
         self.target_name = name
+        self._time_formatter = time_formatter
+        self._time_tooltip_formatter = time_tooltip_formatter
 
         self.setMinimumWidth(CARD_WIDTH)
         self.setMaximumWidth(CARD_WIDTH)
@@ -95,9 +97,13 @@ class MultiTrackCard(QGroupBox):
         self.ephem.start_object(self.key, self.obj_type, self.target_name, interval=0.5)
 
     def _compact_time(self, utc_str: str) -> str | None:
-        """Convert full UTC time to a compact card display."""
         if not utc_str:
             return None
+        if callable(self._time_formatter):
+            try:
+                return self._time_formatter(utc_str, compact=True)
+            except Exception:
+                pass
         try:
             dt = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             now = datetime.now(timezone.utc)
@@ -111,6 +117,16 @@ class MultiTrackCard(QGroupBox):
             return dt.strftime("%m-%d %H:%M")
         except Exception:
             return utc_str
+
+    def _tooltip_time(self, utc_str: str) -> str:
+        if not utc_str:
+            return "-"
+        if callable(self._time_tooltip_formatter):
+            try:
+                return self._time_tooltip_formatter(utc_str)
+            except Exception:
+                pass
+        return utc_str
 
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
@@ -133,8 +149,8 @@ class MultiTrackCard(QGroupBox):
 
         self.lbl_aos.setText(self._compact_time(aos_full) or "-")
         self.lbl_los.setText(self._compact_time(los_full) or "-")
-        self.lbl_aos.setToolTip(aos_full or "-")
-        self.lbl_los.setToolTip(los_full or "-")
+        self.lbl_aos.setToolTip(self._tooltip_time(aos_full))
+        self.lbl_los.setToolTip(self._tooltip_time(los_full))
 
         self.lbl_next.setText(format_next_event_countdown(payload))
         self.lbl_next.setToolTip(next_event_tooltip(payload))
@@ -171,11 +187,13 @@ class MultiTrackCard(QGroupBox):
 class MultiTrackStrip(QWidget):
     """Horizontal scrollable strip of cards."""
 
-    def __init__(self, ephem, on_pick, parent=None):
+    def __init__(self, ephem, on_pick, parent=None, time_formatter=None, time_tooltip_formatter=None):
         super().__init__(parent)
         self.ephem = ephem
         self.on_pick = on_pick
         self.cards = {}
+        self._time_formatter = time_formatter
+        self._time_tooltip_formatter = time_tooltip_formatter
 
         content = QWidget()
         self.row = QHBoxLayout(content)
@@ -199,7 +217,14 @@ class MultiTrackStrip(QWidget):
         if key in self.cards:
             return self.cards[key]
 
-        card = MultiTrackCard(self.ephem, key, obj_type, name)
+        card = MultiTrackCard(
+            self.ephem,
+            key,
+            obj_type,
+            name,
+            time_formatter=self._time_formatter,
+            time_tooltip_formatter=self._time_tooltip_formatter,
+        )
         card.clicked.connect(lambda t=obj_type, n=name: self.on_pick(t, n))
         self.row.addWidget(card, 0, Qt.AlignTop)
         self.cards[key] = card
@@ -216,11 +241,13 @@ class MultiTrackStrip(QWidget):
 class MultiTrackTabsManager:
     """Manage one MultiTrackStrip per page in a QTabWidget."""
 
-    def __init__(self, ephem, on_pick, tab_widget: QTabWidget):
+    def __init__(self, ephem, on_pick, tab_widget: QTabWidget, time_formatter=None, time_tooltip_formatter=None):
         self.ephem = ephem
         self.on_pick = on_pick
         self.tab_widget = tab_widget
         self._strips_by_page = {}
+        self._time_formatter = time_formatter
+        self._time_tooltip_formatter = time_tooltip_formatter
 
     def _page_for(self, tab) -> QWidget | None:
         if isinstance(tab, QWidget):
@@ -237,7 +264,13 @@ class MultiTrackTabsManager:
         if strip is not None:
             return strip
 
-        strip = MultiTrackStrip(self.ephem, self.on_pick, parent=page)
+        strip = MultiTrackStrip(
+            self.ephem,
+            self.on_pick,
+            parent=page,
+            time_formatter=self._time_formatter,
+            time_tooltip_formatter=self._time_tooltip_formatter,
+        )
         layout = page.layout()
         if layout is None:
             layout = QVBoxLayout(page)

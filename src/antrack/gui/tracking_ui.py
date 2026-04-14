@@ -24,11 +24,46 @@ from antrack.gui.ui_styles import (
 )
 from antrack.gui.event_countdown import format_next_event_countdown, next_event_tooltip
 from antrack.gui.widgets.multi_track_card import MultiTrackStrip
+from antrack.tracking.positioning import PositioningController
 from antrack.tracking.tracking import Tracker
 
 
 class TrackingUiMixin:
     """Keep tracking selection and tracking-state UI logic out of main_ui.py."""
+
+    def setup_manual_antenna_controls(self):
+        """Wire the manual-control panel and initialize it in Auto mode."""
+        self._manual_control_mode = False
+        self._manual_jog_state = {"az": None, "el": None}
+
+        manual_btn = getattr(self, "pushButton_antenna_manual", None)
+        if manual_btn is not None:
+            manual_btn.setCheckable(True)
+            try:
+                manual_btn.clicked.disconnect()
+            except Exception:
+                pass
+            manual_btn.clicked.connect(self.on_manual_mode_toggled)
+
+        goto_btn = getattr(self, "pushButton_antenna_manual_goto", None)
+        if goto_btn is not None:
+            goto_btn.clicked.connect(self.on_manual_goto_clicked)
+
+        button_bindings = (
+            ("pushButton_antenna_manual_left", "az", "CCW"),
+            ("pushButton_antenna_manual_right", "az", "CW"),
+            ("pushButton_antenna_manual_up", "el", "UP"),
+            ("pushButton_antenna_manual_bottom", "el", "DOWN"),
+        )
+        for attr_name, axis, direction in button_bindings:
+            button = getattr(self, attr_name, None)
+            if button is None:
+                continue
+            button.setAutoRepeat(False)
+            button.pressed.connect(lambda a=axis, d=direction: self._start_manual_jog(a, d))
+            button.released.connect(lambda a=axis: self._stop_manual_jog(a))
+
+        self._apply_manual_mode_ui()
 
     def _antenna_settings(self) -> dict:
         if not isinstance(self.settings, dict):
@@ -54,6 +89,188 @@ class TrackingUiMixin:
         except Exception:
             pass
 
+    def _stop_positioning_loop_from_ui(self):
+        """Stop the fixed-position controller and restore the idle UI state."""
+        try:
+            if getattr(self, "positioner", None) is not None:
+                self.positioner.stop()
+        except Exception:
+            pass
+        self.stop_tracking_ui_timer()
+        self._ui_show_tracking_stopped()
+
+    def _motion_controller_running(self) -> bool:
+        tracker_running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
+        positioner_running = bool(getattr(self, "positioner", None) and self.positioner.is_running())
+        return tracker_running or positioner_running
+
+    def _manual_control_widgets(self):
+        return (
+            "lineEdit_azimuth_goto_pos",
+            "lineEdit_elevation_goto_pos",
+            "lineEdit_azimuth_goto_rate",
+            "lineEdit_elevation_goto_rate",
+            "pushButton_antenna_manual_goto",
+            "pushButton_antenna_manual_up",
+            "pushButton_antenna_manual_left",
+            "pushButton_antenna_manual_bottom",
+            "pushButton_antenna_manual_right",
+        )
+
+    def _apply_manual_mode_ui(self):
+        enabled = bool(getattr(self, "_manual_control_mode", False))
+        for attr_name in self._manual_control_widgets():
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
+
+        button = getattr(self, "pushButton_antenna_manual", None)
+        if button is not None:
+            button.blockSignals(True)
+            button.setChecked(enabled)
+            button.blockSignals(False)
+            button.setText("Manual" if enabled else "Auto")
+            button.setStyleSheet(orange_label_color if enabled else "")
+
+    def _set_manual_control_mode(self, enabled: bool):
+        enabled = bool(enabled)
+        self._manual_control_mode = enabled
+        self._manual_setpoint_mode = enabled
+        if enabled:
+            if getattr(self, "tracker", None) and self.tracker.is_running():
+                self._stop_tracking_loop_from_ui()
+            if getattr(self, "positioner", None) and self.positioner.is_running():
+                self._stop_positioning_loop_from_ui()
+            self._stop_manual_jog("az")
+            self._stop_manual_jog("el")
+            try:
+                self.ephem.stop_object("primary")
+            except Exception:
+                pass
+        else:
+            if getattr(self, "positioner", None) and self.positioner.is_running():
+                self._stop_positioning_loop_from_ui()
+            self._stop_manual_jog("az")
+            self._stop_manual_jog("el")
+        self._apply_manual_mode_ui()
+        if not enabled and not self._motion_controller_running():
+            self._ui_show_tracking_stopped()
+        elif enabled:
+            try:
+                if hasattr(self, "label_antenna_status"):
+                    self.label_antenna_status.setText("Manual")
+                    self.label_antenna_status.setStyleSheet(orange_label_color)
+            except Exception:
+                pass
+
+    def on_manual_mode_toggled(self, checked: bool):
+        self._set_manual_control_mode(bool(checked))
+
+    def _manual_rate_for_axis(self, axis: str) -> float | None:
+        edit_attr = "lineEdit_azimuth_goto_rate" if axis == "az" else "lineEdit_elevation_goto_rate"
+        widget = getattr(self, edit_attr, None)
+        raw = (widget.text() if widget is not None else "") or ""
+        raw = raw.strip()
+        if not raw:
+            return None
+        try:
+            rate = float(raw)
+        except Exception:
+            return None
+        return rate if rate > 0 else None
+
+    def _start_manual_jog(self, axis: str, direction: str):
+        if not getattr(self, "_manual_control_mode", False):
+            return
+        if not self.has_connection():
+            return
+
+        rate = self._manual_rate_for_axis(axis)
+        if rate is None:
+            QMessageBox.information(
+                self,
+                "Manual",
+                "Renseignez une vitesse positive pour l'axe manuel utilise.",
+            )
+            return
+
+        try:
+            if getattr(self, "positioner", None) and self.positioner.is_running():
+                self._stop_positioning_loop_from_ui()
+            if getattr(self, "tracker", None) and self.tracker.is_running():
+                self._stop_tracking_loop_from_ui()
+        except Exception:
+            pass
+
+        try:
+            if axis == "az":
+                self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client.axisClient.set_az_speed(rate), timeout=1.0)
+                self.axis_client.antenna.az_setrate = rate
+                if direction == "CW":
+                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_cw, timeout=1.0)
+                else:
+                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_ccw, timeout=1.0)
+                self._manual_jog_state["az"] = direction
+            else:
+                self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client.axisClient.set_el_speed(rate), timeout=1.0)
+                self.axis_client.antenna.el_setrate = rate
+                if direction == "UP":
+                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_up, timeout=1.0)
+                else:
+                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_down, timeout=1.0)
+                self._manual_jog_state["el"] = direction
+
+            if hasattr(self, "label_antenna_status"):
+                self.label_antenna_status.setText("Manual")
+                self.label_antenna_status.setStyleSheet(orange_label_color)
+        except Exception as exc:
+            self.logger.error(f"_start_manual_jog error: {exc}")
+
+    def _stop_manual_jog(self, axis: str):
+        if not getattr(self, "axis_client", None):
+            return
+        try:
+            if axis == "az" and self._manual_jog_state.get("az") is not None:
+                self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.stop_az, timeout=1.0)
+                self._manual_jog_state["az"] = None
+            elif axis == "el" and self._manual_jog_state.get("el") is not None:
+                self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.stop_el, timeout=1.0)
+                self._manual_jog_state["el"] = None
+        except Exception as exc:
+            self.logger.error(f"_stop_manual_jog error: {exc}")
+
+        if not any(self._manual_jog_state.values()) and getattr(self, "_manual_control_mode", False):
+            try:
+                if hasattr(self, "label_antenna_status"):
+                    self.label_antenna_status.setText("Manual")
+                    self.label_antenna_status.setStyleSheet(orange_label_color)
+            except Exception:
+                pass
+
+    def on_manual_goto_clicked(self):
+        if not getattr(self, "_manual_control_mode", False):
+            return
+        if not self.has_connection():
+            QMessageBox.warning(self, "Manual", "Veuillez d'abord vous connecter au serveur Axis.")
+            return
+
+        az_widget = getattr(self, "lineEdit_azimuth_goto_pos", None)
+        el_widget = getattr(self, "lineEdit_elevation_goto_pos", None)
+        az_raw = (az_widget.text() if az_widget is not None else "") or ""
+        el_raw = (el_widget.text() if el_widget is not None else "") or ""
+        try:
+            az_set = float(az_raw.strip())
+            el_set = float(el_raw.strip())
+        except Exception:
+            QMessageBox.information(
+                self,
+                "Manual Goto",
+                "Renseignez un azimuth et une elevation valides.",
+            )
+            return
+
+        self.start_fixed_positioning(az_set, el_set, label="Manual Goto")
+
     def _apply_manual_setpoints(self, az_set: float, el_set: float):
         """Load explicit AZ/EL setpoints into the shared tracking state and UI."""
         self.tracked_object.az_set = float(az_set)
@@ -71,6 +288,21 @@ class TrackingUiMixin:
             self.g2.set_setpoint(float(el_set))
         except Exception:
             pass
+
+    def _ensure_positioner(self) -> bool:
+        if self.positioner is None:
+            try:
+                self.positioner = PositioningController(
+                    self.axis_client,
+                    self.settings,
+                    self.thread_manager,
+                    self.tracked_object,
+                )
+            except Exception as exc:
+                self.logger.error(f"Impossible d'initialiser le positioner: {exc}")
+                QMessageBox.warning(self, "Positioning", "Initialisation du positionnement impossible.")
+                return False
+        return True
 
     def _clear_selected_target_details(self):
         """Clear non-pointing fields when the target context is no longer an ephemeris object."""
@@ -107,27 +339,60 @@ class TrackingUiMixin:
         except Exception as exc:
             self.logger.error(f"_clear_selected_target_details error: {exc}")
 
-    def _start_park_motion(self, attempts_left: int = 20):
-        """Start the standard tracking loop toward the already-loaded park setpoints."""
+    def _start_fixed_positioning_motion(self, attempts_left: int = 20):
+        """Start fixed-position motion toward the already-loaded AZ/EL setpoints."""
         try:
             if getattr(self, "tracker", None) and self.tracker.is_running():
                 if attempts_left > 0:
-                    QTimer.singleShot(100, lambda: self._start_park_motion(attempts_left - 1))
+                    QTimer.singleShot(100, lambda: self._start_fixed_positioning_motion(attempts_left - 1))
                 else:
-                    self.logger.warning("[Park] Tracker still running; park restart abandoned")
+                    self.logger.warning("[Positioning] Tracker still running; fixed-position restart abandoned")
                 return
-
+            if getattr(self, "positioner", None) and self.positioner.is_running():
+                return
+            if not self._ensure_positioner():
+                return
             if hasattr(self, "pushButton_antenna_track"):
                 self.pushButton_antenna_track.setEnabled(True)
-                self.pushButton_antenna_track.setText("Track")
-            self.on_track_button_clicked()
+                self.pushButton_antenna_track.setText("Stop")
+            self.positioner.start()
+            self.start_tracking_ui_timer()
         except Exception as exc:
-            self.logger.error(f"_start_park_motion error: {exc}")
+            self.logger.error(f"_start_fixed_positioning_motion error: {exc}")
 
         try:
             self._update_tracking_ui()
         except Exception:
             pass
+
+    def start_fixed_positioning(self, az_set: float, el_set: float, label: str = "Goto"):
+        """Drive the antenna to a fixed AZ/EL target and stop on arrival."""
+        self._manual_setpoint_mode = True
+
+        if getattr(self, "tracker", None) and self.tracker.is_running():
+            self._stop_tracking_loop_from_ui()
+        if getattr(self, "positioner", None) and self.positioner.is_running():
+            self._stop_positioning_loop_from_ui()
+
+        try:
+            self.ephem.stop_object("primary")
+        except Exception:
+            pass
+
+        self._apply_manual_setpoints(az_set, el_set)
+        if hasattr(self, "pushButton_antenna_track"):
+            self.pushButton_antenna_track.setEnabled(True)
+            self.pushButton_antenna_track.setText("Track")
+
+        try:
+            if hasattr(self, "label_tracked_object"):
+                self.label_tracked_object.setText(label)
+                self._apply_selected_target_header_style()
+        except Exception:
+            pass
+
+        self._clear_selected_target_details()
+        QTimer.singleShot(100, lambda: self._start_fixed_positioning_motion(attempts_left=20))
 
     def _apply_selected_target_header_style(self):
         """Keep the selected-target header centered and visually prominent."""
@@ -189,7 +454,7 @@ class TrackingUiMixin:
 
             self._clear_selected_target_details()
 
-            running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
+            running = self._motion_controller_running()
             if not running:
                 for attr in ("label_antenna_az_set_deg", "label_antenna_el_set_deg"):
                     if hasattr(self, attr):
@@ -635,7 +900,11 @@ class TrackingUiMixin:
     def start_object_selection_tracking(self):
         """Start the periodic position computation for the selected object."""
         try:
+            if getattr(self, "_manual_control_mode", False):
+                self._set_manual_control_mode(False)
             self._manual_setpoint_mode = False
+            if getattr(self, "positioner", None) and self.positioner.is_running():
+                self._stop_positioning_loop_from_ui()
             selected_type = self.object_dropdown.currentText() if hasattr(self, "object_dropdown") else "Select Type"
             selected_object = (
                 self.specific_object_dropdown.currentText() if hasattr(self, "specific_object_dropdown") else ""
@@ -700,7 +969,7 @@ class TrackingUiMixin:
                 )
                 self.label_object_distance_km.setStyleSheet("")
 
-            running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
+            running = self._motion_controller_running()
             if not running:
                 if hasattr(self, "label_antenna_az_set_deg"):
                     self.label_antenna_az_set_deg.setText(
@@ -744,10 +1013,16 @@ class TrackingUiMixin:
                     self.target_visible_now_label.setText("-")
                     self.target_visible_now_label.setStyleSheet("")
 
+            aos_utc = payload.get("aos_utc")
+            los_utc = payload.get("los_utc")
+            max_el_time_utc = payload.get("max_el_time_utc")
+
             if hasattr(self, "target_aos_label"):
-                self.target_aos_label.setText(payload.get("aos_utc") or "-")
+                self.target_aos_label.setText(self.format_event_time_for_ui(aos_utc) if aos_utc else "-")
+                self.target_aos_label.setToolTip(self.format_event_tooltip_for_ui(aos_utc))
             if hasattr(self, "target_los_label"):
-                self.target_los_label.setText(payload.get("los_utc") or "-")
+                self.target_los_label.setText(self.format_event_time_for_ui(los_utc) if los_utc else "-")
+                self.target_los_label.setToolTip(self.format_event_tooltip_for_ui(los_utc))
 
             if hasattr(self, "target_dur_label"):
                 duration = payload.get("dur_str")
@@ -760,7 +1035,10 @@ class TrackingUiMixin:
                 max_el = payload.get("max_el_deg")
                 self.target_max_el_label.setText(f"{max_el:.1f}°" if isinstance(max_el, (int, float)) else "-")
             if hasattr(self, "target_max_el_time_label"):
-                self.target_max_el_time_label.setText(payload.get("max_el_time_utc") or "-")
+                self.target_max_el_time_label.setText(
+                    self.format_event_time_for_ui(max_el_time_utc) if max_el_time_utc else "-"
+                )
+                self.target_max_el_time_label.setToolTip(self.format_event_tooltip_for_ui(max_el_time_utc))
 
             if hasattr(self, "target_el_now_label"):
                 el_now = payload.get("el_now_deg", None)
@@ -932,11 +1210,16 @@ class TrackingUiMixin:
                 self._ui_tick = 0
             self._ui_tick += 1
 
-            running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
+            tracker_running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
+            positioner_running = bool(getattr(self, "positioner", None) and self.positioner.is_running())
+            running = tracker_running or positioner_running
             if hasattr(self, "label_antenna_status"):
-                if running:
+                if tracker_running:
                     self.label_antenna_status.setText("Tracking")
                     self.label_antenna_status.setStyleSheet(green_label_color)
+                elif positioner_running:
+                    self.label_antenna_status.setText("Positioning")
+                    self.label_antenna_status.setStyleSheet(orange_label_color)
                 else:
                     self.label_antenna_status.setText("Stopped")
                     self.label_antenna_status.setStyleSheet(red_label_color)
@@ -996,13 +1279,23 @@ class TrackingUiMixin:
                     self.g2.set_error(None)
                 except Exception:
                     pass
+                try:
+                    if hasattr(self, "pushButton_antenna_track"):
+                        self.pushButton_antenna_track.setText("Track")
+                    self.stop_tracking_ui_timer()
+                except Exception:
+                    pass
 
         except Exception as exc:
             self.logger.error(f"Erreur _update_tracking_ui: {exc}")
 
     def on_apply_target_clicked(self):
         try:
+            if getattr(self, "_manual_control_mode", False):
+                self._set_manual_control_mode(False)
             self._manual_setpoint_mode = False
+            if getattr(self, "positioner", None) and self.positioner.is_running():
+                self._stop_positioning_loop_from_ui()
             selected_type = (self.object_dropdown.currentText() or "").strip()
             if selected_type == "Artificial Satellite":
                 selected_object = self._current_sat_query()
@@ -1048,6 +1341,12 @@ class TrackingUiMixin:
             if not self.has_connection():
                 QMessageBox.warning(self, "Tracking", "Veuillez d'abord vous connecter au serveur Axis.")
                 return
+            if (
+                getattr(self, "_manual_control_mode", False)
+                and not (getattr(self, "positioner", None) and self.positioner.is_running())
+            ):
+                QMessageBox.information(self, "Tracking", "Repassez en mode Auto pour utiliser Track.")
+                return
 
             if self.tracker is None:
                 try:
@@ -1061,6 +1360,14 @@ class TrackingUiMixin:
                     self.logger.error(f"Impossible d'initialiser le tracker: {exc}")
                     QMessageBox.warning(self, "Tracking", "Initialisation du tracker impossible.")
                     return
+
+            if getattr(self, "positioner", None) and self.positioner.is_running():
+                self._stop_positioning_loop_from_ui()
+                try:
+                    self.pushButton_antenna_track.setText("Track")
+                except Exception:
+                    pass
+                return
 
             if not self.tracker.is_running():
                 az_set = getattr(self.tracked_object, "az_set", None)
@@ -1120,11 +1427,8 @@ class TrackingUiMixin:
             if not self.has_connection():
                 QMessageBox.warning(self, "Park", "Veuillez d'abord vous connecter au serveur Axis.")
                 return
-
-            self._manual_setpoint_mode = True
-
-            if getattr(self, "tracker", None) and self.tracker.is_running():
-                self._stop_tracking_loop_from_ui()
+            if getattr(self, "_manual_control_mode", False):
+                self._set_manual_control_mode(False)
 
             try:
                 self.ephem.stop_object("primary")
@@ -1153,20 +1457,7 @@ class TrackingUiMixin:
                 )
                 return
 
-            self._apply_manual_setpoints(park_az, park_el)
-            if hasattr(self, "pushButton_antenna_track"):
-                self.pushButton_antenna_track.setEnabled(True)
-                self.pushButton_antenna_track.setText("Track")
-
-            try:
-                if hasattr(self, "label_tracked_object"):
-                    self.label_tracked_object.setText("Park")
-                    self._apply_selected_target_header_style()
-            except Exception:
-                pass
-
-            self._clear_selected_target_details()
-            QTimer.singleShot(100, lambda: self._start_park_motion(attempts_left=20))
+            self.start_fixed_positioning(park_az, park_el, label="Park")
 
             try:
                 self.status_bar.showMessage(

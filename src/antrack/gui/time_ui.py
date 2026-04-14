@@ -10,6 +10,10 @@ from PyQt5.QtCore import QTimer
 class TimeUiMixin:
     """Own the time display block and its display-mode cycling."""
 
+    def active_event_time_mode(self) -> str:
+        mode = getattr(self, "_time_display_mode", "local")
+        return "utc" if mode == "utc" else "local"
+
     def setup_time_ui(self):
         self._time_display_mode = "local"
 
@@ -69,6 +73,38 @@ class TimeUiMixin:
             self.label_local_time.setText(time_text)
         if hasattr(self, "label_LocalTime"):
             self.label_LocalTime.setText(title_text)
+
+    def format_event_time_for_ui(self, utc_str: str, compact: bool = False) -> str:
+        if not utc_str:
+            return "-"
+        try:
+            dt_utc = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except Exception:
+            return utc_str
+
+        mode = self.active_event_time_mode()
+        if mode == "utc":
+            dt_display = dt_utc
+        else:
+            dt_display = dt_utc.astimezone()
+
+        if compact:
+            now_display = datetime.now(dt_display.tzinfo)
+            d_days = (dt_display.date() - now_display.date()).days
+            hhmm = dt_display.strftime("%H:%M")
+            if d_days == 0:
+                return hhmm
+            if -2 <= d_days <= 2:
+                sign = "+" if d_days > 0 else "-"
+                return f"{sign}{abs(d_days)}j {hhmm}"
+            return dt_display.strftime("%m-%d %H:%M")
+        return dt_display.strftime("%Y-%m-%d %H:%M:%S")
+
+    def format_event_tooltip_for_ui(self, utc_str: str) -> str:
+        if not utc_str:
+            return "-"
+        label = "UTC" if self.active_event_time_mode() == "utc" else "Local"
+        return f"{self.format_event_time_for_ui(utc_str, compact=False)} {label}"
 
     def _current_sidereal_time_text(self) -> str:
         try:

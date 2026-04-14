@@ -88,6 +88,17 @@ class ConnectionUiMixin:
                     self.tracker.stop()
             except Exception:
                 pass
+            try:
+                if getattr(self, "positioner", None):
+                    self.positioner.stop()
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "_stop_manual_jog"):
+                    self._stop_manual_jog("az")
+                    self._stop_manual_jog("el")
+            except Exception:
+                pass
             self.stop_polling_threads()
             self.axis_polling = None
 

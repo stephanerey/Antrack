@@ -1,8 +1,8 @@
 # Tasks Now
 
-> **PRD Policy:** **PROJECT (editable)** — Live task board for the current project.
+> **PRD Policy:** **PROJECT (editable)** - Live task board for the current project.
 
-**Last updated:** 2026-04-10
+**Last updated:** 2026-04-14
 
 ## Current phase focus
 Behavior-preserving extensibility refactor.
@@ -21,10 +21,14 @@ Behavior-preserving extensibility refactor.
 | `T-3003` | `refactor` | Extract diagnostics and log-viewer integration from `main_ui.py` | DONE | Codex | `T-2002` | `20_refactor/R10_extensibility_refactor.md` | `VAL-009` | `gui/diagnostics_ui.py` added; existing diagnostics widget package retained |
 | `T-3004` | `refactor` | Extract instrument UI block and remove forward-looking powermeter-centric wording from architecture-facing code paths | DONE | Codex | `T-2002`, `T-2003` | `20_refactor/R10_extensibility_refactor.md` | `VAL-005`, `VAL-006` | `gui/instrument_ui.py` added with transitional powermeter backend and instrument-oriented entry points |
 | `T-3005` | `refactor` | Extract connection UI block from `main_ui.py` | DONE | Codex | `T-2002` | `20_refactor/R10_extensibility_refactor.md` | `VAL-007` | `gui/connection_ui.py` added; shutdown path tightened in `MainUi.closeEvent` |
-| `T-4001` | `integration` | Run smoke tests on startup, connect, track, and preview flows | BLOCKED | Codex / Stéphane | `T-3001`, `T-3002`, `T-3003`, `T-3004`, `T-3005` | `90_quality/testing.md` | `VAL-010` | `pytest` unavailable in current interpreter; offscreen startup/init-close validation completed, live hardware smoke still required |
-| `T-4002` | `integration` | Review migration notes and remaining debt | TODO | Codex / Stéphane | `T-4001` | `20_refactor/migration_notes.md` | Review |  |
+| `T-4001` | `integration` | Run smoke tests on startup, connect, track, and preview flows | BLOCKED | Codex / Stéphane | `T-3001`, `T-3002`, `T-3003`, `T-3004`, `T-3005` | `90_quality/testing.md` | `VAL-010` | `pytest` is still unavailable in the current interpreter; offscreen startup/init-close validation passed and live UI/hardware smoke was exercised manually during positioning/manual control iteration |
+| `T-4002` | `integration` | Review migration notes and remaining debt | DONE | Codex / Stéphane | `T-4001` | `20_refactor/migration_notes.md` | Review | Migration notes updated for manual positioning, time-mode synchronization, and forbidden-range enforcement |
 
 ## Done (recent)
 | ID | Type | Title | Date | Verification | Notes |
 |---|---|---|---|---|---|
 | `T-0001` | `doc` | Instantiate stronger PRD template for Antrack | 2026-04-04 | Review | Initial version prepared from current repo state |
+| `T-4003` | `integration` | Separate fixed-position motion from continuous tracking for Park and manual goto | 2026-04-14 | Compile + live smoke | `PositioningController` introduced; `Park` and manual goto now stop on arrival instead of reusing the continuous tracker loop |
+| `T-4004` | `integration` | Synchronize event timestamps with the Time display mode across cards and selected target | 2026-04-14 | Compile + live smoke | `Local` and `UTC` modes now drive AOS/LOS/Max EL time formatting; `Sidereal` keeps event timestamps in local time |
+| `T-4005` | `safety` | Enforce forbidden antenna ranges from settings during tracking and positioning | 2026-04-14 | Compile + live smoke | Forbidden AZ/EL ranges moved to `settings.txt`, rendered on gauges, and enforced by both tracking and fixed positioning logic |
+| `T-4006` | `integration` | Add manual antenna control mode with jog and goto actions | 2026-04-14 | Compile + live smoke | `Auto/Manual` toggle now gates jog controls and manual goto without redesigning the `.ui` workflow |
