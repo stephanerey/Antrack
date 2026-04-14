@@ -12,6 +12,8 @@ from antrack.gui.calibration_ui import CalibrationUiMixin
 from antrack.gui.connection_ui import ConnectionUiMixin
 from antrack.gui.diagnostics_ui import DiagnosticsUiMixin
 from antrack.gui.instrument_ui import InstrumentUiMixin
+from antrack.gui.instruments.sdr_ui import SdrUiMixin
+from antrack.gui.scan_ui import ScanUiMixin
 from antrack.gui.time_ui import TimeUiMixin
 from antrack.gui.tracking_ui import TrackingUiMixin
 from antrack.gui.ephemeris_qt import EphemerisQtAdapter
@@ -30,6 +32,8 @@ class MainUi(
     TrackingUiMixin,
     CalibrationUiMixin,
     InstrumentUiMixin,
+    SdrUiMixin,
+    ScanUiMixin,
     TimeUiMixin,
     ConnectionUiMixin,
 ):
@@ -212,6 +216,8 @@ class MainUi(
             self.multi_cards.add_target(tab="Celestial Objects", obj_type="Star", name=celestial)
 
         self.setup_instrument_ui()
+        self.setup_sdr_ui()
+        self.setup_scan_ui()
 
     def closeEvent(self, event):
         try:
@@ -225,6 +231,14 @@ class MainUi(
             pass
         try:
             self.close_instrument_ui()
+        except Exception:
+            pass
+        try:
+            self.close_sdr_ui()
+        except Exception:
+            pass
+        try:
+            self.close_scan_ui()
         except Exception:
             pass
         try:

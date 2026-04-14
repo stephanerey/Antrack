@@ -59,3 +59,60 @@ def load_settings(filepath: Optional[Union[str, Path]] = None) -> Dict[str, Dict
                 except ValueError:
                     settings[section][key] = value.strip()
     return settings
+
+
+def update_setting_value(
+    settings: Dict[str, Dict[str, Any]],
+    section: str,
+    key: str,
+    value: Any,
+) -> None:
+    """Update the in-memory settings dictionary using the loader's lowercase key convention."""
+    if not isinstance(settings, dict):
+        return
+    section_name = str(section or "").strip() or "DEFAULT"
+    key_name = str(key or "").strip() or "value"
+    settings.setdefault(section_name, {})[key_name.lower()] = value
+
+
+def persist_setting_value(
+    section: str,
+    key: str,
+    value: Any,
+    filepath: Optional[Union[str, Path]] = None,
+) -> Path:
+    """Persist a single settings value to the config file while preserving existing keys."""
+    path = resolve_settings_path(filepath)
+    config = configparser.ConfigParser()
+    config.optionxform = str
+
+    if path.exists():
+        with path.open("r", encoding="utf-8") as handle:
+            config.read_file(handle)
+
+    section_name = str(section or "").strip() or "DEFAULT"
+    key_name = str(key or "").strip() or "VALUE"
+    if not config.has_section(section_name):
+        config.add_section(section_name)
+
+    if isinstance(value, bool):
+        rendered = "true" if value else "false"
+    else:
+        rendered = str(value)
+
+    config.set(section_name, key_name, rendered)
+    with path.open("w", encoding="utf-8") as handle:
+        config.write(handle)
+    return path
+
+
+def update_and_persist_setting(
+    settings: Dict[str, Dict[str, Any]],
+    section: str,
+    key: str,
+    value: Any,
+    filepath: Optional[Union[str, Path]] = None,
+) -> Path:
+    """Keep in-memory settings and the underlying file in sync."""
+    update_setting_value(settings, section, key, value)
+    return persist_setting_value(section, key, value, filepath=filepath)

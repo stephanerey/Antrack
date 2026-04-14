@@ -26,6 +26,7 @@ from antrack.gui.event_countdown import format_next_event_countdown, next_event_
 from antrack.gui.widgets.multi_track_card import MultiTrackStrip
 from antrack.tracking.positioning import PositioningController
 from antrack.tracking.tracking import Tracker
+from antrack.utils.settings_loader import update_and_persist_setting
 
 
 class TrackingUiMixin:
@@ -69,6 +70,57 @@ class TrackingUiMixin:
         if not isinstance(self.settings, dict):
             return {}
         return self.settings.get("ANTENNA", self.settings.get("antenna", {})) or {}
+
+    def _session_tracking_offset(self) -> tuple[float, float]:
+        az = float(getattr(self, "_scan_session_offset_az_deg", 0.0) or 0.0)
+        el = float(getattr(self, "_scan_session_offset_el_deg", 0.0) or 0.0)
+        return az, el
+
+    def _persistent_tracking_offset(self) -> tuple[float, float]:
+        antenna = self._antenna_settings()
+        az = float(antenna.get("scan_offset_az_deg", antenna.get("SCAN_OFFSET_AZ_DEG", 0.0)) or 0.0)
+        el = float(antenna.get("scan_offset_el_deg", antenna.get("SCAN_OFFSET_EL_DEG", 0.0)) or 0.0)
+        return az, el
+
+    def _current_tracking_offset(self) -> tuple[float, float]:
+        session_az, session_el = self._session_tracking_offset()
+        persistent_az, persistent_el = self._persistent_tracking_offset()
+        return session_az + persistent_az, session_el + persistent_el
+
+    def _apply_tracking_offset_to_pointing(self, az_deg: float, el_deg: float) -> tuple[float, float]:
+        offset_az, offset_el = self._current_tracking_offset()
+        return float(az_deg) + offset_az, float(el_deg) + offset_el
+
+    def _format_tracking_offset(self) -> str:
+        offset_az, offset_el = self._current_tracking_offset()
+        return f"dAZ={offset_az:+.3f} dEL={offset_el:+.3f}"
+
+    def _update_selected_target_snr_display(self, snr_db: float, mode: str) -> None:
+        if hasattr(self, "target_snr_label"):
+            if isinstance(snr_db, (int, float)):
+                self.target_snr_label.setText(f"{float(snr_db):.2f} dB ({mode})")
+            else:
+                self.target_snr_label.setText("-")
+
+    def _update_selected_target_scan_offset_display(self) -> None:
+        text = self._format_tracking_offset()
+        if hasattr(self, "target_scan_offset_label"):
+            self.target_scan_offset_label.setText(text)
+        if hasattr(self, "tracked_object"):
+            total_az, total_el = self._current_tracking_offset()
+            self.tracked_object.scan_offset_az_deg = float(total_az)
+            self.tracked_object.scan_offset_el_deg = float(total_el)
+
+    def apply_scan_offset(self, az_offset_deg: float, el_offset_deg: float, *, persist: bool = False) -> None:
+        if persist:
+            self._scan_session_offset_az_deg = 0.0
+            self._scan_session_offset_el_deg = 0.0
+            update_and_persist_setting(self.settings, "ANTENNA", "SCAN_OFFSET_AZ_DEG", float(az_offset_deg))
+            update_and_persist_setting(self.settings, "ANTENNA", "SCAN_OFFSET_EL_DEG", float(el_offset_deg))
+        else:
+            self._scan_session_offset_az_deg = float(az_offset_deg)
+            self._scan_session_offset_el_deg = float(el_offset_deg)
+        self._update_selected_target_scan_offset_display()
 
     def _stop_tracking_loop_from_ui(self):
         """Stop the motor tracking loop and restore the idle UI state."""
@@ -528,8 +580,11 @@ class TrackingUiMixin:
         add_row(11, "LOS", "target_los_label")
         add_row(12, "Max EL", "target_max_el_label")
         add_row(13, "Max EL @", "target_max_el_time_label")
+        add_row(14, "SNR", "target_snr_label")
+        add_row(15, "Scan Offset", "target_scan_offset_label")
 
         self.target_max_el_time_label.setWordWrap(True)
+        self._update_selected_target_scan_offset_display()
         self._selected_target_info_panel = panel
         return True
 
@@ -863,10 +918,15 @@ class TrackingUiMixin:
             ra_hms = payload.get("ra_hms")
             dec_dms = payload.get("dec_dms")
 
-            if isinstance(az, (int, float)):
-                self.tracked_object.az_set = az
-            if isinstance(el, (int, float)):
-                self.tracked_object.el_set = el
+            corrected_az = az
+            corrected_el = el
+            if isinstance(az, (int, float)) and isinstance(el, (int, float)):
+                corrected_az, corrected_el = self._apply_tracking_offset_to_pointing(float(az), float(el))
+
+            if isinstance(corrected_az, (int, float)):
+                self.tracked_object.az_set = corrected_az
+            if isinstance(corrected_el, (int, float)):
+                self.tracked_object.el_set = corrected_el
             if isinstance(dist_km, (int, float)):
                 self.tracked_object.distance_km = dist_km
             if isinstance(dist_au, (int, float)):
@@ -881,6 +941,9 @@ class TrackingUiMixin:
                     (abs(degree) + minute / 60.0 + second / 3600.0) * sign
                 )
 
+            payload = dict(payload)
+            payload["az"] = corrected_az
+            payload["el"] = corrected_el
             self.ui_update_tracked_display(payload)
 
             az_ok = isinstance(self.tracked_object.az_set, (int, float))
@@ -890,7 +953,7 @@ class TrackingUiMixin:
 
             try:
                 if hasattr(self, "calib_plots") and self.calib_plots is not None:
-                    self.calib_plots.update_current(az, el)
+                    self.calib_plots.update_current(corrected_az, corrected_el)
             except Exception:
                 pass
 
