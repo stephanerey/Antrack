@@ -1,52 +1,51 @@
-"""Spectrum plot widget adapted from the RSPdx display design."""
+"""Spectrum plot widget with a single interactive receiver selection overlay."""
 
 from __future__ import annotations
 
-import collections
-import math
+import time
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore
-from PyQt5.QtCore import pyqtProperty, pyqtSignal
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
+
+from antrack.core.dsp.snr import bin_width_to_density_offset_db, db_to_linear_power, linear_power_to_db
 
 
 pg.setConfigOptions(antialias=False)
 
 
 class SpectrumPlotWidget(QWidget):
-    """Real-time dB spectrum plot with optional peak hold, average, and baseline display."""
+    """Real-time dB spectrum plot with a draggable center-frequency/bandwidth overlay."""
 
-    visible_span_changed = pyqtSignal(float, int)
+    selection_frequency_changed = QtCore.pyqtSignal(float)
+    selection_bandwidth_changed = QtCore.pyqtSignal(float)
+    visible_span_changed = QtCore.pyqtSignal(float, int)
+    frequency_clicked = QtCore.pyqtSignal(float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._max_display_bins = 8192
-        self._fill_display_bins = 4096
-        self._peak_hold_enabled = True
-        self._average_enabled = True
-        self._baseline_enabled = False
-        self._subtract_baseline = False
-        self._main_fill_level = -120.0
+        self._y_min_db = -140.0
+        self._y_range_db = 160.0
+        self._main_fill_level = self._y_min_db
         self._main_fill_brush = pg.mkBrush(20, 95, 120, 120)
         self._main_color = pg.mkColor(110, 235, 255)
-        self._peak_hold_max_color = pg.mkColor("r")
-        self._peak_hold_min_color = pg.mkColor("b")
-        self._average_color = pg.mkColor("c")
-        self._baseline_color = pg.mkColor("m")
-        self._persistence_enabled = False
-        self._persistence_length = 5
-        self._persistence_decay = "exponential"
-        self._persistence_color = pg.mkColor("g")
-        self._persistence_data = None
-        self._persistence_curves = []
+        self._selection_color = pg.mkColor(215, 60, 60)
+        self._selection_freq_hz = 137_000_000.0
+        self._selection_bw_hz = 25_000.0
+        self._overlay_guard = False
         self._last_xrange = None
         self._last_visible_span_emit = None
         self._pending_visible_span = 0.0
         self._pending_plot_width = 0
-        self._baseline_cache_key = None
-        self._baseline_cache_y = None
+        self._power_unit = "db_per_bin"
+        self._bin_width_hz = 1.0
+        self._max_visible_span_hz = None
+        self._data_xrange = None
+        self._clamp_xrange_guard = False
+        self._profile_calls = 0
+        self._profile_elapsed_s = 0.0
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -58,11 +57,17 @@ class SpectrumPlotWidget(QWidget):
         self.pos_label = self.graphics.addLabel(row=0, col=0, justify="right")
         self.plot = self.graphics.addPlot(row=1, col=0)
         self.plot.showGrid(x=True, y=True)
-        self.plot.setLabel("left", "Power", units="dB")
+        self.plot.setLabel("left", "Power (dB/bin)")
         self.plot.setLabel("bottom", "Frequency", units="Hz")
         self.plot.setClipToView(True)
         self.plot.setDownsampling(auto=True, mode="subsample")
+        self.plot.getViewBox().setMouseEnabled(x=True, y=False)
         self.plot.showButtons()
+
+        self._visible_span_timer = QtCore.QTimer(self)
+        self._visible_span_timer.setSingleShot(True)
+        self._visible_span_timer.setInterval(120)
+        self._visible_span_timer.timeout.connect(self._emit_visible_span)
         self.plot.getViewBox().sigXRangeChanged.connect(self._on_view_xrange_changed)
 
         self.curve_fill = self.plot.plot(pen=None)
@@ -72,14 +77,33 @@ class SpectrumPlotWidget(QWidget):
 
         self.curve = self.plot.plot(pen=self._main_color)
         self.curve.setZValue(900)
-        self.curve_peak_hold_max = self.plot.plot(pen=self._peak_hold_max_color)
-        self.curve_peak_hold_max.setZValue(800)
-        self.curve_peak_hold_min = self.plot.plot(pen=self._peak_hold_min_color)
-        self.curve_peak_hold_min.setZValue(800)
-        self.curve_average = self.plot.plot(pen=self._average_color)
-        self.curve_average.setZValue(700)
-        self.curve_baseline = self.plot.plot(pen=self._baseline_color)
-        self.curve_baseline.setZValue(500)
+
+        self.selection_region = pg.LinearRegionItem(
+            values=[
+                self._selection_freq_hz - (self._selection_bw_hz * 0.5),
+                self._selection_freq_hz + (self._selection_bw_hz * 0.5),
+            ],
+            orientation="vertical",
+            brush=pg.mkBrush(
+                self._selection_color.red(),
+                self._selection_color.green(),
+                self._selection_color.blue(),
+                80,
+            ),
+            movable=True,
+        )
+        self.selection_region.setZValue(960)
+        self.selection_line = pg.InfiniteLine(
+            pos=self._selection_freq_hz,
+            angle=90,
+            movable=True,
+            pen=pg.mkPen(self._selection_color, width=2),
+        )
+        self.selection_line.setZValue(950)
+        self.selection_line.sigPositionChanged.connect(self._on_selection_line_changed)
+        self.selection_region.sigRegionChanged.connect(self._on_selection_region_changed)
+        self.plot.addItem(self.selection_region)
+        self.plot.addItem(self.selection_line)
 
         self.v_line = pg.InfiniteLine(angle=90, movable=False, pen="cyan")
         self.h_line = pg.InfiniteLine(angle=0, movable=False, pen="cyan")
@@ -88,31 +112,80 @@ class SpectrumPlotWidget(QWidget):
         self.plot.addItem(self.v_line, ignoreBounds=True)
         self.plot.addItem(self.h_line, ignoreBounds=True)
         self.mouse_proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._mouse_moved)
-
-        self._visible_span_timer = QtCore.QTimer(self)
-        self._visible_span_timer.setSingleShot(True)
-        self._visible_span_timer.setInterval(120)
-        self._visible_span_timer.timeout.connect(self._emit_visible_span)
+        self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
 
     def _mouse_moved(self, evt) -> None:
         pos = evt[0]
         if self.plot.sceneBoundingRect().contains(pos):
             mouse_point = self.plot.vb.mapSceneToView(pos)
+            unit_label = "dB/Hz" if self._power_unit == "db_per_hz" else "dB/bin"
             self.pos_label.setText(
-                f"<span style='font-size: 12pt'>f={mouse_point.x() / 1e6:0.3f} MHz, P={mouse_point.y():0.3f} dB</span>"
+                f"<span style='font-size: 12pt'>f={mouse_point.x() / 1e6:0.3f} MHz, P={mouse_point.y():0.3f} {unit_label}</span>"
             )
             self.v_line.setPos(mouse_point.x())
             self.h_line.setPos(mouse_point.y())
 
+    def _display_values(self, values_db):
+        values = np.asarray(values_db, dtype=np.float64)
+        if self._power_unit == "db_per_hz":
+            values = values - bin_width_to_density_offset_db(self._bin_width_hz)
+        return values
+
+    def set_power_unit(self, unit: str) -> None:
+        normalized = "db_per_hz" if str(unit).strip().lower() in {"db/hz", "db_per_hz"} else "db_per_bin"
+        if normalized == self._power_unit:
+            return
+        self._power_unit = normalized
+        self.plot.setLabel("left", "Power (dB/Hz)" if normalized == "db_per_hz" else "Power (dB/bin)")
+
+    def set_bin_width_hz(self, bin_width_hz: float) -> None:
+        width_hz = float(max(1e-12, abs(float(bin_width_hz))))
+        self._bin_width_hz = width_hz
+
+    def set_max_visible_span_hz(self, span_hz: float | None) -> None:
+        if span_hz is None:
+            self._max_visible_span_hz = None
+            return
+        self._max_visible_span_hz = float(max(1.0, abs(float(span_hz))))
+
+    def _mouse_clicked(self, evt) -> None:
+        if evt is None or evt.button() != QtCore.Qt.LeftButton:
+            return
+        scene_pos = evt.scenePos()
+        if not self.plot.sceneBoundingRect().contains(scene_pos):
+            return
+        mouse_point = self.plot.vb.mapSceneToView(scene_pos)
+        frequency_hz = float(mouse_point.x())
+        if not np.isfinite(frequency_hz):
+            return
+        self.frequency_clicked.emit(frequency_hz)
+
     def _on_view_xrange_changed(self, *_args) -> None:
+        if self._clamp_xrange_guard:
+            return
         try:
-            xr = self.plot.getViewBox().viewRange()[0]
+            vb = self.plot.getViewBox()
+            xr = vb.viewRange()[0]
             span = abs(float(xr[1]) - float(xr[0]))
-            width_px = int(max(1, round(self.plot.getViewBox().sceneBoundingRect().width())))
+            width_px = int(max(1, round(vb.sceneBoundingRect().width())))
         except Exception:
             return
         if not np.isfinite(span) or span <= 0.0:
             return
+        max_span = self._max_visible_span_hz
+        data_xrange = self._data_xrange
+        if (
+            max_span is not None
+            and np.isfinite(max_span)
+            and span > float(max_span) * 1.001
+            and data_xrange is not None
+        ):
+            self._clamp_xrange_guard = True
+            try:
+                self.plot.setXRange(float(data_xrange[0]), float(data_xrange[1]), padding=0.0)
+                span = float(max_span)
+            finally:
+                self._clamp_xrange_guard = False
         self._pending_visible_span = span
         self._pending_plot_width = width_px
         self._visible_span_timer.start()
@@ -128,7 +201,66 @@ class SpectrumPlotWidget(QWidget):
         self._last_visible_span_emit = key
         self.visible_span_changed.emit(span, width_px)
 
-    def _decimate_line_for_display(self, x, y, *, mode: str = "peak", max_bins: int | None = None):
+    def _on_selection_line_changed(self) -> None:
+        if self._overlay_guard:
+            return
+        self._overlay_guard = True
+        try:
+            self._selection_freq_hz = float(self.selection_line.value())
+            half_bw = max(50.0, float(self._selection_bw_hz) * 0.5)
+            self.selection_region.setRegion([
+                self._selection_freq_hz - half_bw,
+                self._selection_freq_hz + half_bw,
+            ])
+        finally:
+            self._overlay_guard = False
+        self.selection_frequency_changed.emit(float(self._selection_freq_hz))
+
+    def _on_selection_region_changed(self) -> None:
+        if self._overlay_guard:
+            return
+        region = self.selection_region.getRegion()
+        center = 0.5 * (float(region[0]) + float(region[1]))
+        bandwidth = max(100.0, float(region[1]) - float(region[0]))
+        self._overlay_guard = True
+        try:
+            self._selection_freq_hz = center
+            self._selection_bw_hz = bandwidth
+            self.selection_line.setValue(center)
+        finally:
+            self._overlay_guard = False
+        self.selection_frequency_changed.emit(center)
+        self.selection_bandwidth_changed.emit(bandwidth)
+
+    def set_receiver_selection(self, freq_hz: float, bw_hz: float) -> None:
+        self._selection_freq_hz = float(freq_hz)
+        self._selection_bw_hz = float(max(100.0, bw_hz))
+        self._overlay_guard = True
+        try:
+            self.selection_line.setValue(self._selection_freq_hz)
+            self.selection_region.setRegion([
+                self._selection_freq_hz - (self._selection_bw_hz * 0.5),
+                self._selection_freq_hz + (self._selection_bw_hz * 0.5),
+            ])
+        finally:
+            self._overlay_guard = False
+
+    def set_selection_color(self, color) -> None:
+        qcolor = pg.mkColor(color)
+        self._selection_color = qcolor
+        self.selection_line.setPen(pg.mkPen(qcolor, width=2))
+        self.selection_region.setBrush(pg.mkBrush(qcolor.red(), qcolor.green(), qcolor.blue(), 80))
+
+    def set_y_window(self, y_min_db: float | None = None, y_range_db: float | None = None) -> None:
+        if y_min_db is not None:
+            self._y_min_db = float(y_min_db)
+        if y_range_db is not None:
+            self._y_range_db = float(max(10.0, y_range_db))
+        self._main_fill_level = self._y_min_db
+        self.curve_fill.setFillLevel(self._main_fill_level)
+        self.plot.setYRange(self._y_min_db, self._y_min_db + self._y_range_db, padding=0.0)
+
+    def _decimate_line_for_display(self, x, y, *, max_bins: int | None = None):
         x = np.asarray(x)
         y = np.asarray(y)
         n = int(y.size)
@@ -138,23 +270,17 @@ class SpectrumPlotWidget(QWidget):
         step = int(np.ceil(n / float(max_bins)))
         m = int(np.ceil(n / float(step)))
         pad = m * step - n
-        if pad > 0:
-            x_pad = np.pad(x, (0, pad), mode="edge")
-            y_pad = np.pad(y, (0, pad), mode="edge")
-        else:
-            x_pad = x
-            y_pad = y
+        x_pad = np.pad(x, (0, pad), mode="edge") if pad > 0 else x
+        y_pad = np.pad(y, (0, pad), mode="edge") if pad > 0 else y
         x_r = x_pad.reshape(m, step)
         y_r = y_pad.reshape(m, step)
+        finite_mask = np.isfinite(y_r)
+        linear = db_to_linear_power(np.where(finite_mask, y_r, np.nan))
         with np.errstate(all="ignore"):
-            if mode == "median":
-                y_d = np.nanmedian(y_r, axis=1)
-            elif mode == "mean":
-                y_d = np.nanmean(y_r, axis=1)
-            else:
-                y_d = np.nanmax(y_r, axis=1)
-        y_d = np.where(np.isfinite(y_d), y_d, np.nan)
-        x_d = x_r[:, step // 2]
+            linear_mean = np.nanmean(linear, axis=1)
+            x_d = np.nanmean(x_r, axis=1)
+        y_d = np.asarray(linear_power_to_db(np.nan_to_num(linear_mean, nan=0.0)), dtype=np.float32)
+        y_d = np.where(np.isfinite(linear_mean), y_d, np.nan)
         return x_d, y_d
 
     def _display_peak_bins(self) -> int:
@@ -165,169 +291,68 @@ class SpectrumPlotWidget(QWidget):
             width_px = 1024
         return int(min(self._max_display_bins, max(512, width_px)))
 
-    def _decay_linear(self, x: int, length: int) -> float:
-        return (-x / length) + 1.0
-
-    def _decay_exponential(self, x: int, length: int, const: float = 1 / 3) -> float:
-        return math.e ** (-x / (length * const))
-
-    def _get_decay(self):
-        return self._decay_exponential if self._persistence_decay == "exponential" else self._decay_linear
-
-    def _ensure_persistence_curves(self) -> None:
-        if self._persistence_curves and len(self._persistence_curves) == self._persistence_length:
-            return
-        for curve in self._persistence_curves:
-            try:
-                self.plot.removeItem(curve)
-            except Exception:
-                pass
-        self._persistence_curves = []
-        decay = self._get_decay()
-        for index in range(self._persistence_length):
-            alpha = 255 * decay(index + 1, self._persistence_length + 1)
-            color = self._persistence_color
-            curve = self.plot.plot(pen=(color.red(), color.green(), color.blue(), alpha))
-            curve.setZValue(600 - index)
-            self._persistence_curves.append(curve)
-
-    def _baseline_for_x(self, x: np.ndarray, bx: np.ndarray, by: np.ndarray) -> np.ndarray:
-        key = (int(x.size), float(x[0]), float(x[-1]), id(bx), id(by))
-        if key == self._baseline_cache_key and self._baseline_cache_y is not None:
-            return self._baseline_cache_y
-        base = np.interp(x, bx, by, left=float(by[0]), right=float(by[-1])).astype(np.float32)
-        self._baseline_cache_key = key
-        self._baseline_cache_y = base
-        return base
-
-    def _current_y_with_options(self, data_storage):
-        y = np.asarray(data_storage.y, dtype=np.float32)
-        if self._subtract_baseline and getattr(data_storage, "baseline", None) is not None and getattr(data_storage, "baseline_x", None) is not None:
-            x = np.asarray(data_storage.x, dtype=np.float64)
-            bx = np.asarray(data_storage.baseline_x, dtype=np.float64)
-            by = np.asarray(data_storage.baseline, dtype=np.float64)
-            if len(x) == len(bx) and np.allclose(x, bx, rtol=0.0, atol=1e-9):
-                base = by.astype(np.float32, copy=False)
-            else:
-                base = self._baseline_for_x(x, bx, by)
-            y = y - base
-        return y
-
     def update_plot(self, data_storage, force: bool = False) -> None:
+        start_t = time.perf_counter()
         if getattr(data_storage, "x", None) is None or getattr(data_storage, "y", None) is None:
             return
-        self._ensure_persistence_curves()
-        y_plot = self._current_y_with_options(data_storage)
-        x_plot, y_peak = self._decimate_line_for_display(
+
+        y_source = np.asarray(data_storage.y, dtype=np.float32)
+        x_plot, y_plot = self._decimate_line_for_display(
             data_storage.x,
-            y_plot,
-            mode="peak",
+            y_source,
             max_bins=self._display_peak_bins(),
         )
 
         x0 = float(data_storage.x[0])
         x1 = float(data_storage.x[-1])
-        xr = (x0, x1)
-        if self._last_xrange != xr:
+        self._data_xrange = (x0, x1)
+        if self._last_xrange is None:
             self.plot.setXRange(x0, x1)
-            self._last_xrange = xr
+            self._last_xrange = (x0, x1)
 
-        if self._subtract_baseline:
-            try:
-                y_max = float(np.nanmax(y_peak))
-                y_min = float(np.nanmin(y_peak))
-            except ValueError:
-                y_min, y_max = 0.0, 6.0
-            self.plot.setYRange(y_min - 1.0, y_max + 3.0)
-            self.curve.setPen(pg.mkPen(pg.mkColor("w"), width=2))
-            self.curve_fill.clear()
-        else:
-            self.plot.setYRange(-140.0, 20.0)
-            self.curve.setPen(self._main_color)
-            self.curve_fill.setFillLevel(self._main_fill_level)
-            self.curve_fill.setBrush(self._main_fill_brush)
-            self.curve_fill.setData(x_plot, y_peak, connect="finite")
-
-        self.curve.setData(x_plot, y_peak, connect="finite")
-        if self._peak_hold_enabled and getattr(data_storage, "peak_hold_max", None) is not None:
-            self.curve_peak_hold_max.setData(data_storage.x, data_storage.peak_hold_max)
-        elif force:
-            self.curve_peak_hold_max.clear()
-        if getattr(data_storage, "peak_hold_min", None) is not None:
-            self.curve_peak_hold_min.setData(data_storage.x, data_storage.peak_hold_min)
-        elif force:
-            self.curve_peak_hold_min.clear()
-        if self._average_enabled and getattr(data_storage, "average", None) is not None:
-            self.curve_average.setData(data_storage.x, data_storage.average)
-        elif force:
-            self.curve_average.clear()
-        if self._baseline_enabled and getattr(data_storage, "baseline", None) is not None and getattr(data_storage, "baseline_x", None) is not None:
-            self.curve_baseline.setData(data_storage.baseline_x, data_storage.baseline)
-        elif force:
-            self.curve_baseline.clear()
-        if self._persistence_enabled:
-            if self._persistence_data is None:
-                self._persistence_data = collections.deque(maxlen=self._persistence_length)
-            else:
-                for index, y_prev in enumerate(self._persistence_data):
-                    self._persistence_curves[index].setData(data_storage.x, y_prev)
-            self._persistence_data.appendleft(np.asarray(data_storage.y, dtype=np.float32))
-        elif force:
-            for curve in self._persistence_curves:
-                curve.clear()
+        y_display = np.asarray(self._display_values(y_plot), dtype=np.float32)
+        self.plot.setYRange(self._y_min_db, self._y_min_db + self._y_range_db, padding=0.0)
+        self.curve_fill.setData(x_plot, y_display, connect="finite")
+        self.curve.setData(x_plot, y_display, connect="finite")
+        if force:
+            self.curve.setVisible(True)
+            self.curve_fill.setVisible(True)
+        self._profile_calls += 1
+        self._profile_elapsed_s += max(0.0, time.perf_counter() - start_t)
 
     def recalculate_plot(self, data_storage) -> None:
         if getattr(data_storage, "x", None) is None:
             return
         QtCore.QTimer.singleShot(0, lambda: self.update_plot(data_storage, force=True))
 
+    def center_view_on_frequency(self, freq_hz: float, *, default_span_hz: float | None = None) -> None:
+        freq_hz = float(freq_hz)
+        if not np.isfinite(freq_hz):
+            return
+        try:
+            current = self.plot.getViewBox().viewRange()[0]
+            current_span = abs(float(current[1]) - float(current[0]))
+        except Exception:
+            current_span = 0.0
+        span_hz = float(default_span_hz) if default_span_hz is not None and np.isfinite(default_span_hz) and default_span_hz > 0.0 else current_span
+        if not np.isfinite(span_hz) or span_hz <= 0.0:
+            span_hz = 1_000_000.0
+        half_span = span_hz * 0.5
+        self.plot.setXRange(freq_hz - half_span, freq_hz + half_span, padding=0.0)
+        self._last_xrange = (freq_hz - half_span, freq_hz + half_span)
+
     def clear_plot(self) -> None:
         self.curve_fill.clear()
         self.curve.clear()
-        self.curve_peak_hold_max.clear()
-        self.curve_peak_hold_min.clear()
-        self.curve_average.clear()
-        self.curve_baseline.clear()
-        if self._persistence_data is not None:
-            self._persistence_data.clear()
-        for curve in self._persistence_curves:
-            curve.clear()
+        self._last_xrange = None
+        self._data_xrange = None
 
-    def get_max_display_bins(self) -> int:
-        return self._max_display_bins
-
-    def set_max_display_bins(self, value: int) -> None:
-        self._max_display_bins = int(max(512, value))
-
-    def get_peak_hold_enabled(self) -> bool:
-        return self._peak_hold_enabled
-
-    def set_peak_hold_enabled(self, enabled: bool) -> None:
-        self._peak_hold_enabled = bool(enabled)
-        self.curve_peak_hold_max.setVisible(self._peak_hold_enabled)
-
-    def get_average_enabled(self) -> bool:
-        return self._average_enabled
-
-    def set_average_enabled(self, enabled: bool) -> None:
-        self._average_enabled = bool(enabled)
-        self.curve_average.setVisible(self._average_enabled)
-
-    def get_baseline_enabled(self) -> bool:
-        return self._baseline_enabled
-
-    def set_baseline_enabled(self, enabled: bool) -> None:
-        self._baseline_enabled = bool(enabled)
-        self.curve_baseline.setVisible(self._baseline_enabled)
-
-    def get_subtract_baseline(self) -> bool:
-        return self._subtract_baseline
-
-    def set_subtract_baseline(self, enabled: bool) -> None:
-        self._subtract_baseline = bool(enabled)
-
-    maxDisplayBins = pyqtProperty(int, fget=get_max_display_bins, fset=set_max_display_bins)
-    peakHoldEnabled = pyqtProperty(bool, fget=get_peak_hold_enabled, fset=set_peak_hold_enabled)
-    averageEnabled = pyqtProperty(bool, fget=get_average_enabled, fset=set_average_enabled)
-    baselineEnabled = pyqtProperty(bool, fget=get_baseline_enabled, fset=set_baseline_enabled)
-    subtractBaseline = pyqtProperty(bool, fget=get_subtract_baseline, fset=set_subtract_baseline)
+    def consume_profile_metrics(self) -> dict[str, float]:
+        calls = int(self._profile_calls)
+        elapsed_s = float(self._profile_elapsed_s)
+        self._profile_calls = 0
+        self._profile_elapsed_s = 0.0
+        return {
+            "calls": float(calls),
+            "avg_ms": float((elapsed_s / max(1, calls)) * 1000.0),
+        }

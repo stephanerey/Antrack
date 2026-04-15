@@ -212,13 +212,17 @@ class ThreadManager:
 
         if thread_name in self.workers:
             self.workers[thread_name].abort = True
-            self.threads[thread_name].quit()
-            self.threads[thread_name].wait(1000)
-            self.logger.info("Thread '%s' stopped", thread_name)
+            thread = self.threads[thread_name]
+            thread.quit()
+            stopped = thread.wait(1000)
+            if stopped:
+                self.logger.info("Thread '%s' stopped", thread_name)
+            else:
+                self.logger.warning("Thread '%s' did not stop within timeout", thread_name)
 
     def stop_all_threads(self) -> None:
         """Request cancellation of all threads (legacy API)."""
-        self.shutdown(graceful=True, timeout_s=5.0)
+        self.shutdown(graceful=True, timeout_s=0.5)
 
     def shutdown(self, graceful: bool = True, timeout_s: float = 5.0) -> None:
         """Shutdown all tasks with a bounded timeout.

@@ -7,6 +7,8 @@ import logging
 import numpy as np
 from PyQt5 import QtCore
 
+from antrack.core.dsp.snr import db_to_linear_power, linear_power_to_db
+
 
 class HistoryBuffer:
     """Circular history buffer preserving the most recent traces."""
@@ -88,6 +90,8 @@ class DataStorage(QtCore.QObject):
         self.history = None
         self.waterfall_history = None
         self._waterfall_frame_counter = 0
+        self._waterfall_accumulator = None
+        self._waterfall_accumulator_count = 0
         self.reset_data()
 
     def reset_data(self) -> None:
@@ -99,8 +103,9 @@ class DataStorage(QtCore.QObject):
 
     def update(self, data: dict) -> None:
         y_in = np.asarray(data["y"], dtype=np.float32)
+        history_y_in = np.asarray(data.get("history_y", data["y"]), dtype=np.float32)
         if self.y is not None and len(y_in) != len(self.y):
-            self.logger.warning(
+            self.logger.info(
                 "%d bins coming from backend, expected %d; resetting storage",
                 len(y_in),
                 len(self.y),
@@ -113,13 +118,17 @@ class DataStorage(QtCore.QObject):
             self.x_wf = self._decimate_x_for_waterfall(self.x)
 
         data["y"] = y_in
-        if self.subtract_baseline and self.baseline is not None and len(data["y"]) == len(self.baseline):
-            data["y"] = (data["y"] - self.baseline).astype(np.float32, copy=False)
+        history_data = {"y": history_y_in}
+        if self.subtract_baseline and self.baseline is not None:
+            if len(data["y"]) == len(self.baseline):
+                data["y"] = (data["y"] - self.baseline).astype(np.float32, copy=False)
+            if len(history_data["y"]) == len(self.baseline):
+                history_data["y"] = (history_data["y"] - self.baseline).astype(np.float32, copy=False)
 
         if self.compute_average_enabled:
             self.average_counter += 1
 
-        self.update_history(data.copy())
+        self.update_history(history_data)
         self.update_data(data)
 
     def update_data(self, data: dict) -> None:
@@ -138,13 +147,9 @@ class DataStorage(QtCore.QObject):
         if self.history is None:
             self.history = HistoryBuffer(len(y), self.max_history_size, dtype=np.float32)
         self.history.append(y)
-        self._waterfall_frame_counter += 1
-        if self._waterfall_frame_counter % self.waterfall_time_stride == 0:
-            y_wf = self._decimate_for_waterfall(y)
-            if self.waterfall_history is None or self.waterfall_history.data_size != len(y_wf):
-                self.waterfall_history = HistoryBuffer(len(y_wf), self.max_history_size, dtype=np.float32)
-            self.waterfall_history.append(y_wf)
-            self.history_updated.emit(self)
+        if self.x is not None:
+            self.x_wf = self._decimate_x_for_waterfall(self.x)
+        self._append_waterfall_trace(y, emit_signal=True)
 
     def _decimate_x_for_waterfall(self, x: np.ndarray) -> np.ndarray:
         x = np.asarray(x, dtype=np.float64)
@@ -152,19 +157,49 @@ class DataStorage(QtCore.QObject):
         if n <= self.waterfall_max_bins:
             return x.copy()
         step = int(np.ceil(n / float(self.waterfall_max_bins)))
-        return x[::step].copy()
+        m = int(np.ceil(n / float(step)))
+        pad = m * step - n
+        x_pad = np.pad(x, (0, pad), mode="edge") if pad > 0 else x
+        x_r = x_pad.reshape(m, step)
+        return np.mean(x_r, axis=1).astype(np.float64, copy=False)
 
     def _decimate_for_waterfall(self, y: np.ndarray) -> np.ndarray:
         y = np.asarray(y, dtype=np.float32)
         n = int(y.size)
         if n <= self.waterfall_max_bins:
-            return y
+            return y.copy()
         step = int(np.ceil(n / float(self.waterfall_max_bins)))
         m = int(np.ceil(n / float(step)))
         pad = m * step - n
         y_pad = np.pad(y, (0, pad), mode="edge") if pad > 0 else y
         y_r = y_pad.reshape(m, step)
-        return np.percentile(y_r, 90.0, axis=1).astype(np.float32, copy=False)
+        y_linear = db_to_linear_power(y_r)
+        return np.asarray(linear_power_to_db(np.mean(y_linear, axis=1)), dtype=np.float32)
+
+    def _reset_waterfall_accumulator(self) -> None:
+        self._waterfall_accumulator = None
+        self._waterfall_accumulator_count = 0
+
+    def _append_waterfall_trace(self, y: np.ndarray, *, emit_signal: bool) -> None:
+        y_wf = self._decimate_for_waterfall(y)
+        y_wf_linear = db_to_linear_power(y_wf)
+        if self._waterfall_accumulator is None or self._waterfall_accumulator.shape != y_wf_linear.shape:
+            self._waterfall_accumulator = np.zeros_like(y_wf_linear, dtype=np.float64)
+            self._waterfall_accumulator_count = 0
+        self._waterfall_accumulator += y_wf_linear
+        self._waterfall_accumulator_count += 1
+        if self._waterfall_accumulator_count < self.waterfall_time_stride:
+            return
+        y_wf_avg = np.asarray(
+            linear_power_to_db(self._waterfall_accumulator / float(max(1, self._waterfall_accumulator_count))),
+            dtype=np.float32,
+        )
+        if self.waterfall_history is None or self.waterfall_history.data_size != len(y_wf_avg):
+            self.waterfall_history = HistoryBuffer(len(y_wf_avg), self.max_history_size, dtype=np.float32)
+        self.waterfall_history.append(y_wf_avg)
+        self._reset_waterfall_accumulator()
+        if emit_signal:
+            self.history_updated.emit(self)
 
     def set_compute_average_enabled(self, enabled: bool) -> None:
         self.compute_average_enabled = bool(enabled)
@@ -224,15 +259,32 @@ class DataStorage(QtCore.QObject):
             self.smooth_window = str(window)
             self.recalculate_data()
 
+    def set_waterfall_time_stride(self, stride: int) -> None:
+        stride = int(max(1, stride))
+        if stride == self.waterfall_time_stride:
+            return
+        self.waterfall_time_stride = stride
+        self._reset_waterfall_accumulator()
+        if self.history is not None and int(self.history.history_size) > 0:
+            self.recalculate_history()
+
     def recalculate_history(self) -> None:
         if self.history is None:
             return
         history = self.history.get_buffer().copy()
+        if history.size == 0:
+            return
         if self.prev_baseline is not None and len(history[-1]) == len(self.prev_baseline):
             history += self.prev_baseline
             self.prev_baseline = None
         if self.subtract_baseline and self.baseline is not None and len(history[-1]) == len(self.baseline):
             history -= self.baseline
+        self.waterfall_history = None
+        self._reset_waterfall_accumulator()
+        if self.x is not None:
+            self.x_wf = self._decimate_x_for_waterfall(self.x)
+        for row in history:
+            self._append_waterfall_trace(row, emit_signal=False)
         self.history_recalculated.emit(self)
 
     def recalculate_data(self) -> None:

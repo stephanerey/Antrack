@@ -243,7 +243,7 @@ class MainUi(
             pass
         try:
             if getattr(self, "thread_manager", None):
-                self.thread_manager.shutdown(graceful=True, timeout_s=2.0)
+                self.thread_manager.shutdown(graceful=True, timeout_s=0.75)
         except Exception:
             pass
         super().closeEvent(event)

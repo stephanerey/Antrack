@@ -2,10 +2,15 @@
 # Author : Stephane Rey
 # Date   : 07.07.2023
 
+from pathlib import Path
+import sys
+
+# Allow direct execution via `python main.py` from `src/antrack`.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from antrack.app_info import version
 
-import sys
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from PyQt5.QtWidgets import QApplication, QMessageBox
@@ -85,13 +90,10 @@ def main() -> int:
         ui.show()
         logger.info("Interface graphique initialisée")
 
-        # Cleanup hook
-        app.aboutToQuit.connect(thread_manager.stop_all_threads)
-
         exit_code = app.exec_()
 
         logger.info("Fermeture de l'application...")
-        thread_manager.stop_all_threads()
+        thread_manager.shutdown(graceful=True, timeout_s=0.5)
 
         return int(exit_code)
 
