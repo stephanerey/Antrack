@@ -49,21 +49,36 @@ def average_power_spectrum_db(traces_db: np.ndarray, axis: int = 0) -> np.ndarra
     return np.asarray(linear_power_to_db(mean_linear), dtype=np.float32)
 
 
-def compute_band_power_metrics(spectrum_db: np.ndarray) -> dict[str, float]:
-    """Return integrated and per-bin band power metrics for a spectrum slice."""
+def compute_band_power_metrics(
+    spectrum_db: np.ndarray,
+    *,
+    bin_width_hz: float,
+    bandwidth_hz: float | None = None,
+) -> dict[str, float]:
+    """Return integrated, per-bin, and density band-power metrics for a spectrum slice."""
     spectrum = np.asarray(spectrum_db, dtype=np.float64)
     finite = spectrum[np.isfinite(spectrum)]
     if finite.size == 0:
         return {
             "integrated_db": float("nan"),
             "per_bin_db": float("nan"),
+            "per_hz_db": float("nan"),
             "bin_count": 0.0,
         }
 
     linear = db_to_linear_power(finite)
+    per_bin_db = float(linear_power_to_db(np.mean(linear)))
+    per_hz_db = float(per_bin_db - bin_width_to_density_offset_db(bin_width_hz))
+    effective_bandwidth_hz = float(
+        max(
+            abs(float(bandwidth_hz)) if bandwidth_hz is not None else float(finite.size) * float(bin_width_hz),
+            1.0,
+        )
+    )
     return {
-        "integrated_db": float(linear_power_to_db(np.sum(linear))),
-        "per_bin_db": float(linear_power_to_db(np.mean(linear))),
+        "integrated_db": float(per_hz_db + (10.0 * math.log10(effective_bandwidth_hz))),
+        "per_bin_db": per_bin_db,
+        "per_hz_db": per_hz_db,
         "bin_count": float(finite.size),
     }
 

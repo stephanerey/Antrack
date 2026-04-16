@@ -34,6 +34,7 @@ class SpectrumPlotWidget(QWidget):
         self._selection_color = pg.mkColor(215, 60, 60)
         self._selection_freq_hz = 137_000_000.0
         self._selection_bw_hz = 25_000.0
+        self._max_selection_bw_hz = None
         self._overlay_guard = False
         self._last_xrange = None
         self._last_visible_span_emit = None
@@ -57,7 +58,7 @@ class SpectrumPlotWidget(QWidget):
         self.pos_label = self.graphics.addLabel(row=0, col=0, justify="right")
         self.plot = self.graphics.addPlot(row=1, col=0)
         self.plot.showGrid(x=True, y=True)
-        self.plot.setLabel("left", "Power (dB/bin)")
+        self.plot.setLabel("left", "Power (dBm)")
         self.plot.setLabel("bottom", "Frequency", units="Hz")
         self.plot.setClipToView(True)
         self.plot.setDownsampling(auto=True, mode="subsample")
@@ -118,7 +119,7 @@ class SpectrumPlotWidget(QWidget):
         pos = evt[0]
         if self.plot.sceneBoundingRect().contains(pos):
             mouse_point = self.plot.vb.mapSceneToView(pos)
-            unit_label = "dB/Hz" if self._power_unit == "db_per_hz" else "dB/bin"
+            unit_label = "dBm/Hz" if self._power_unit == "db_per_hz" else "dBm"
             self.pos_label.setText(
                 f"<span style='font-size: 12pt'>f={mouse_point.x() / 1e6:0.3f} MHz, P={mouse_point.y():0.3f} {unit_label}</span>"
             )
@@ -136,7 +137,7 @@ class SpectrumPlotWidget(QWidget):
         if normalized == self._power_unit:
             return
         self._power_unit = normalized
-        self.plot.setLabel("left", "Power (dB/Hz)" if normalized == "db_per_hz" else "Power (dB/bin)")
+        self.plot.setLabel("left", "Power (dBm/Hz)" if normalized == "db_per_hz" else "Power (dBm)")
 
     def set_bin_width_hz(self, bin_width_hz: float) -> None:
         width_hz = float(max(1e-12, abs(float(bin_width_hz))))
@@ -147,6 +148,41 @@ class SpectrumPlotWidget(QWidget):
             self._max_visible_span_hz = None
             return
         self._max_visible_span_hz = float(max(1.0, abs(float(span_hz))))
+
+    def set_max_selection_bandwidth_hz(self, bandwidth_hz: float | None) -> None:
+        if bandwidth_hz is None:
+            self._max_selection_bw_hz = None
+            return
+        normalized = float(max(100.0, abs(float(bandwidth_hz))))
+        if self._max_selection_bw_hz is not None and abs(float(self._max_selection_bw_hz) - normalized) <= 1.0:
+            return
+        self._max_selection_bw_hz = normalized
+        clamped_freq_hz, clamped_bw_hz = self._clamp_selection(self._selection_freq_hz, self._selection_bw_hz)
+        if (
+            abs(clamped_freq_hz - float(self._selection_freq_hz)) > 1.0
+            or abs(clamped_bw_hz - float(self._selection_bw_hz)) > 1.0
+        ):
+            self.set_receiver_selection(clamped_freq_hz, clamped_bw_hz)
+
+    def _clamp_selection(self, freq_hz: float, bw_hz: float) -> tuple[float, float]:
+        freq_hz = float(freq_hz)
+        bw_hz = float(max(100.0, abs(float(bw_hz))))
+        if self._max_selection_bw_hz is not None and np.isfinite(self._max_selection_bw_hz):
+            bw_hz = float(min(bw_hz, self._max_selection_bw_hz))
+        if self._data_xrange is None:
+            return freq_hz, bw_hz
+        x0 = float(self._data_xrange[0])
+        x1 = float(self._data_xrange[1])
+        span_hz = float(max(100.0, x1 - x0))
+        bw_hz = float(min(bw_hz, span_hz))
+        half_bw = bw_hz * 0.5
+        min_center = x0 + half_bw
+        max_center = x1 - half_bw
+        if min_center <= max_center:
+            freq_hz = float(min(max(freq_hz, min_center), max_center))
+        else:
+            freq_hz = 0.5 * (x0 + x1)
+        return freq_hz, bw_hz
 
     def _mouse_clicked(self, evt) -> None:
         if evt is None or evt.button() != QtCore.Qt.LeftButton:
@@ -206,8 +242,12 @@ class SpectrumPlotWidget(QWidget):
             return
         self._overlay_guard = True
         try:
-            self._selection_freq_hz = float(self.selection_line.value())
+            self._selection_freq_hz, self._selection_bw_hz = self._clamp_selection(
+                float(self.selection_line.value()),
+                self._selection_bw_hz,
+            )
             half_bw = max(50.0, float(self._selection_bw_hz) * 0.5)
+            self.selection_line.setValue(self._selection_freq_hz)
             self.selection_region.setRegion([
                 self._selection_freq_hz - half_bw,
                 self._selection_freq_hz + half_bw,
@@ -222,19 +262,31 @@ class SpectrumPlotWidget(QWidget):
         region = self.selection_region.getRegion()
         center = 0.5 * (float(region[0]) + float(region[1]))
         bandwidth = max(100.0, float(region[1]) - float(region[0]))
+        center, bandwidth = self._clamp_selection(center, bandwidth)
         self._overlay_guard = True
         try:
             self._selection_freq_hz = center
             self._selection_bw_hz = bandwidth
             self.selection_line.setValue(center)
+            half_bw = bandwidth * 0.5
+            self.selection_region.setRegion([
+                center - half_bw,
+                center + half_bw,
+            ])
         finally:
             self._overlay_guard = False
         self.selection_frequency_changed.emit(center)
         self.selection_bandwidth_changed.emit(bandwidth)
 
     def set_receiver_selection(self, freq_hz: float, bw_hz: float) -> None:
-        self._selection_freq_hz = float(freq_hz)
-        self._selection_bw_hz = float(max(100.0, bw_hz))
+        next_freq_hz, next_bw_hz = self._clamp_selection(freq_hz, bw_hz)
+        if (
+            abs(next_freq_hz - float(self._selection_freq_hz)) <= 1.0
+            and abs(next_bw_hz - float(self._selection_bw_hz)) <= 1.0
+        ):
+            return
+        self._selection_freq_hz = next_freq_hz
+        self._selection_bw_hz = next_bw_hz
         self._overlay_guard = True
         try:
             self.selection_line.setValue(self._selection_freq_hz)

@@ -140,6 +140,11 @@ class WaterfallPlotWidget(QWidget):
         self.wf_min_db = float(value_db)
         self.wf_max_db = self.wf_min_db + float(self.wf_dynamic_range_db)
 
+    def set_level_window(self, minimum_db: float, maximum_db: float) -> None:
+        self.wf_min_db = float(minimum_db)
+        self.wf_max_db = float(max(self.wf_min_db + 1.0, maximum_db))
+        self.wf_dynamic_range_db = float(self.wf_max_db - self.wf_min_db)
+
     def set_power_unit(self, unit: str) -> None:
         self._power_unit = "db_per_hz" if str(unit).strip().lower() in {"db/hz", "db_per_hz"} else "db_per_bin"
 

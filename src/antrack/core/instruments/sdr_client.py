@@ -131,6 +131,7 @@ class SdrClient(QObject):
         self.smoothing = self._normalize_smoothing(cfg.get("smoothing", "light"))
         self.source_index = int(cfg.get("source_index", 0))
         self.source_key = str(cfg.get("source_key", "")).strip()
+        self._heal_frequency_state()
         self._plot_interval_s = 1.0 / max(1.0, self.fft_fps)
         self._fft_ema_alpha = float(SMOOTHING_PRESETS[self.smoothing])
         self._fft_db_ema: np.ndarray | None = None
@@ -145,6 +146,26 @@ class SdrClient(QObject):
         self.data_storage.set_compute_peak_min_enabled(False)
         self._refresh_plot_interval()
         self.refresh_sources(open_selected=True)
+
+    def _heal_frequency_state(self) -> None:
+        center_hz = float(self.center_freq)
+        receiver_hz = float(self.receiver_freq_hz)
+        sample_rate_hz = float(max(1.0, self.sample_rate))
+        max_offset_hz = sample_rate_hz * 0.5
+        if not math.isfinite(center_hz) or center_hz <= 0.0:
+            self.center_freq = float(max(1.0, receiver_hz))
+            return
+        if not math.isfinite(receiver_hz) or receiver_hz <= 0.0:
+            self.receiver_freq_hz = float(center_hz)
+            return
+        if abs(receiver_hz - center_hz) > max_offset_hz:
+            self.logger.warning(
+                "Healing inconsistent SDR frequency state: center=%.0f Hz receiver=%.0f Hz sample_rate=%.0f Hz. Recentering on receiver.",
+                center_hz,
+                receiver_hz,
+                sample_rate_hz,
+            )
+            self.center_freq = float(receiver_hz)
 
     @staticmethod
     def _normalize_fft_size_mode(value: Any) -> str:
@@ -556,6 +577,14 @@ class SdrClient(QObject):
         if not self._wait_for_stream_thread_stopped(timeout_s=1.5) or not self._wait_for_spectrum_thread_stopped(timeout_s=1.5):
             self._emit_error("SDR stream restart blocked: previous worker thread is still running.")
             return
+        if self.mode == "hardware":
+            try:
+                self._sdr = None
+                gc.collect()
+                self._open_selected_source()
+                time.sleep(0.1)
+            except Exception:
+                pass
         self._thread_stop.clear()
         self._stream_reconfigure_requested.clear()
         self._spectrum_wakeup.clear()
@@ -568,6 +597,7 @@ class SdrClient(QObject):
         self._perf_storage_s = 0.0
         self._perf_emit_s = 0.0
         self._last_perf_emit = time.monotonic()
+        self._started_emitted = False
         if self.thread_manager is not None:
             self.thread_manager.start_thread(self._thread_name, self._stream_loop)
             self.thread_manager.start_thread(self._spectrum_thread_name, self._spectrum_loop)
@@ -576,8 +606,6 @@ class SdrClient(QObject):
             self._spectrum_thread = threading.Thread(target=self._spectrum_loop, name="SdrSpectrum", daemon=True)
             self._thread.start()
             self._spectrum_thread.start()
-        self.started.emit()
-        self._emit_status(f"SDR stream started in {self.mode} mode.")
 
     def stop(self) -> None:
         self._thread_stop.set()
@@ -601,8 +629,10 @@ class SdrClient(QObject):
         self._wait_for_spectrum_thread_stopped(timeout_s=1.5)
         if not self.running:
             self._close_stream()
-        self.stopped.emit()
-        self._emit_status("SDR stream stopped.")
+        if getattr(self, "_started_emitted", False):
+            self.stopped.emit()
+            self._emit_status("SDR stream stopped.")
+        self._started_emitted = False
 
     def close(self) -> None:
         self.stop()
@@ -614,7 +644,7 @@ class SdrClient(QObject):
         worker = self.thread_manager.get_worker(self._thread_name) if self.thread_manager is not None else None
         try:
             if self.mode == "hardware":
-                self._open_stream()
+                self._open_stream_with_recovery()
             while not self._thread_stop.is_set():
                 if worker is not None and getattr(worker, "abort", False):
                     break
@@ -664,6 +694,26 @@ class SdrClient(QObject):
             return
         self._close_stream()
         if not self._thread_stop.is_set():
+            self._open_stream_with_recovery()
+
+    def _open_stream_with_recovery(self) -> None:
+        try:
+            self._open_stream()
+            return
+        except Exception as first_exc:
+            self.logger.warning(
+                "SDR stream open failed (freq=%.0f Hz, rate=%.0f Hz, antenna=%s): %s. Retrying after source reopen.",
+                float(self.center_freq),
+                float(self.sample_rate),
+                str(self.antenna),
+                first_exc,
+            )
+            self._close_stream()
+            try:
+                self._open_selected_source()
+                time.sleep(0.2)
+            except Exception:
+                pass
             self._open_stream()
 
     def _open_stream(self) -> None:
@@ -671,7 +721,28 @@ class SdrClient(QObject):
             return
         self._apply_hardware_settings()
         self._stream = self._sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
-        self._sdr.activateStream(self._stream, 0)
+        activate_result = self._sdr.activateStream(self._stream, 0)
+        if isinstance(activate_result, (int, float)) and int(activate_result) < 0:
+            self.logger.error(
+                "activateStream failed with code %s (freq=%.0f Hz, rate=%.0f Hz, antenna=%s, agc=%s, if_gain=%s, rf_gain=%s).",
+                int(activate_result),
+                float(self.center_freq),
+                float(self.sample_rate),
+                str(self.antenna),
+                bool(self.agc),
+                int(self.if_gain),
+                int(self.rf_gain),
+            )
+            try:
+                self._sdr.closeStream(self._stream)
+            except Exception:
+                pass
+            self._stream = None
+            raise RuntimeError(f"activateStream returned {int(activate_result)}")
+        if not getattr(self, "_started_emitted", False):
+            self._started_emitted = True
+            self.started.emit()
+            self._emit_status(f"SDR stream started in {self.mode} mode.")
 
     def _close_stream(self) -> None:
         if self._sdr is None or self._stream is None:
@@ -751,8 +822,12 @@ class SdrClient(QObject):
         self._write_setting(["dabnotch_ctrl", "dabNotch_ctrl", "dab_notch"], self.dab_notch)
 
     def _read_next_block(self) -> np.ndarray:
-        if self.mode != "hardware" or self._sdr is None:
+        if self.mode != "hardware":
             return self._generate_dummy_iq_block()
+        if self._sdr is None:
+            self._open_selected_source()
+            if self._sdr is None:
+                raise RuntimeError("hardware SDR device is not open")
         if self._stream is None:
             self._open_stream()
         if self._read_buffer is None or int(self._read_buffer.size) != int(self.buff_size):
@@ -985,6 +1060,7 @@ class SdrClient(QObject):
         supported_rates = self._supported_sample_rates()
         reconfigure_stream = bool(self.mode == "hardware" and self.running)
         self.sample_rate = self._coerce_sample_rate(requested_rate, supported_rates)
+        self.bandwidth_hz = float(min(self._max_bandwidth_hz(), max(100.0, float(self.bandwidth_hz))))
         if self.fft_size_mode == "auto":
             self.fft_size = select_fft_size(self.sample_rate, self.buff_size)
         else:
@@ -1140,8 +1216,12 @@ class SdrClient(QObject):
         self._emit_settings_changed()
 
     def set_bandwidth(self, bandwidth_hz: float) -> None:
-        self.bandwidth_hz = float(max(100.0, abs(float(bandwidth_hz))))
+        self.bandwidth_hz = float(min(self._max_bandwidth_hz(), max(100.0, abs(float(bandwidth_hz)))))
         self._emit_settings_changed()
+
+    def _max_bandwidth_hz(self) -> float:
+        half_rate = float(max(100.0, float(self.sample_rate) * 0.5))
+        return float(max(100.0, np.nextafter(half_rate, 0.0)))
 
     def _emit_settings_changed(self) -> None:
         snapshot = self.snapshot_state()
