@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # gui/multi_track_card.py
 from datetime import datetime, timezone
 import time
@@ -47,15 +49,15 @@ class MultiTrackCard(QGroupBox):
         self.setCursor(Qt.PointingHandCursor)
 
         self.setStyleSheet(
-            f"QGroupBox {{ {BORDER_CSS}; background:{PASTEL_RED}; font-weight:600; margin-top:8px; }}"
-            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding:0 3px; }"
-            "QLabel { background: transparent; }"
+            f"QGroupBox {{ {BORDER_CSS}; background:{PASTEL_RED}; font-weight:600; font-size:7pt; margin-top:8px; }}"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding:0 3px; font-size:7pt; }"
+            "QLabel { background: transparent; font-size:7pt; }"
         )
 
         form = QFormLayout()
-        form.setContentsMargins(8, 8, 8, 6)
+        form.setContentsMargins(8, 6, 8, 4)
         form.setHorizontalSpacing(6)
-        form.setVerticalSpacing(2)
+        form.setVerticalSpacing(1)
 
         self.lbl_aos = QLabel("-")
         self.lbl_los = QLabel("-")
@@ -166,9 +168,9 @@ class MultiTrackCard(QGroupBox):
 
     def _set_bg(self, color: str):
         self.setStyleSheet(
-            f"QGroupBox {{ {BORDER_CSS}; background:{color}; font-weight:600; margin-top:8px; }}"
-            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding:0 3px; }"
-            "QLabel { background: transparent; }"
+            f"QGroupBox {{ {BORDER_CSS}; background:{color}; font-weight:600; font-size:7pt; margin-top:8px; }}"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding:0 3px; font-size:7pt; }"
+            "QLabel { background: transparent; font-size:7pt; }"
         )
 
     def mousePressEvent(self, event):

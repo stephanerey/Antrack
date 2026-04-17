@@ -12,7 +12,16 @@ import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from antrack.core.data_storage import DataStorage
-from antrack.core.dsp import apply_ema, blackman_window, compute_power_spectrum_db, compute_snr, fft_max_for_sample_rate, frequency_axis, select_fft_size
+from antrack.core.dsp import (
+    WINDOW_ENBW_FACTORS,
+    apply_ema,
+    compute_power_spectrum_db,
+    compute_snr,
+    fft_max_for_sample_rate,
+    frequency_axis,
+    make_window,
+    select_fft_size,
+)
 
 try:
     import SoapySDR  # type: ignore
@@ -129,6 +138,12 @@ class SdrClient(QObject):
         self.ppm = float(cfg.get("ppm", 0.0))
         self.bandwidth_hz = float(cfg.get("bandwidth_hz", 25_000.0))
         self.smoothing = self._normalize_smoothing(cfg.get("smoothing", "light"))
+        self.fft_window = str(cfg.get("fft_window", "blackman")).strip().lower()
+        if self.fft_window not in WINDOW_ENBW_FACTORS:
+            self.fft_window = "blackman"
+        self.if_mode = str(cfg.get("if_mode", "auto")).strip().lower()
+        if self.if_mode not in {"auto", "2048", "450", "zero_if"}:
+            self.if_mode = "auto"
         self.source_index = int(cfg.get("source_index", 0))
         self.source_key = str(cfg.get("source_key", "")).strip()
         self._heal_frequency_state()
@@ -820,6 +835,8 @@ class SdrClient(QObject):
         self._write_setting(["biasT_ctrl", "biasTEnable", "biasT"], self.bias_tee)
         self._write_setting(["rfnotch_ctrl", "rfNotch_ctrl", "rf_notch", "fmnotch_ctrl"], self.fm_notch)
         self._write_setting(["dabnotch_ctrl", "dabNotch_ctrl", "dab_notch"], self.dab_notch)
+        if self.if_mode != "auto":
+            self._write_setting(["if_mode", "ifMode", "if_khz", "ifKhz"], self.if_mode)
 
     def _read_next_block(self) -> np.ndarray:
         if self.mode != "hardware":
@@ -878,7 +895,7 @@ class SdrClient(QObject):
         n = int(max(8, self.fft_size))
         if self._fft_win is not None and self._fft_win_size == n:
             return
-        win = blackman_window(n)
+        win = make_window(n, self.fft_window)
         self._fft_win = win
         self._fft_win_size = n
         coherent_gain = float(np.sum(win))
@@ -1082,6 +1099,29 @@ class SdrClient(QObject):
                 self._restart_if_needed()
         self._emit_settings_changed()
 
+    def set_fft_window(self, window_name: str) -> None:
+        normalized = str(window_name or "blackman").strip().lower()
+        if normalized not in WINDOW_ENBW_FACTORS:
+            normalized = "blackman"
+        if normalized == self.fft_window:
+            return
+        self.fft_window = normalized
+        self._fft_win = None
+        self._fft_win_size = 0
+        self._fft_db_ema = None
+        self._emit_settings_changed()
+
+    def set_if_mode(self, if_mode: str) -> None:
+        normalized = str(if_mode or "auto").strip().lower()
+        if normalized not in {"auto", "2048", "450", "zero_if"}:
+            normalized = "auto"
+        if normalized == self.if_mode:
+            return
+        self.if_mode = normalized
+        if self.mode == "hardware" and self._sdr is not None and normalized != "auto":
+            self._write_setting(["if_mode", "ifMode", "if_khz", "ifKhz"], normalized)
+        self._emit_settings_changed()
+
     def _supported_sample_rates(self) -> list[float]:
         supported: list[float] = []
         for raw_rate in self.hwinfo.get("sample_rates", []):
@@ -1244,6 +1284,7 @@ class SdrClient(QObject):
             "buffer_size": int(self.buff_size),
             "fft_size": int(self.fft_size),
             "fft_size_mode": str(self.fft_size_mode),
+            "fft_window": str(self.fft_window),
             "plot_refresh_fps": None if self.plot_refresh_fps is None else float(self.plot_refresh_fps),
             "if_gain": int(self.if_gain),
             "rf_gain": int(self.rf_gain),
@@ -1261,6 +1302,15 @@ class SdrClient(QObject):
             "fm_notch": bool(self.fm_notch),
             "dab_notch": bool(self.dab_notch),
             "ppm": float(self.ppm),
+            "if_mode": str(self.if_mode),
+            "bin_width_hz": float(max(1e-12, float(self.sample_rate) / max(1, int(self.fft_size)))),
+            "rbw_hz": float(
+                max(
+                    1e-12,
+                    (float(self.sample_rate) / max(1, int(self.fft_size)))
+                    * float(WINDOW_ENBW_FACTORS.get(self.fft_window, 1.73)),
+                )
+            ),
             "sources": sources,
             "source_index": int(self.source_index),
             "source_key": str(self.source_key),

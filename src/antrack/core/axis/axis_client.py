@@ -156,19 +156,34 @@ class Axis:
         }
 
         self.command_futures = {}
-        self.command_locks = {cmd: asyncio.Lock() for cmd in AxisCommand}
-        self._send_lock = asyncio.Lock()
-        self.read_lock = asyncio.Lock()
+        self.command_locks = {}
+        self._send_lock = None
+        self.read_lock = None
+        self._async_loop = None
         # Tâche asyncio pour le keep-alive périodique
         self._keep_alive_task = None
         # Callbacks de notification en cas de déconnexion détectée côté core
         self._disconnect_callbacks = []
+
+    async def _ensure_async_primitives(self):
+        """
+        Initialize asyncio-bound primitives lazily inside the active event loop.
+        This allows Axis to be constructed from a non-async worker/UI thread.
+        """
+        loop = asyncio.get_running_loop()
+        if self._async_loop is loop and self._send_lock is not None and self.read_lock is not None:
+            return
+        self._async_loop = loop
+        self.command_locks = {cmd: asyncio.Lock() for cmd in AxisCommand}
+        self._send_lock = asyncio.Lock()
+        self.read_lock = asyncio.Lock()
 
     async def connect(self):
         if self.server_status != ServerStatus.DISCONNECTED:
             return
         self.server_status = ServerStatus.CONNECTING
         try:
+            await self._ensure_async_primitives()
             self.reader, self.writer = await asyncio.open_connection(self.ip_address, self.port)
             self.server_status = ServerStatus.CONNECTED
             self.server_info.connection = ServerStatus.CONNECTED
@@ -321,8 +336,9 @@ class Axis:
             except Exception:
                 pass
             return None
+        await self._ensure_async_primitives()
         async with self._send_lock:
-            future = asyncio.get_event_loop().create_future()
+            future = asyncio.get_running_loop().create_future()
             self.command_futures[command] = future
             try:
                 # S'assurer que 'data' est un entier non signé 16-bit pour le pack
@@ -339,7 +355,20 @@ class Axis:
                 msg = struct.pack('B3xH2x', command.value, val)
                 self.writer.write(msg)
                 await self.writer.drain()
-                return await future
+                try:
+                    return await asyncio.wait_for(future, timeout=0.8)
+                except asyncio.TimeoutError:
+                    self.command_futures.pop(command, None)
+                    try:
+                        if not future.done():
+                            future.cancel()
+                    except Exception:
+                        pass
+                    try:
+                        self.logger.warning("send_command timeout: cmd=%s data=%s", getattr(command, "name", command), val)
+                    except Exception:
+                        pass
+                    return None
             except Exception as e:
                 # Clean future if sending failed
                 self.command_futures.pop(command, None)
@@ -350,6 +379,7 @@ class Axis:
                 return None
 
     async def _process_responses(self):
+        await self._ensure_async_primitives()
         while self.server_status == ServerStatus.CONNECTED:
             try:
                 async with self.read_lock:

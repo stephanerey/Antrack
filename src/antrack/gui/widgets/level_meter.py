@@ -52,7 +52,31 @@ class _LevelBarWidget(QWidget):
             norm = max(0.0, min(1.0, norm))
             bar_width = int(norm * rect.width())
             if bar_width > 0:
-                painter.fillRect(QtCore.QRect(rect.left(), rect.top() + 2, bar_width, rect.height() - 4), QtGui.QColor("#d9534f" if self._unit_key == "s_meter" else "#4ab8d8"))
+                bar_rect = QtCore.QRect(rect.left(), rect.top() + 2, bar_width, rect.height() - 4)
+                if self._unit_key == "dbm":
+                    painter.fillRect(bar_rect, QtGui.QColor("#4ab8d8"))
+                    return
+
+                threshold_dbm = -93.0
+                threshold_norm = (threshold_dbm - self._minimum) / max(1e-6, self._maximum - self._minimum)
+                threshold_norm = max(0.0, min(1.0, threshold_norm))
+                threshold_x = rect.left() + int(threshold_norm * rect.width())
+                green_color = QtGui.QColor("#58d26a")
+                red_color = QtGui.QColor("#d9534f")
+
+                bar_right = bar_rect.right() + 1
+                green_right = min(bar_right, threshold_x)
+                if green_right > rect.left():
+                    painter.fillRect(
+                        QtCore.QRect(rect.left(), rect.top() + 2, green_right - rect.left(), rect.height() - 4),
+                        green_color,
+                    )
+                if bar_right > max(rect.left(), threshold_x):
+                    red_left = max(rect.left(), threshold_x)
+                    painter.fillRect(
+                        QtCore.QRect(red_left, rect.top() + 2, bar_right - red_left, rect.height() - 4),
+                        red_color,
+                    )
 
 
 class _LevelScaleWidget(QWidget):
@@ -78,14 +102,17 @@ class _LevelScaleWidget(QWidget):
             painter.drawLine(x, 0, x, 5)
             if not show_label:
                 continue
+            label_width = 44
+            if label.startswith("+"):
+                label_width = 32
             if position <= 0.001:
-                text_rect = QtCore.QRect(x, 6, 44, 12)
+                text_rect = QtCore.QRect(x, 6, label_width, 12)
                 align = Qt.AlignLeft | Qt.AlignTop
             elif position >= 0.999:
-                text_rect = QtCore.QRect(x - 44, 6, 44, 12)
+                text_rect = QtCore.QRect(x - label_width, 6, label_width, 12)
                 align = Qt.AlignRight | Qt.AlignTop
             else:
-                text_rect = QtCore.QRect(x - 22, 6, 44, 12)
+                text_rect = QtCore.QRect(x - (label_width // 2), 6, label_width, 12)
                 align = Qt.AlignHCenter | Qt.AlignTop
             painter.drawText(text_rect, align, label)
 
@@ -167,19 +194,28 @@ class LevelMeterWidget(QWidget):
                 for value in values
             ]
         elif self._unit_key == "s_meter":
+            minimum = float(self._minimum)
+            maximum = float(self._maximum)
+            span = max(1e-6, maximum - minimum)
+            smeter_points = [
+                (-147.0, "S", True),
+                (-141.0, "1", True),
+                (-135.0, "2", False),
+                (-129.0, "3", True),
+                (-123.0, "4", False),
+                (-117.0, "5", True),
+                (-111.0, "6", False),
+                (-105.0, "7", True),
+                (-99.0, "8", False),
+                (-93.0, "9", True),
+                (-73.0, "+20", True),
+                (-53.0, "+40", True),
+                (-33.0, "+60", True),
+            ]
             ticks = [
-                (0.0, "S", True),
-                (0.09, "1", True),
-                (0.18, "", False),
-                (0.27, "3", True),
-                (0.36, "", False),
-                (0.45, "5", True),
-                (0.54, "", False),
-                (0.63, "7", True),
-                (0.76, "9", True),
-                (0.86, "+20", True),
-                (0.93, "+40", True),
-                (1.0, "+60", True),
+                ((value_dbm - minimum) / span, label, show_label)
+                for value_dbm, label, show_label in smeter_points
+                if minimum - 1e-6 <= value_dbm <= maximum + 1e-6
             ]
         else:
             minimum = float(self._minimum)

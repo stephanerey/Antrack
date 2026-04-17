@@ -298,8 +298,9 @@ class Tracker:
                             rate_az = az_speed_close
                         if getattr(self.axis_client_qt.antenna, 'az_setrate', None) != rate_az:
                             log.debug("CMD set_az_speed -> %.1f", rate_az)
-                            self.axis_client_qt.antenna.az_setrate = rate_az
-                            self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client_qt.axisClient.set_az_speed(rate_az), timeout=1.0)
+                            ack = self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client_qt.axisClient.set_az_speed(rate_az), timeout=1.0)
+                            if ack is not None:
+                                self.axis_client_qt.antenna.az_setrate = rate_az
                     except Exception as e:
                         log.info("CMD set_az_speed error: %s", e)
 
@@ -312,8 +313,9 @@ class Tracker:
                         else:
                             rate_el = el_speed_close
                         if getattr(self.axis_client_qt.antenna, 'el_setrate', None) != rate_el:
-                            self.axis_client_qt.antenna.el_setrate = rate_el
-                            self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client_qt.axisClient.set_el_speed(rate_el), timeout=1.0)
+                            ack = self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client_qt.axisClient.set_el_speed(rate_el), timeout=1.0)
+                            if ack is not None:
+                                self.axis_client_qt.antenna.el_setrate = rate_el
                     except Exception:
                         pass
 

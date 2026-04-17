@@ -6,6 +6,12 @@ import numpy as np
 
 _POWER_DB_FLOOR = 1e-24
 
+WINDOW_ENBW_FACTORS = {
+    "rectangular": 1.0,
+    "hann": 1.5,
+    "blackman": 1.73,
+}
+
 
 def select_fft_size(sample_rate_hz: float, buffer_size: int) -> int:
     """Select a display FFT size without overshooting the available IQ block."""
@@ -32,12 +38,22 @@ def fft_max_for_sample_rate(sample_rate_hz: float, buffer_size: int) -> int:
     return int(max_fft)
 
 
-def blackman_window(length: int) -> np.ndarray:
-    """Return a Blackman window as float32."""
+def make_window(length: int, window_type: str = "blackman") -> np.ndarray:
+    """Return the requested FFT window as float32."""
     length = int(max(1, length))
     if length == 1:
         return np.ones(1, dtype=np.float32)
+    normalized = str(window_type or "blackman").strip().lower()
+    if normalized == "rectangular":
+        return np.ones(length, dtype=np.float32)
+    if normalized == "hann":
+        return np.hanning(length).astype(np.float32, copy=False)
     return np.blackman(length).astype(np.float32, copy=False)
+
+
+def blackman_window(length: int) -> np.ndarray:
+    """Backward-compatible Blackman window helper."""
+    return make_window(length, "blackman")
 
 
 def compute_power_spectrum_db(

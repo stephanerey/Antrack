@@ -56,6 +56,7 @@ class SpectrumPlotWidget(QWidget):
         layout.addWidget(self.graphics)
 
         self.pos_label = self.graphics.addLabel(row=0, col=0, justify="right")
+        self._set_inactive_pos_label()
         self.plot = self.graphics.addPlot(row=1, col=0)
         self.plot.showGrid(x=True, y=True)
         self.plot.setLabel("left", "Power (dBm)")
@@ -112,19 +113,48 @@ class SpectrumPlotWidget(QWidget):
         self.h_line.setZValue(1000)
         self.plot.addItem(self.v_line, ignoreBounds=True)
         self.plot.addItem(self.h_line, ignoreBounds=True)
+        self.v_line.hide()
+        self.h_line.hide()
         self.mouse_proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._mouse_moved)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
+        self.graphics.viewport().installEventFilter(self)
 
     def _mouse_moved(self, evt) -> None:
         pos = evt[0]
-        if self.plot.sceneBoundingRect().contains(pos):
-            mouse_point = self.plot.vb.mapSceneToView(pos)
-            unit_label = "dBm/Hz" if self._power_unit == "db_per_hz" else "dBm"
-            self.pos_label.setText(
-                f"<span style='font-size: 12pt'>f={mouse_point.x() / 1e6:0.3f} MHz, P={mouse_point.y():0.3f} {unit_label}</span>"
-            )
-            self.v_line.setPos(mouse_point.x())
-            self.h_line.setPos(mouse_point.y())
+        if not self.plot.sceneBoundingRect().contains(pos):
+            self._hide_cursor_overlay()
+            return
+        mouse_point = self.plot.vb.mapSceneToView(pos)
+        unit_label = "dBm/Hz" if self._power_unit == "db_per_hz" else "dBm"
+        self.pos_label.setText(
+            f"<span style='font-size: 12pt'>f={mouse_point.x() / 1e6:0.3f} MHz, P={mouse_point.y():0.3f} {unit_label}</span>"
+        )
+        self.v_line.setPos(mouse_point.x())
+        self.h_line.setPos(mouse_point.y())
+        self.v_line.show()
+        self.h_line.show()
+
+    def leaveEvent(self, event) -> None:
+        self._hide_cursor_overlay()
+        super().leaveEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.graphics.viewport() and event.type() == QtCore.QEvent.Leave:
+            self._hide_cursor_overlay()
+        return super().eventFilter(obj, event)
+
+    def _hide_cursor_overlay(self) -> None:
+        self._set_inactive_pos_label()
+        self.v_line.hide()
+        self.h_line.hide()
+
+    def _set_inactive_pos_label(self) -> None:
+        unit_label = "dBm/Hz" if self._power_unit == "db_per_hz" else "dBm"
+        self.pos_label.setText(
+            "<span style='font-size: 12pt; color: #5a6670'>"
+            f"f=---.--- MHz, P=---.--- {unit_label}"
+            "</span>"
+        )
 
     def _display_values(self, values_db):
         values = np.asarray(values_db, dtype=np.float64)

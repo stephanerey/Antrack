@@ -31,18 +31,17 @@ class _FrequencyDigitLabel(QLabel):
 
 
 class FrequencyControlWidget(QWidget):
-    """Display frequency in Hz as xxxx.xxx.xxx.xxx with per-digit wheel edits."""
+    """Display frequency in Hz as xxx.xxx.xxx.xxx with per-digit wheel edits."""
 
     valueChanged = QtCore.pyqtSignal(float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._min_hz = 1_000
-        self._max_hz = 6_000_000_000
+        self._max_hz = 999_999_999_999
         self._value_hz = 137_000_000
         self._digit_widgets: list[_FrequencyDigitLabel] = []
         self._digit_steps = [
-            1_000_000_000_000,
             100_000_000_000,
             10_000_000_000,
             1_000_000_000,
@@ -62,7 +61,7 @@ class FrequencyControlWidget(QWidget):
         layout.setSpacing(1)
 
         for index, step_hz in enumerate(self._digit_steps):
-            if index in {4, 7, 10}:
+            if index in {3, 6, 9}:
                 sep = QLabel(".", self)
                 sep.setAlignment(Qt.AlignCenter)
                 sep.setStyleSheet("font-size: 36px; font-weight: 700; color: #8a8a8a;")
@@ -95,7 +94,7 @@ class FrequencyControlWidget(QWidget):
         self.valueChanged.emit(float(self._value_hz))
 
     def _refresh_labels(self) -> None:
-        digits = f"{int(self._value_hz):013d}"
+        digits = f"{int(self._value_hz):012d}"
         first_non_zero = next((idx for idx, char in enumerate(digits[:-1]) if char != "0"), len(digits) - 1)
         for index, widget in enumerate(self._digit_widgets):
             widget.setText(digits[index])

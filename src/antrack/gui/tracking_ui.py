@@ -256,16 +256,18 @@ class TrackingUiMixin:
 
         try:
             if axis == "az":
-                self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client.axisClient.set_az_speed(rate), timeout=1.0)
-                self.axis_client.antenna.az_setrate = rate
+                ack = self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client.axisClient.set_az_speed(rate), timeout=1.0)
+                if ack is not None:
+                    self.axis_client.antenna.az_setrate = rate
                 if direction == "CW":
                     self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_cw, timeout=1.0)
                 else:
                     self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_ccw, timeout=1.0)
                 self._manual_jog_state["az"] = direction
             else:
-                self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client.axisClient.set_el_speed(rate), timeout=1.0)
-                self.axis_client.antenna.el_setrate = rate
+                ack = self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client.axisClient.set_el_speed(rate), timeout=1.0)
+                if ack is not None:
+                    self.axis_client.antenna.el_setrate = rate
                 if direction == "UP":
                     self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_up, timeout=1.0)
                 else:
@@ -1144,25 +1146,27 @@ class TrackingUiMixin:
                 pass
 
             try:
-                self.thread_manager.run_coro(
+                ack = self.thread_manager.run_coro(
                     "AxisCoreLoop",
                     lambda: self.axis_client.axisClient.set_az_speed(az_far),
                     timeout=1.0,
                 )
                 try:
-                    self.axis_client.antenna.az_setrate = az_far
+                    if ack is not None:
+                        self.axis_client.antenna.az_setrate = az_far
                 except Exception:
                     pass
             except Exception as exc:
                 self.logger.debug(f"prime_axis_motion: set_az_speed erreur: {exc}")
             try:
-                self.thread_manager.run_coro(
+                ack = self.thread_manager.run_coro(
                     "AxisCoreLoop",
                     lambda: self.axis_client.axisClient.set_el_speed(el_far),
                     timeout=1.0,
                 )
                 try:
-                    self.axis_client.antenna.el_setrate = el_far
+                    if ack is not None:
+                        self.axis_client.antenna.el_setrate = el_far
                 except Exception:
                     pass
             except Exception as exc:
