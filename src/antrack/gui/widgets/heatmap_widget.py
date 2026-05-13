@@ -121,7 +121,6 @@ class HeatmapWidget(QWidget):
             self.current_marker.clear()
 
     def set_sample_cells(self, points: list[tuple[float, float]], values: list[float], *, size: float = 18.0) -> None:
-        self._clear_grid_cells()
         if not points or not values or len(points) != len(values):
             self.sample_cells.clear()
             return
