@@ -569,9 +569,14 @@ class ScanUiMixin:
         current_result = getattr(self, "_scan_current_result", None) or {}
         strategy = str(current_result.get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
         if strategy in {"grid", "adaptive"} and self._scan_plan_points:
-            heatmap = self._scan_live_grid_heatmap()
-            if heatmap is not None:
-                self.scan_heatmap_widget.set_heatmap(heatmap["az_values"], heatmap["el_values"], heatmap["grid"])
+            cell_width, cell_height = self._scan_grid_cell_size()
+            values = [float(point.get("value", 0.0)) for point in self._scan_samples]
+            self.scan_heatmap_widget.set_grid_cells(
+                measured,
+                values,
+                cell_width=cell_width,
+                cell_height=cell_height,
+            )
             self.scan_heatmap_widget.set_sample_cells([], [])
         elif measured:
             values = [float(point.get("value", 0.0)) for point in self._scan_samples]
@@ -579,6 +584,7 @@ class ScanUiMixin:
             symbol_size = max(14.0, min(36.0, 18.0 + step_deg * 8.0))
             self.scan_heatmap_widget.set_sample_cells(measured, values, size=symbol_size)
         else:
+            self.scan_heatmap_widget.set_grid_cells([], [], cell_width=1.0, cell_height=1.0)
             self.scan_heatmap_widget.set_sample_cells([], [])
 
     def _scan_live_grid_heatmap(self) -> dict | None:
@@ -600,6 +606,20 @@ class ScanUiMixin:
         for (az_value, el_value), value in sample_map.items():
             grid[el_index[el_value], az_index[az_value]] = value
         return {"az_values": az_unique, "el_values": el_unique, "grid": grid}
+
+    def _scan_grid_cell_size(self) -> tuple[float, float]:
+        coords = [coord for coord in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coord is not None]
+        if not coords:
+            step = float(self.scan_step_spin.value()) if hasattr(self, "scan_step_spin") else 0.5
+            return step, step
+        az_unique = sorted({round(coord[0], 6) for coord in coords})
+        el_unique = sorted({round(coord[1], 6) for coord in coords})
+        default_step = float(self.scan_step_spin.value()) if hasattr(self, "scan_step_spin") else 0.5
+        az_steps = [abs(b - a) for a, b in zip(az_unique, az_unique[1:]) if abs(b - a) > 1e-9]
+        el_steps = [abs(b - a) for a, b in zip(el_unique, el_unique[1:]) if abs(b - a) > 1e-9]
+        cell_width = min(az_steps) if az_steps else default_step
+        cell_height = min(el_steps) if el_steps else default_step
+        return float(cell_width), float(cell_height)
 
     @staticmethod
     def _project_scan_profile(samples: list[dict], axis: str, *, relative: bool) -> tuple[list[float], list[float]]:
@@ -703,16 +723,15 @@ class ScanUiMixin:
             heatmap = result["heatmap"]
             self.scan_heatmap_widget.set_heatmap(heatmap["az_values"], heatmap["el_values"], heatmap["grid"])
         elif result.get("strategy") in {"grid", "adaptive"} and self._scan_samples:
-            coords = [(self._scan_plot_coordinates(point), point) for point in self._scan_samples]
-            coords = [(coord, point) for coord, point in coords if coord is not None]
-            az_unique = sorted({round(coord[0], 6) for coord, _point in coords})
-            el_unique = sorted({round(coord[1], 6) for coord, _point in coords})
-            grid = np.full((len(el_unique), len(az_unique)), np.nan, dtype=np.float32)
-            az_index = {value: index for index, value in enumerate(az_unique)}
-            el_index = {value: index for index, value in enumerate(el_unique)}
-            for coord, point in coords:
-                grid[el_index[round(coord[1], 6)], az_index[round(coord[0], 6)]] = float(point["value"])
-            self.scan_heatmap_widget.set_heatmap(az_unique, el_unique, grid)
+            measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
+            values = [float(point.get("value", 0.0)) for point in self._scan_samples]
+            cell_width, cell_height = self._scan_grid_cell_size()
+            self.scan_heatmap_widget.set_grid_cells(
+                measured,
+                values,
+                cell_width=cell_width,
+                cell_height=cell_height,
+            )
         self._refresh_scan_path_visuals()
         self._append_scan_error_history(peak)
         self._update_scan_error_plot(self._scan_error_history)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QGraphicsRectItem, QVBoxLayout, QWidget
 
 
 class HeatmapWidget(QWidget):
@@ -34,6 +34,7 @@ class HeatmapWidget(QWidget):
         self.plot.addItem(self.measured_marker)
         self.plot.addItem(self.current_marker)
         self.plot.addItem(self.best_marker)
+        self._grid_cell_items: list[QGraphicsRectItem] = []
 
     def set_heatmap(self, az_values, el_values, grid_values) -> None:
         az = np.asarray(az_values, dtype=np.float64)
@@ -41,6 +42,7 @@ class HeatmapWidget(QWidget):
         grid = np.asarray(grid_values, dtype=np.float32)
         if az.size < 2 or el.size < 2 or grid.size == 0:
             return
+        self._clear_grid_cells()
         az_sorted = np.sort(np.unique(az))
         el_sorted = np.sort(np.unique(el))
         dx = float(np.median(np.diff(az_sorted))) if az_sorted.size >= 2 else 1.0
@@ -56,6 +58,35 @@ class HeatmapWidget(QWidget):
         transform.scale((x1 - x0) / nx, (y1 - y0) / ny)
         self.image.setTransform(transform)
         self.image.setPos(x0, y0)
+
+    def set_grid_cells(
+        self,
+        points: list[tuple[float, float]],
+        values: list[float],
+        *,
+        cell_width: float,
+        cell_height: float,
+    ) -> None:
+        self.image.clear()
+        self._clear_grid_cells()
+        if not points or not values or len(points) != len(values):
+            return
+        width = max(1e-6, float(cell_width))
+        height = max(1e-6, float(cell_height))
+        val_min = float(min(values))
+        val_max = float(max(values))
+        span = val_max - val_min
+        for (x, y), value in zip(points, values):
+            ratio = 0.5 if span <= 1e-9 else max(0.0, min(1.0, (float(value) - val_min) / span))
+            red = int(40 + 215 * ratio)
+            green = int(80 + 140 * ratio)
+            blue = int(180 - 120 * ratio)
+            item = QGraphicsRectItem(float(x) - width / 2.0, float(y) - height / 2.0, width, height)
+            item.setBrush(pg.mkBrush(red, green, blue, 220))
+            item.setPen(pg.mkPen(240, 240, 240, 70))
+            item.setZValue(-5)
+            self.plot.addItem(item)
+            self._grid_cell_items.append(item)
 
     def set_best_point(self, az_deg: float, el_deg: float) -> None:
         self.best_marker.setData([az_deg], [el_deg])
@@ -90,6 +121,7 @@ class HeatmapWidget(QWidget):
             self.current_marker.clear()
 
     def set_sample_cells(self, points: list[tuple[float, float]], values: list[float], *, size: float = 18.0) -> None:
+        self._clear_grid_cells()
         if not points or not values or len(points) != len(values):
             self.sample_cells.clear()
             return
@@ -114,8 +146,17 @@ class HeatmapWidget(QWidget):
 
     def clear(self) -> None:
         self.image.clear()
+        self._clear_grid_cells()
         self.sample_cells.clear()
         self.planned_marker.clear()
         self.measured_marker.clear()
         self.current_marker.clear()
         self.best_marker.clear()
+
+    def _clear_grid_cells(self) -> None:
+        while self._grid_cell_items:
+            item = self._grid_cell_items.pop()
+            try:
+                self.plot.removeItem(item)
+            except Exception:
+                pass
