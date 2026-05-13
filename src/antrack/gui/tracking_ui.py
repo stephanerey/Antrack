@@ -1438,9 +1438,9 @@ class TrackingUiMixin:
             self.ephem.start_object("primary", selected_type, selected_object, interval=0.1)
             self.status_bar.showMessage(f"Consignes demarrees pour: {selected_type} / {selected_object}", 3000)
             try:
-                self.refresh_calibration_plots(step_s=2.0)
+                self.request_calibration_plot_refresh(step_s=2.0)
             except Exception as exc:
-                self.logger.error(f"refresh_calibration_plots failed: {exc}")
+                self.logger.error(f"request_calibration_plot_refresh failed: {exc}")
 
         except Exception as exc:
             self.logger.error(f"Erreur on_apply_target_clicked: {exc}")

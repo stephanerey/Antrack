@@ -10,6 +10,8 @@ from antrack.gui.widgets.calibration import CalibrationPlots
 class CalibrationUiMixin:
     """Keep calibration tab setup out of the main composition root."""
 
+    _CALIBRATION_REFRESH_THREAD = "CalibrationPassTrack"
+
     def _find_tab_by_title(self, tab_widget, title: str):
         wanted = (title or "").strip().lower()
         for index in range(tab_widget.count()):
@@ -75,34 +77,78 @@ class CalibrationUiMixin:
         Build the AOS->LOS track for the 'primary' key and feed the plots.
         """
         try:
+            track = self._build_calibration_track(step_s=step_s)
+            self._apply_calibration_track(track)
+        except Exception as exc:
+            self.logger.error(f"Erreur refresh_calibration_plots: {exc}")
+
+    def request_calibration_plot_refresh(self, step_s: float = 2.0):
+        """Build the pass track in a worker thread, then update the plots on the UI thread."""
+        try:
             if not getattr(self, "ephem", None):
                 if hasattr(self, "logger"):
-                    self.logger.warning("refresh_calibration_plots: ephem indisponible -> abort")
+                    self.logger.warning("request_calibration_plot_refresh: ephem indisponible -> abort")
                 return
 
-            if not getattr(self, "calib_plots", None):
-                if hasattr(self, "logger"):
-                    self.logger.debug("refresh_calibration_plots: calib_plots manquant -> creation...")
-                try:
-                    self._setup_calibration_tab()
-                except Exception as exc:
-                    if hasattr(self, "logger"):
-                        self.logger.error(f"_setup_calibration_tab a echoue: {exc}")
-
-            if not getattr(self, "calib_plots", None):
-                if hasattr(self, "logger"):
-                    self.logger.error("refresh_calibration_plots: calib_plots toujours None apres setup")
+            if not getattr(self, "thread_manager", None):
+                self.refresh_calibration_plots(step_s=step_s)
                 return
 
-            if hasattr(self.ephem, "build_pass_track_for_key"):
-                if hasattr(self, "logger"):
-                    self.logger.info("refresh_calibration_plots: construction du pass track...")
-                track = self.ephem.build_pass_track_for_key("primary", step_s=step_s)
-            else:
-                raise AttributeError("EphemerisService.build_pass_track_for_key est introuvable")
+            if hasattr(self, "logger"):
+                self.logger.info("request_calibration_plot_refresh: scheduling pass track build...")
+            try:
+                self.status_bar.showMessage("Calibration: construction de la trace...", 2000)
+            except Exception:
+                pass
 
-            if track and "az" not in track and "az_deg" in track:
-                track = {**track, "az": track.get("az_deg"), "el": track.get("el_deg")}
+            worker = self.thread_manager.start_thread(
+                self._CALIBRATION_REFRESH_THREAD,
+                self._build_calibration_track,
+                float(step_s),
+            )
+            try:
+                worker.result.connect(self._apply_calibration_track)
+            except Exception:
+                pass
+            try:
+                worker.error.connect(self._on_calibration_track_error)
+            except Exception:
+                pass
+        except Exception as exc:
+            self.logger.error(f"Erreur request_calibration_plot_refresh: {exc}")
+
+    def _build_calibration_track(self, step_s: float = 2.0):
+        if not getattr(self, "ephem", None):
+            raise RuntimeError("Service d'ephemerides indisponible")
+        if not hasattr(self.ephem, "build_pass_track_for_key"):
+            raise AttributeError("EphemerisService.build_pass_track_for_key est introuvable")
+        if hasattr(self, "logger"):
+            self.logger.info("refresh_calibration_plots: construction du pass track...")
+        track = self.ephem.build_pass_track_for_key("primary", step_s=step_s)
+        if track and "az" not in track and "az_deg" in track:
+            track = {**track, "az": track.get("az_deg"), "el": track.get("el_deg")}
+        return track
+
+    def _ensure_calibration_plots_ready(self) -> bool:
+        if getattr(self, "calib_plots", None):
+            return True
+        if hasattr(self, "logger"):
+            self.logger.debug("_ensure_calibration_plots_ready: calib_plots manquant -> creation...")
+        try:
+            self._setup_calibration_tab()
+        except Exception as exc:
+            if hasattr(self, "logger"):
+                self.logger.error(f"_setup_calibration_tab a echoue: {exc}")
+        if not getattr(self, "calib_plots", None):
+            if hasattr(self, "logger"):
+                self.logger.error("_ensure_calibration_plots_ready: calib_plots toujours None apres setup")
+            return False
+        return True
+
+    def _apply_calibration_track(self, track):
+        try:
+            if not self._ensure_calibration_plots_ready():
+                return
 
             el_series = (track or {}).get("el") or []
             if not track or len(el_series) < 2:
@@ -118,6 +164,15 @@ class CalibrationUiMixin:
                 self.status_bar.showMessage("Calibration: pass track updated", 3000)
             except Exception:
                 pass
-
         except Exception as exc:
-            self.logger.error(f"Erreur refresh_calibration_plots: {exc}")
+            self.logger.error(f"Erreur _apply_calibration_track: {exc}")
+
+    def _on_calibration_track_error(self, message: str):
+        try:
+            self.logger.error(f"Calibration track build failed: {message}")
+            try:
+                self.status_bar.showMessage(f"Calibration: echec de construction ({message})", 4000)
+            except Exception:
+                pass
+        except Exception:
+            pass
