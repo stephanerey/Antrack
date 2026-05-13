@@ -323,6 +323,7 @@ class ScanUiMixin:
         self._scan_current_stage = "queued"
         self._scan_progress_current = 0
         self._scan_progress_total = len(self._scan_plan_points)
+        self._scan_active_config = dict(config)
         self.scan_heatmap_widget.clear()
         self._update_scan_profile_axes(self._scan_uses_tracking_relative(config))
         self.scan_horizontal_curve.clear()
@@ -727,6 +728,20 @@ class ScanUiMixin:
         return float(cell_width), float(cell_height)
 
     def _scan_plot_bounds(self) -> tuple[float, float, float, float]:
+        config = getattr(self, "_scan_active_config", None)
+        relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
+        if relative:
+            span_az = float((config or {}).get("span_az_deg", (config or {}).get("span_deg", self.scan_span_spin.value() if hasattr(self, "scan_span_spin") else 2.0)))
+            span_el = float((config or {}).get("span_el_deg", (config or {}).get("span_deg", self.scan_span_spin.value() if hasattr(self, "scan_span_spin") else 2.0)))
+            step = float((config or {}).get("step_deg", self.scan_step_spin.value() if hasattr(self, "scan_step_spin") else 0.5))
+            half_w = step / 2.0
+            half_h = step / 2.0
+            return (
+                -(span_az / 2.0) - half_w,
+                +(span_az / 2.0) + half_w,
+                -(span_el / 2.0) - half_h,
+                +(span_el / 2.0) + half_h,
+            )
         coords = [coord for coord in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coord is not None]
         if not coords:
             return -1.0, 1.0, -1.0, 1.0
