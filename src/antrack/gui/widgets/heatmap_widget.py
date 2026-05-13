@@ -41,12 +41,16 @@ class HeatmapWidget(QWidget):
         grid = np.asarray(grid_values, dtype=np.float32)
         if az.size < 2 or el.size < 2 or grid.size == 0:
             return
-        x0 = float(np.min(az))
-        x1 = float(np.max(az))
-        y0 = float(np.min(el))
-        y1 = float(np.max(el))
-        nx = max(1, grid.shape[1] - 1)
-        ny = max(1, grid.shape[0] - 1)
+        az_sorted = np.sort(np.unique(az))
+        el_sorted = np.sort(np.unique(el))
+        dx = float(np.median(np.diff(az_sorted))) if az_sorted.size >= 2 else 1.0
+        dy = float(np.median(np.diff(el_sorted))) if el_sorted.size >= 2 else 1.0
+        x0 = float(np.min(az_sorted) - dx / 2.0)
+        x1 = float(np.max(az_sorted) + dx / 2.0)
+        y0 = float(np.min(el_sorted) - dy / 2.0)
+        y1 = float(np.max(el_sorted) + dy / 2.0)
+        nx = max(1, grid.shape[1])
+        ny = max(1, grid.shape[0])
         self.image.setImage(grid, autoLevels=True)
         transform = pg.QtGui.QTransform()
         transform.scale((x1 - x0) / nx, (y1 - y0) / ny)

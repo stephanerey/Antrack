@@ -10,11 +10,13 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtCore import QObject, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -123,13 +125,23 @@ class ScanUiMixin:
         self.scan_stop_button = QPushButton("Stop", control_group)
         self.scan_apply_button = QPushButton("Apply Offset", control_group)
         self.scan_save_button = QPushButton("Save Offset", control_group)
+        self.scan_repeat_checkbox = QCheckBox("Repeat While Tracking", control_group)
+        self.scan_repeat_interval_spin = QDoubleSpinBox(control_group)
+        self.scan_repeat_interval_spin.setRange(1.0, 3600.0)
+        self.scan_repeat_interval_spin.setValue(60.0)
+        self.scan_repeat_interval_spin.setSuffix(" s")
         self.scan_progress_label = QLabel("-", control_group)
         self.scan_best_label = QLabel("-", control_group)
         self.scan_offset_label = QLabel("-", control_group)
+        repeat_row = QHBoxLayout()
+        repeat_row.setContentsMargins(0, 0, 0, 0)
+        repeat_row.addWidget(self.scan_repeat_checkbox)
+        repeat_row.addWidget(self.scan_repeat_interval_spin)
         control_form.addRow(self.scan_start_button)
         control_form.addRow(self.scan_pause_button)
         control_form.addRow(self.scan_resume_button)
         control_form.addRow(self.scan_stop_button)
+        control_form.addRow("Repeat", repeat_row)
         control_form.addRow("Progress", self.scan_progress_label)
         control_form.addRow("Best", self.scan_best_label)
         control_form.addRow("Offset", self.scan_offset_label)
@@ -144,6 +156,10 @@ class ScanUiMixin:
         self.scan_cross_plot.setLabel("left", "Metric")
         self.scan_cross_az_curve = self.scan_cross_plot.plot(name="Azimuth", pen=pg.mkPen("y"))
         self.scan_cross_el_curve = self.scan_cross_plot.plot(name="Elevation", pen=pg.mkPen("c"))
+        self.scan_cross_theoretical_marker = pg.ScatterPlotItem(name="Theoretical", symbol="t", size=11, brush=pg.mkBrush(255, 220, 120, 220), pen=pg.mkPen("k"))
+        self.scan_cross_real_marker = pg.ScatterPlotItem(name="Measured Peak", symbol="o", size=11, brush=pg.mkBrush(255, 255, 255, 220), pen=pg.mkPen("k"))
+        self.scan_cross_plot.addItem(self.scan_cross_theoretical_marker)
+        self.scan_cross_plot.addItem(self.scan_cross_real_marker)
         self.scan_error_plot = pg.PlotWidget(splitter)
         self.scan_error_plot.addLegend()
         self.scan_error_plot.setLabel("bottom", "Estimate", units="#")
@@ -184,6 +200,9 @@ class ScanUiMixin:
         self._scan_current_stage = "idle"
         self._scan_progress_current = 0
         self._scan_progress_total = 0
+        self._scan_error_history = []
+        self._scan_repeat_active = False
+        self._scan_repeat_pending = False
         self.scan_start_button.clicked.connect(self.start_scan_session)
         self.scan_pause_button.clicked.connect(self.scan_session.pause)
         self.scan_resume_button.clicked.connect(self.scan_session.resume)
@@ -235,9 +254,16 @@ class ScanUiMixin:
         return float(az), float(el)
 
     def start_scan_session(self) -> None:
+        self._start_scan_sequence(repeating=False)
+
+    def _start_scan_sequence(self, *, repeating: bool) -> None:
         config = self._build_scan_config()
         if not self._prepare_scan_session(config):
             return
+        if not repeating:
+            self._scan_error_history = []
+            self._scan_repeat_active = bool(self.scan_repeat_checkbox.isChecked())
+        self._scan_repeat_pending = False
         self._scan_samples = []
         self._scan_current_result = None
         self._scan_plan_points = self._build_scan_preview_points(config)
@@ -249,7 +275,9 @@ class ScanUiMixin:
         self.scan_heatmap_widget.set_axis_mode(relative=self._scan_uses_tracking_relative(config))
         self.scan_cross_az_curve.clear()
         self.scan_cross_el_curve.clear()
-        self._update_scan_error_plot([])
+        self.scan_cross_theoretical_marker.clear()
+        self.scan_cross_real_marker.clear()
+        self._update_scan_error_plot(self._scan_error_history)
         self._scan_active_center_mode = str(config.get("center_mode", "fixed")).strip().lower()
         self._refresh_scan_path_visuals()
         self.scan_progress_label.setText(f"0/{len(self._scan_plan_points) or 0} | queued")
@@ -297,6 +325,8 @@ class ScanUiMixin:
         return True
 
     def _stop_scan_session(self) -> None:
+        self._scan_repeat_active = False
+        self._scan_repeat_pending = False
         self.scan_session.stop()
         self._reset_scan_probe_offset(stop_fixed_positioner=True)
 
@@ -424,6 +454,17 @@ class ScanUiMixin:
             if settled:
                 stable_cycles += 1
                 if stable_cycles >= stable_cycles_required:
+                    self.logger.info(
+                        "[ScanSettle] ok target_az=%.3f target_el=%.3f req_offset_az=%.3f req_offset_el=%.3f actual_offset_az=%s actual_offset_el=%s offset_error_az=%s offset_error_el=%s",
+                        float(point.get("az", 0.0)),
+                        float(point.get("el", 0.0)),
+                        requested_offset_az,
+                        requested_offset_el,
+                        actual_offset_az,
+                        actual_offset_el,
+                        offset_error_az,
+                        offset_error_el,
+                    )
                     if float(settle_s) > 0.0:
                         time.sleep(float(settle_s))
                     return
@@ -525,13 +566,63 @@ class ScanUiMixin:
         measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
         current = self._scan_plot_coordinates(self._scan_current_point)
         self.scan_heatmap_widget.set_scan_points(planned, measured, current)
-        if measured:
+        strategy = str(getattr(self, "_scan_current_result", {}) .get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
+        if strategy in {"grid", "adaptive"} and self._scan_plan_points:
+            heatmap = self._scan_live_grid_heatmap()
+            if heatmap is not None:
+                self.scan_heatmap_widget.set_heatmap(heatmap["az_values"], heatmap["el_values"], heatmap["grid"])
+            self.scan_heatmap_widget.set_sample_cells([], [])
+        elif measured:
             values = [float(point.get("value", 0.0)) for point in self._scan_samples]
             step_deg = float(self.scan_step_spin.value()) if hasattr(self, "scan_step_spin") else 0.5
             symbol_size = max(14.0, min(36.0, 18.0 + step_deg * 8.0))
             self.scan_heatmap_widget.set_sample_cells(measured, values, size=symbol_size)
         else:
             self.scan_heatmap_widget.set_sample_cells([], [])
+
+    def _scan_live_grid_heatmap(self) -> dict | None:
+        if not self._scan_samples or not self._scan_plan_points:
+            return None
+        sample_map: dict[tuple[float, float], float] = {}
+        for sample in self._scan_samples:
+            coords = self._scan_plot_coordinates(sample)
+            if coords is None:
+                continue
+            sample_map[(round(coords[0], 6), round(coords[1], 6))] = float(sample.get("value", 0.0))
+        az_unique = sorted({round(coords[0], 6) for coords in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coords is not None})
+        el_unique = sorted({round(coords[1], 6) for coords in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coords is not None})
+        if len(az_unique) < 2 or len(el_unique) < 2:
+            return None
+        grid = np.full((len(el_unique), len(az_unique)), np.nan, dtype=np.float32)
+        az_index = {value: index for index, value in enumerate(az_unique)}
+        el_index = {value: index for index, value in enumerate(el_unique)}
+        for (az_value, el_value), value in sample_map.items():
+            grid[el_index[el_value], az_index[az_value]] = value
+        return {"az_values": az_unique, "el_values": el_unique, "grid": grid}
+
+    @staticmethod
+    def _project_scan_profile(samples: list[dict], axis: str, *, relative: bool) -> tuple[list[float], list[float]]:
+        buckets: dict[float, float] = {}
+        for sample in samples:
+            if relative:
+                coord = sample.get("relative_az_deg" if axis == "az" else "relative_el_deg")
+            else:
+                coord = sample.get("az" if axis == "az" else "el")
+            value = sample.get("value")
+            if not isinstance(coord, (int, float)) or not isinstance(value, (int, float)):
+                continue
+            key = round(float(coord), 6)
+            buckets[key] = max(float(value), buckets.get(key, float("-inf")))
+        xs = sorted(buckets)
+        ys = [buckets[x] for x in xs]
+        return xs, ys
+
+    @staticmethod
+    def _nearest_curve_value(xs: list[float], ys: list[float], target_x: float) -> float | None:
+        if not xs or not ys or len(xs) != len(ys):
+            return None
+        index = min(range(len(xs)), key=lambda idx: abs(xs[idx] - target_x))
+        return float(ys[index])
 
     def _scan_measure(self, config: dict) -> float:
         metric = str(config.get("metric", "band_power")).strip().lower()
@@ -560,12 +651,11 @@ class ScanUiMixin:
         best = max(self._scan_samples, key=lambda point: float(point.get("value", float("-inf"))))
         self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
         self.scan_offset_label.setText(f"dAZ={best.get('offset_az', 0.0):+.3f} dEL={best.get('offset_el', 0.0):+.3f}")
-        az_points = [point for point in self._scan_samples if point.get("axis") == "az"]
-        el_points = [point for point in self._scan_samples if point.get("axis") == "el"]
-        if az_points:
-            self.scan_cross_az_curve.setData([point["az"] for point in az_points], [point["value"] for point in az_points])
-        if el_points:
-            self.scan_cross_el_curve.setData([point["el"] for point in el_points], [point["value"] for point in el_points])
+        relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
+        az_xs, az_ys = self._project_scan_profile(self._scan_samples, "az", relative=relative)
+        el_xs, el_ys = self._project_scan_profile(self._scan_samples, "el", relative=relative)
+        self.scan_cross_az_curve.setData(az_xs, az_ys)
+        self.scan_cross_el_curve.setData(el_xs, el_ys)
 
     def _on_scan_progress_updated(self, snapshot: dict) -> None:
         current = int(snapshot.get("current", 0))
@@ -600,6 +690,7 @@ class ScanUiMixin:
         self._scan_current_stage = "completed"
         self._scan_progress_current = int(len(result.get("samples", [])))
         self._scan_progress_total = max(self._scan_progress_total, self._scan_progress_current)
+        peak = result.get("peak_estimate", {})
         best = result.get("best_point", {})
         self.scan_progress_label.setText(f"{self._scan_progress_current}/{self._scan_progress_total} | completed")
         self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
@@ -622,7 +713,14 @@ class ScanUiMixin:
                 grid[el_index[round(coord[1], 6)], az_index[round(coord[0], 6)]] = float(point["value"])
             self.scan_heatmap_widget.set_heatmap(az_unique, el_unique, grid)
         self._refresh_scan_path_visuals()
-        self._update_scan_error_plot(result.get("error_trace", []))
+        self._append_scan_error_history(peak)
+        self._update_scan_error_plot(self._scan_error_history)
+        self._update_cross_markers(peak)
+        if self._scan_repeat_active and getattr(self, "tracker", None) and self.tracker.is_running():
+            interval_ms = int(max(1000.0, float(self.scan_repeat_interval_spin.value()) * 1000.0))
+            self._scan_repeat_pending = True
+            self.status_bar.showMessage(f"Next scan sequence in {self.scan_repeat_interval_spin.value():.0f}s", 3000)
+            pg.QtCore.QTimer.singleShot(interval_ms, lambda: self._start_scan_sequence(repeating=True) if self._scan_repeat_pending else None)
 
     def _update_scan_error_plot(self, error_trace: list[dict]) -> None:
         series = scan_error_series(error_trace)
@@ -630,8 +728,39 @@ class ScanUiMixin:
         self.scan_error_el_curve.setData(series["x"], series["el_error_deg"])
         self.scan_error_total_curve.setData(series["x"], series["angular_error_deg"])
 
+    def _append_scan_error_history(self, peak: dict) -> None:
+        if isinstance(peak, dict) and peak:
+            self._scan_error_history.append(dict(peak))
+
+    def _update_cross_markers(self, peak: dict) -> None:
+        relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
+        az_xs, az_ys = self._project_scan_profile(self._scan_samples, "az", relative=relative)
+        el_xs, el_ys = self._project_scan_profile(self._scan_samples, "el", relative=relative)
+        theoretical_az_x = 0.0 if relative else float(peak.get("theoretical_az", 0.0))
+        theoretical_el_x = 0.0 if relative else float(peak.get("theoretical_el", 0.0))
+        az_peak_x = float(peak.get("az_error_deg", 0.0)) if relative else float(peak.get("az", 0.0))
+        el_peak_x = float(peak.get("el_error_deg", 0.0)) if relative else float(peak.get("el", 0.0))
+        theoretical_points = []
+        real_points = []
+        az_theoretical_y = self._nearest_curve_value(az_xs, az_ys, theoretical_az_x)
+        el_theoretical_y = self._nearest_curve_value(el_xs, el_ys, theoretical_el_x)
+        az_peak_y = self._nearest_curve_value(az_xs, az_ys, az_peak_x)
+        el_peak_y = self._nearest_curve_value(el_xs, el_ys, el_peak_x)
+        if az_theoretical_y is not None:
+            theoretical_points.append({"pos": (theoretical_az_x, az_theoretical_y)})
+        if el_theoretical_y is not None:
+            theoretical_points.append({"pos": (theoretical_el_x, el_theoretical_y)})
+        if az_peak_y is not None:
+            real_points.append({"pos": (az_peak_x, az_peak_y)})
+        if el_peak_y is not None:
+            real_points.append({"pos": (el_peak_x, el_peak_y)})
+        self.scan_cross_theoretical_marker.setData(theoretical_points)
+        self.scan_cross_real_marker.setData(real_points)
+
     def _on_scan_state_changed(self, state: str) -> None:
         if state in {"stopped", "error"}:
+            self._scan_repeat_active = False
+            self._scan_repeat_pending = False
             self._reset_scan_probe_offset(stop_fixed_positioner=True)
             self._scan_current_point = None
             self._refresh_scan_path_visuals()
