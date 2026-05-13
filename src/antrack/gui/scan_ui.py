@@ -134,6 +134,7 @@ class ScanUiMixin:
             move_to=self._scan_move_to,
             measure=self._scan_measure,
             wait_for_settle=self._scan_wait_for_settle,
+            center_provider=self._scan_current_theoretical_center,
             logger=self.logger.getChild("Scan"),
         )
         self.scan_session.progress_updated.connect(self._on_scan_progress_updated)
@@ -163,6 +164,7 @@ class ScanUiMixin:
     def _build_scan_config(self) -> dict:
         return {
             "strategy": self.scan_strategy_combo.currentText(),
+            "center_mode": "fixed",
             "center_az_deg": self.scan_center_az_spin.value(),
             "center_el_deg": self.scan_center_el_spin.value(),
             "span_deg": self.scan_span_spin.value(),
@@ -181,6 +183,12 @@ class ScanUiMixin:
             "fine_step_deg": max(0.05, self.scan_step_spin.value() / 4.0),
             "grid_step_deg": max(0.05, self.scan_step_spin.value()),
         }
+
+    def _scan_current_theoretical_center(self) -> tuple[float, float]:
+        tracked_object = getattr(self, "tracked_object", None)
+        az = getattr(tracked_object, "az_set", self.scan_center_az_spin.value())
+        el = getattr(tracked_object, "el_set", self.scan_center_el_spin.value())
+        return float(az), float(el)
 
     def start_scan_session(self) -> None:
         self._scan_samples = []

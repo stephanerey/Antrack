@@ -104,12 +104,12 @@ def make_scan_result(
     if peak_estimate is None:
         peak_estimate = make_peak_estimate(
             best_point,
-            theoretical_az_deg=center_az_deg,
-            theoretical_el_deg=center_el_deg,
+            theoretical_az_deg=best_point.get("theoretical_az", center_az_deg),
+            theoretical_el_deg=best_point.get("theoretical_el", center_el_deg),
         )
 
-    az_offset = float(peak_estimate["az"]) - float(center_az_deg)
-    el_offset = float(peak_estimate["el"]) - float(center_el_deg)
+    az_offset = float(peak_estimate["az_error_deg"])
+    el_offset = float(peak_estimate["el_error_deg"])
     return {
         "strategy": str(strategy),
         "samples": sample_list,

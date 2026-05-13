@@ -33,6 +33,7 @@ class ScanSession(QObject):
         move_to: Optional[Callable[[float, float], None]] = None,
         measure: Optional[Callable[[dict], float]] = None,
         wait_for_settle: Optional[Callable[[float, float, float], None]] = None,
+        center_provider: Optional[Callable[[], object]] = None,
         logger: Optional[logging.Logger] = None,
         export_dir: Optional[Path] = None,
         parent=None,
@@ -42,6 +43,7 @@ class ScanSession(QObject):
         self.move_to = move_to
         self.measure = measure
         self.wait_for_settle = wait_for_settle
+        self.center_provider = center_provider
         self.logger = logger or logging.getLogger("ScanSession")
         self.export_dir = export_dir
         self._thread_name = "ScanSession"
@@ -124,8 +126,51 @@ class ScanSession(QObject):
         if self._stop_event.is_set():
             raise InterruptedError("Scan stop requested.")
 
+    @staticmethod
+    def _uses_dynamic_center(config: dict) -> bool:
+        mode = str(config.get("center_mode", "")).strip().lower()
+        return bool(config.get("follow_theoretical_center")) or mode in {
+            "dynamic",
+            "follow",
+            "orbit",
+            "theoretical",
+            "tracking",
+        }
+
+    @staticmethod
+    def _coerce_center(value: object, fallback_az: float, fallback_el: float) -> tuple[float, float]:
+        if isinstance(value, dict):
+            az = value.get("az", value.get("az_deg", value.get("az_set", fallback_az)))
+            el = value.get("el", value.get("el_deg", value.get("el_set", fallback_el)))
+            return float(az), float(el)
+        if isinstance(value, (tuple, list)) and len(value) >= 2:
+            return float(value[0]), float(value[1])
+        return float(fallback_az), float(fallback_el)
+
+    def _current_theoretical_center(self, config: dict, fallback_az: float, fallback_el: float) -> tuple[float, float]:
+        if not self._uses_dynamic_center(config) or self.center_provider is None:
+            return float(fallback_az), float(fallback_el)
+        try:
+            return self._coerce_center(self.center_provider(), fallback_az, fallback_el)
+        except Exception as exc:
+            self.logger.warning("Unable to read dynamic scan center: %s", exc)
+            return float(fallback_az), float(fallback_el)
+
+    def _materialize_point(self, point: dict, config: dict) -> dict:
+        fallback_az = float(config.get("center_az_deg", point.get("az", 0.0)))
+        fallback_el = float(config.get("center_el_deg", point.get("el", 0.0)))
+        theoretical_az, theoretical_el = self._current_theoretical_center(config, fallback_az, fallback_el)
+        materialized = dict(point)
+        if self._uses_dynamic_center(config) and "relative_az_deg" in point and "relative_el_deg" in point:
+            materialized["az"] = theoretical_az + float(point["relative_az_deg"])
+            materialized["el"] = theoretical_el + float(point["relative_el_deg"])
+        materialized["theoretical_az"] = theoretical_az
+        materialized["theoretical_el"] = theoretical_el
+        return materialized
+
     def _measure_point(self, point: dict, config: dict) -> dict:
         self._wait_if_paused_or_stopped()
+        point = self._materialize_point(point, config)
         az = float(point["az"])
         el = float(point["el"])
         if self.move_to is not None:
@@ -229,6 +274,13 @@ class ScanSession(QObject):
                         order=str(config.get("order", "zigzag")),
                         phase="fine",
                     )
+                    for point in fine_points:
+                        relative_az = float(point["az"]) - center_az
+                        relative_el = float(point["el"]) - center_el
+                        point["relative_az_deg"] = relative_az
+                        point["relative_el_deg"] = relative_el
+                        point["scan_offset_az_deg"] = relative_az
+                        point["scan_offset_el_deg"] = relative_el
                     start_index = len(samples)
                     total = start_index + len(fine_points)
                     for offset, point in enumerate(fine_points, start=1):

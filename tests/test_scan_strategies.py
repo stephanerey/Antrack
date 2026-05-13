@@ -82,6 +82,17 @@ def test_scan_result_exposes_peak_estimate_and_error_trace():
     assert result["error_trace"][0]["angular_error_deg"] > 0.7
 
 
+def test_scan_result_offsets_follow_peak_theoretical_center():
+    samples = [
+        make_scan_sample({"az": 101.0, "el": 29.0}, 5.0, theoretical_az_deg=100.0, theoretical_el_deg=30.0),
+    ]
+
+    result = make_scan_result(strategy="grid", samples=samples, center_az_deg=0.0, center_el_deg=0.0)
+
+    assert result["az_offset_deg"] == 1.0
+    assert result["el_offset_deg"] == -1.0
+
+
 def test_scan_session_recovers_synthetic_offset():
     current = {"az": 0.0, "el": 0.0}
     true_peak = {"az": 1.0, "el": -0.5}
@@ -114,3 +125,41 @@ def test_scan_session_recovers_synthetic_offset():
     assert all("theoretical_az" in sample for sample in result["samples"])
     assert all("offset_az" in sample for sample in result["samples"])
     assert all("relative_az_deg" in sample for sample in result["samples"])
+
+
+def test_scan_session_can_materialize_points_around_dynamic_center():
+    centers = iter([(100.0, 30.0), (100.5, 30.25), (101.0, 30.5), (101.5, 30.75)])
+    moves = []
+
+    def center_provider():
+        return next(centers)
+
+    def move_to(az_deg: float, el_deg: float) -> None:
+        moves.append((az_deg, el_deg))
+
+    session = ScanSession(
+        thread_manager=None,
+        center_provider=center_provider,
+        move_to=move_to,
+        measure=lambda _config: 1.0,
+    )
+    session._run(
+        {
+            "strategy": "grid",
+            "center_mode": "dynamic",
+            "center_az_deg": 0.0,
+            "center_el_deg": 0.0,
+            "span_deg": 2.0,
+            "step_deg": 2.0,
+            "settle_s": 0.0,
+            "integration_s": 0.01,
+        }
+    )
+
+    result = session.latest_result
+    assert result is not None
+    assert moves[0] == (99.0, 29.0)
+    assert result["samples"][0]["theoretical_az"] == 100.0
+    assert result["samples"][0]["theoretical_el"] == 30.0
+    assert result["samples"][0]["offset_az"] == -1.0
+    assert result["samples"][1]["theoretical_az"] == 100.5
