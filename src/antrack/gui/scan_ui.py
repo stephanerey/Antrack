@@ -211,6 +211,7 @@ class ScanUiMixin:
         visual_layout.setRowStretch(0, 1)
         self.scan_vertical_plot.setYLink(self.scan_heatmap_widget.plot)
         self.scan_horizontal_plot.setXLink(self.scan_heatmap_widget.plot)
+        self._sync_scan_profile_margins()
 
         self.scan_error_plot = pg.PlotWidget(splitter)
         self.scan_error_plot.addLegend()
@@ -357,6 +358,16 @@ class ScanUiMixin:
             "Offset Elevation" if relative else "Elevation",
             units="deg",
         )
+        self._sync_scan_profile_margins()
+
+    def _sync_scan_profile_margins(self) -> None:
+        try:
+            heatmap_left_axis = self.scan_heatmap_widget.plot.getAxis("left")
+            horizontal_left_axis = self.scan_horizontal_plot.getAxis("left")
+            width = int(max(60, heatmap_left_axis.width()))
+            horizontal_left_axis.setWidth(width)
+        except Exception:
+            pass
 
     def _prepare_scan_session(self, config: dict) -> bool:
         if not self.has_connection():
@@ -637,6 +648,7 @@ class ScanUiMixin:
         if planned:
             x_min, x_max, y_min, y_max = self._scan_plot_bounds()
             self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
+            self._sync_scan_profile_margins()
             try:
                 self.scan_horizontal_plot.enableAutoRange(x=False)
                 self.scan_horizontal_plot.setXRange(float(x_min), float(x_max), padding=0.0)
