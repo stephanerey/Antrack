@@ -1275,6 +1275,11 @@ class TrackingUiMixin:
                 except Exception:
                     pass
 
+                try:
+                    self.prime_axis_motion()
+                except Exception as exc:
+                    self.logger.warning(f"[Tracking] prime_axis_motion before start failed: {exc}")
+
                 self.tracker.start()
 
                 try:

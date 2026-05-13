@@ -6,8 +6,6 @@ from typing import Optional, Tuple
 import math
 import time
 import logging
-# Reduce Tracker logger verbosity globally (keep WARNING and above)
-logging.getLogger("Tracker").setLevel(logging.WARNING)
 
 from antrack.core.axis.axis_client import AxisStatus
 from antrack.tracking.motion_constraints import (
@@ -131,6 +129,8 @@ class Tracker:
         """Start the tracking loop in a QThread (idempotent and robust to stale workers)."""
         if not self.thread_manager:
             return
+        self._must_apply_speeds = True
+        self._kickstart_pending = True
         # Purge a stale worker (aborted or QThread not running)
         w = self.thread_manager.get_worker(self._thread_name)
         t = getattr(self.thread_manager, "threads", {}).get(self._thread_name)
@@ -271,6 +271,13 @@ class Tracker:
                 need_az = (not az_blocked) and abs(self.tracked_object.az_error) > az_err_th
                 need_el = (not el_blocked) and abs(self.tracked_object.el_error) > el_err_th
 
+                if self._kickstart_pending or self._must_apply_speeds:
+                    self._prime_motion(
+                        az_speed_far=az_speed_far,
+                        el_speed_far=el_speed_far,
+                        logger=log,
+                    )
+
                 # Préparer les décisions pour le log diagnostic (1/s)
                 desired_az = "STOP"
                 if need_az:
@@ -306,7 +313,7 @@ class Tracker:
                             if ack is not None:
                                 self.axis_client_qt.antenna.az_setrate = rate_az
                     except Exception as e:
-                        log.info("CMD set_az_speed error: %s", e)
+                        log.warning("CMD set_az_speed error: %s", e)
 
                     # EL speed
                     try:
@@ -320,8 +327,8 @@ class Tracker:
                             ack = self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client_qt.axisClient.set_el_speed(rate_el), timeout=1.0)
                             if ack is not None:
                                 self.axis_client_qt.antenna.el_setrate = rate_el
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.warning("CMD set_el_speed error: %s", e)
 
                     # AZ move (throttling)
                     try:
@@ -347,8 +354,8 @@ class Tracker:
                                 self.axis_client_qt.axisClient.axis_status['azimuth'] = AxisStatus.MOTION_AZ_STOP
                                 self._last_az_cmd = "STOP"
                                 self._last_az_cmd_ts = now_ts
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.warning("CMD az motion error: %s", e)
 
                     # EL move (throttling)
                     try:
@@ -374,8 +381,8 @@ class Tracker:
                                 self.axis_client_qt.axisClient.axis_status['elevation'] = AxisStatus.MOTION_EL_STOP
                                 self._last_el_cmd = "STOP"
                                 self._last_el_cmd_ts = now_ts
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.warning("CMD el motion error: %s", e)
                 else:
                     # Arrêt si dans la tolérance
                     try:
@@ -431,6 +438,39 @@ class Tracker:
         except Exception as e:
             # Laisser remonter: Worker.error sera émis par ThreadManager
             raise
+
+    def _prime_motion(self, *, az_speed_far: float, el_speed_far: float, logger) -> None:
+        """Prime the controller with a STOP and fresh rates before the first tracking move."""
+        try:
+            if self._kickstart_pending:
+                self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.stop_az, timeout=1.0)
+                self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.stop_el, timeout=1.0)
+                self.axis_client_qt.axisClient.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
+                self.axis_client_qt.axisClient.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
+                self._last_az_cmd = "STOP"
+                self._last_el_cmd = "STOP"
+                now_ts = time.monotonic()
+                self._last_az_cmd_ts = now_ts
+                self._last_el_cmd_ts = now_ts
+                self._kickstart_pending = False
+            if self._must_apply_speeds:
+                ack = self.thread_manager.run_coro(
+                    "AxisCoreLoop",
+                    lambda: self.axis_client_qt.axisClient.set_az_speed(az_speed_far),
+                    timeout=1.0,
+                )
+                if ack is not None:
+                    self.axis_client_qt.antenna.az_setrate = az_speed_far
+                ack = self.thread_manager.run_coro(
+                    "AxisCoreLoop",
+                    lambda: self.axis_client_qt.axisClient.set_el_speed(el_speed_far),
+                    timeout=1.0,
+                )
+                if ack is not None:
+                    self.axis_client_qt.antenna.el_setrate = el_speed_far
+                self._must_apply_speeds = False
+        except Exception as exc:
+            logger.warning("Tracker prime motion failed: %s", exc)
 
     def _stop_motors(self):
         """Arrête AZ et EL proprement via le core."""
