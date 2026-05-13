@@ -97,6 +97,25 @@ class TrackingUiMixin:
         probe_az, probe_el = self._scan_probe_tracking_offset()
         return float(az_deg) + offset_az + probe_az, float(el_deg) + offset_el + probe_el
 
+    def _tracking_theoretical_pointing(self) -> tuple[float, float] | None:
+        tracked_object = getattr(self, "tracked_object", None)
+        az = getattr(tracked_object, "az_theoretical_deg", None)
+        el = getattr(tracked_object, "el_theoretical_deg", None)
+        if not isinstance(az, (int, float)) or not isinstance(el, (int, float)):
+            return None
+        return float(az), float(el)
+
+    def _refresh_tracking_setpoints_from_theoretical(self) -> bool:
+        if getattr(self, "_manual_setpoint_mode", False):
+            return False
+        theoretical = self._tracking_theoretical_pointing()
+        if theoretical is None or not hasattr(self, "tracked_object"):
+            return False
+        az_set, el_set = self._apply_tracking_offset_to_pointing(*theoretical)
+        self.tracked_object.az_set = float(az_set)
+        self.tracked_object.el_set = float(el_set)
+        return True
+
     def _format_tracking_offset(self) -> str:
         offset_az, offset_el = self._current_tracking_offset()
         return f"dAZ={offset_az:+.3f} dEL={offset_el:+.3f}"
@@ -126,6 +145,7 @@ class TrackingUiMixin:
         else:
             self._scan_session_offset_az_deg = float(az_offset_deg)
             self._scan_session_offset_el_deg = float(el_offset_deg)
+        self._refresh_tracking_setpoints_from_theoretical()
         self._update_selected_target_scan_offset_display()
 
     def set_scan_probe_offset(self, az_offset_deg: float, el_offset_deg: float) -> None:
@@ -134,6 +154,7 @@ class TrackingUiMixin:
         if hasattr(self, "tracked_object"):
             self.tracked_object.scan_probe_offset_az_deg = float(az_offset_deg)
             self.tracked_object.scan_probe_offset_el_deg = float(el_offset_deg)
+        self._refresh_tracking_setpoints_from_theoretical()
 
     def clear_scan_probe_offset(self) -> None:
         self.set_scan_probe_offset(0.0, 0.0)
@@ -944,9 +965,10 @@ class TrackingUiMixin:
             corrected_az = az
             corrected_el = el
             if isinstance(az, (int, float)) and isinstance(el, (int, float)):
-                corrected_az, corrected_el = self._apply_tracking_offset_to_pointing(float(az), float(el))
-
-            if isinstance(corrected_az, (int, float)):
+                self._refresh_tracking_setpoints_from_theoretical()
+                corrected_az = self.tracked_object.az_set
+                corrected_el = self.tracked_object.el_set
+            elif isinstance(corrected_az, (int, float)):
                 self.tracked_object.az_set = corrected_az
             if isinstance(corrected_el, (int, float)):
                 self.tracked_object.el_set = corrected_el

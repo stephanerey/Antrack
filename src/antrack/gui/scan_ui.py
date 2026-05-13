@@ -173,7 +173,7 @@ class ScanUiMixin:
         self.scan_session.progress_updated.connect(self._on_scan_progress_updated)
         self.scan_session.point_measured.connect(self._on_scan_point_measured)
         self.scan_session.completed.connect(self._on_scan_completed)
-        self.scan_session.error.connect(lambda message: self.status_bar.showMessage(f"Scan: {message}", 5000))
+        self.scan_session.error.connect(self._on_scan_error)
         self.scan_session.state_changed.connect(self._on_scan_state_changed)
 
         self._scan_samples = []
@@ -181,6 +181,8 @@ class ScanUiMixin:
         self._scan_plan_points = []
         self._scan_current_point = None
         self._scan_current_stage = "idle"
+        self._scan_progress_current = 0
+        self._scan_progress_total = 0
         self.scan_start_button.clicked.connect(self.start_scan_session)
         self.scan_pause_button.clicked.connect(self.scan_session.pause)
         self.scan_resume_button.clicked.connect(self.scan_session.resume)
@@ -240,6 +242,8 @@ class ScanUiMixin:
         self._scan_plan_points = self._build_scan_preview_points(config)
         self._scan_current_point = None
         self._scan_current_stage = "queued"
+        self._scan_progress_current = 0
+        self._scan_progress_total = len(self._scan_plan_points)
         self.scan_heatmap_widget.clear()
         self.scan_heatmap_widget.set_axis_mode(relative=self._scan_uses_tracking_relative(config))
         self.scan_cross_az_curve.clear()
@@ -463,6 +467,9 @@ class ScanUiMixin:
     def _on_scan_point_measured(self, sample: dict) -> None:
         self._scan_samples.append(sample)
         self._refresh_scan_path_visuals()
+        best = max(self._scan_samples, key=lambda point: float(point.get("value", float("-inf"))))
+        self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
+        self.scan_offset_label.setText(f"dAZ={best.get('offset_az', 0.0):+.3f} dEL={best.get('offset_el', 0.0):+.3f}")
         az_points = [point for point in self._scan_samples if point.get("axis") == "az"]
         el_points = [point for point in self._scan_samples if point.get("axis") == "el"]
         if az_points:
@@ -475,6 +482,8 @@ class ScanUiMixin:
         total = int(snapshot.get("total", 0))
         point = snapshot.get("point", {})
         stage = str(snapshot.get("stage", "running")).strip().lower()
+        self._scan_progress_current = current
+        self._scan_progress_total = total
         self._scan_current_stage = stage
         self._scan_current_point = point if stage in {"move", "settle", "measure"} else None
         self._refresh_scan_path_visuals()
@@ -485,12 +494,24 @@ class ScanUiMixin:
         axis_label = "dAZ/dEL" if str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative" else "AZ/EL"
         self.scan_progress_label.setText(f"{current}/{total} | {stage} | {axis_label}={coords[0]:+.2f}/{coords[1]:+.2f}")
 
+    def _on_scan_error(self, message: str) -> None:
+        self._scan_current_stage = "error"
+        self._scan_current_point = None
+        self._refresh_scan_path_visuals()
+        current = int(getattr(self, "_scan_progress_current", 0))
+        total = int(getattr(self, "_scan_progress_total", 0))
+        self.scan_progress_label.setText(f"{current}/{total} | error | {message}")
+        self.status_bar.showMessage(f"Scan: {message}", 5000)
+
     def _on_scan_completed(self, result: dict) -> None:
         self._scan_current_result = result
         self._reset_scan_probe_offset()
         self._scan_current_point = None
         self._scan_current_stage = "completed"
+        self._scan_progress_current = int(len(result.get("samples", [])))
+        self._scan_progress_total = max(self._scan_progress_total, self._scan_progress_current)
         best = result.get("best_point", {})
+        self.scan_progress_label.setText(f"{self._scan_progress_current}/{self._scan_progress_total} | completed")
         self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
         self.scan_offset_label.setText(f"dAZ={result.get('az_offset_deg', 0.0):.3f} dEL={result.get('el_offset_deg', 0.0):.3f}")
         best_coords = self._scan_plot_coordinates(best)
@@ -524,6 +545,8 @@ class ScanUiMixin:
             self._reset_scan_probe_offset(stop_fixed_positioner=True)
             self._scan_current_point = None
             self._refresh_scan_path_visuals()
+        if state == "stopped":
+            self.scan_progress_label.setText(f"{self._scan_progress_current}/{self._scan_progress_total} | stopped")
         self.status_bar.showMessage(f"Scan state: {state}", 3000)
 
     def _apply_scan_offset(self, persist: bool) -> None:
