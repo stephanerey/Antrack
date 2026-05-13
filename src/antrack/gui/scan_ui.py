@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 
 from antrack.core.dsp.snr import compute_snr
 from antrack.gui.widgets.heatmap_widget import HeatmapWidget
+from antrack.tracking.scan_results import scan_error_series
 from antrack.tracking.scan_session import ScanSession
 
 
@@ -121,9 +122,17 @@ class ScanUiMixin:
         self.scan_cross_plot.setLabel("left", "Metric")
         self.scan_cross_az_curve = self.scan_cross_plot.plot(name="Azimuth", pen=pg.mkPen("y"))
         self.scan_cross_el_curve = self.scan_cross_plot.plot(name="Elevation", pen=pg.mkPen("c"))
+        self.scan_error_plot = pg.PlotWidget(splitter)
+        self.scan_error_plot.addLegend()
+        self.scan_error_plot.setLabel("bottom", "Estimate", units="#")
+        self.scan_error_plot.setLabel("left", "Error", units="deg")
+        self.scan_error_az_curve = self.scan_error_plot.plot(name="AZ error", pen=pg.mkPen("y"))
+        self.scan_error_el_curve = self.scan_error_plot.plot(name="EL error", pen=pg.mkPen("c"))
+        self.scan_error_total_curve = self.scan_error_plot.plot(name="Angular error", pen=pg.mkPen("m"))
         splitter.addWidget(self.scan_heatmap_widget)
         splitter.addWidget(self.scan_cross_plot)
-        splitter.setSizes([600, 300])
+        splitter.addWidget(self.scan_error_plot)
+        splitter.setSizes([550, 250, 250])
 
         root_layout.addWidget(config_group)
         root_layout.addWidget(control_group)
@@ -197,6 +206,7 @@ class ScanUiMixin:
         self.scan_heatmap_widget.clear()
         self.scan_cross_az_curve.clear()
         self.scan_cross_el_curve.clear()
+        self._update_scan_error_plot([])
         self.scan_session.start(self._build_scan_config())
 
     def _scan_move_to(self, az_deg: float, el_deg: float) -> None:
@@ -270,6 +280,13 @@ class ScanUiMixin:
             for point in self._scan_samples:
                 grid[el_index[round(point["el"], 6)], az_index[round(point["az"], 6)]] = float(point["value"])
             self.scan_heatmap_widget.set_heatmap(az_unique, el_unique, grid)
+        self._update_scan_error_plot(result.get("error_trace", []))
+
+    def _update_scan_error_plot(self, error_trace: list[dict]) -> None:
+        series = scan_error_series(error_trace)
+        self.scan_error_az_curve.setData(series["x"], series["az_error_deg"])
+        self.scan_error_el_curve.setData(series["x"], series["el_error_deg"])
+        self.scan_error_total_curve.setData(series["x"], series["angular_error_deg"])
 
     def _on_scan_state_changed(self, state: str) -> None:
         self.status_bar.showMessage(f"Scan state: {state}", 3000)

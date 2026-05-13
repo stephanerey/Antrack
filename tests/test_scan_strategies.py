@@ -1,7 +1,7 @@
 from antrack.tracking.scan_cross import estimate_cross_offset, generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points
 from antrack.tracking.scan_peak import estimate_four_point_divergence_peak
-from antrack.tracking.scan_results import make_scan_result, make_scan_sample
+from antrack.tracking.scan_results import make_scan_result, make_scan_sample, scan_error_series
 from antrack.tracking.scan_session import ScanSession
 from antrack.tracking.scan_spiral import generate_spiral_points, spiral_samples_to_grid
 
@@ -92,6 +92,21 @@ def test_scan_result_offsets_follow_peak_theoretical_center():
 
     assert result["az_offset_deg"] == 1.0
     assert result["el_offset_deg"] == -1.0
+
+
+def test_scan_error_series_prepares_plot_values():
+    series = scan_error_series(
+        [
+            {"az_error_deg": 1.0, "el_error_deg": -2.0, "angular_error_deg": 2.5},
+            {"az_error_deg": -0.5, "el_error_deg": 0.25},
+        ]
+    )
+
+    assert series["x"] == [0.0, 1.0]
+    assert series["az_error_deg"] == [1.0, -0.5]
+    assert series["el_error_deg"] == [-2.0, 0.25]
+    assert series["angular_error_deg"][0] == 2.5
+    assert series["angular_error_deg"][1] > 0.55
 
 
 def test_four_point_divergence_peak_estimates_inside_best_cell():

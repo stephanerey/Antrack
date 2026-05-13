@@ -122,3 +122,26 @@ def make_scan_result(
         "el_offset_deg": el_offset,
         "error_trace": [peak_estimate],
     }
+
+
+def scan_error_series(error_trace: Iterable[dict]) -> dict[str, list[float]]:
+    """Convert an error trace to plot-ready series."""
+    x_values: list[float] = []
+    az_errors: list[float] = []
+    el_errors: list[float] = []
+    angular_errors: list[float] = []
+
+    for index, point in enumerate(error_trace):
+        x_values.append(float(index))
+        az_error = _as_float(point.get("az_error_deg"), 0.0)
+        el_error = _as_float(point.get("el_error_deg"), 0.0)
+        az_errors.append(az_error)
+        el_errors.append(el_error)
+        angular_errors.append(_as_float(point.get("angular_error_deg"), angular_error_deg(az_error, el_error)))
+
+    return {
+        "x": x_values,
+        "az_error_deg": az_errors,
+        "el_error_deg": el_errors,
+        "angular_error_deg": angular_errors,
+    }
