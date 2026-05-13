@@ -7,7 +7,7 @@ from antrack.core.dsp.snr import average_power_spectrum_db, compute_band_power_m
 
 
 def test_compute_band_power_metrics_reports_integrated_and_per_bin_values():
-    metrics = compute_band_power_metrics(np.array([-100.0, -100.0], dtype=np.float32))
+    metrics = compute_band_power_metrics(np.array([-100.0, -100.0], dtype=np.float32), bin_width_hz=1.0)
     assert metrics["bin_count"] == 2.0
     assert math.isclose(metrics["per_bin_db"], -100.0, abs_tol=1e-6)
     assert math.isclose(metrics["integrated_db"], -96.98970004336019, rel_tol=1e-6)
