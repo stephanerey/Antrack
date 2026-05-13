@@ -91,6 +91,20 @@ class HeatmapWidget(QWidget):
     def set_best_point(self, az_deg: float, el_deg: float) -> None:
         self.best_marker.setData([az_deg], [el_deg])
 
+    def set_scan_bounds(self, x_min: float, x_max: float, y_min: float, y_max: float) -> None:
+        try:
+            self.plot.enableAutoRange(x=False, y=False)
+        except Exception:
+            pass
+        self.plot.setXRange(float(x_min), float(x_max), padding=0.0)
+        self.plot.setYRange(float(y_min), float(y_max), padding=0.0)
+
+    def clear_scan_bounds(self) -> None:
+        try:
+            self.plot.enableAutoRange(x=True, y=True)
+        except Exception:
+            pass
+
     def set_axis_mode(self, *, relative: bool) -> None:
         if relative:
             self.plot.setLabel("bottom", "Offset Azimuth", units="deg")
@@ -151,6 +165,7 @@ class HeatmapWidget(QWidget):
         self.measured_marker.clear()
         self.current_marker.clear()
         self.best_marker.clear()
+        self.clear_scan_bounds()
 
     def _clear_grid_cells(self) -> None:
         while self._grid_cell_items:

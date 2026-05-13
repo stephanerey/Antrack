@@ -566,6 +566,11 @@ class ScanUiMixin:
         measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
         current = self._scan_plot_coordinates(self._scan_current_point)
         self.scan_heatmap_widget.set_scan_points(planned, measured, current)
+        if planned:
+            x_min, x_max, y_min, y_max = self._scan_plot_bounds()
+            self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
+        else:
+            self.scan_heatmap_widget.clear_scan_bounds()
         current_result = getattr(self, "_scan_current_result", None) or {}
         strategy = str(current_result.get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
         if strategy in {"grid", "adaptive"} and self._scan_plan_points:
@@ -620,6 +625,22 @@ class ScanUiMixin:
         cell_width = min(az_steps) if az_steps else default_step
         cell_height = min(el_steps) if el_steps else default_step
         return float(cell_width), float(cell_height)
+
+    def _scan_plot_bounds(self) -> tuple[float, float, float, float]:
+        coords = [coord for coord in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coord is not None]
+        if not coords:
+            return -1.0, 1.0, -1.0, 1.0
+        cell_width, cell_height = self._scan_grid_cell_size()
+        half_w = float(cell_width) / 2.0
+        half_h = float(cell_height) / 2.0
+        xs = [coord[0] for coord in coords]
+        ys = [coord[1] for coord in coords]
+        return (
+            min(xs) - half_w,
+            max(xs) + half_w,
+            min(ys) - half_h,
+            max(ys) + half_h,
+        )
 
     @staticmethod
     def _project_scan_profile(samples: list[dict], axis: str, *, relative: bool) -> tuple[list[float], list[float]]:
