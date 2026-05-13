@@ -186,6 +186,10 @@ class ScanSession(QObject):
         return dict(snapshot)
 
     @staticmethod
+    def _signed_az_delta_deg(value_deg: float, reference_deg: float) -> float:
+        return float(((float(value_deg) - float(reference_deg) + 180.0) % 360.0) - 180.0)
+
+    @staticmethod
     def _estimate_peak(samples: list[dict], config: dict) -> dict | None:
         estimator = str(config.get("peak_estimator", "best_sample")).strip().lower()
         if estimator in {"4point", "four_point", "four_point_divergence", "divergence"}:
@@ -242,8 +246,24 @@ class ScanSession(QObject):
             raise RuntimeError("No measure callback configured for ScanSession.")
         self.progress_updated.emit({"current": current, "total": total, "point": progress_snapshot, "stage": "measure"})
         telemetry = self._telemetry_snapshot()
+        requested_offset_az = float(point.get("relative_az_deg", point.get("offset_az", 0.0)))
+        requested_offset_el = float(point.get("relative_el_deg", point.get("offset_el", 0.0)))
+        actual_offset_az = None
+        actual_offset_el = None
+        offset_error_az = None
+        offset_error_el = None
+        actual_az = telemetry.get("actual_az")
+        actual_el = telemetry.get("actual_el")
+        theoretical_az_live = telemetry.get("theoretical_az_live", point.get("theoretical_az"))
+        theoretical_el_live = telemetry.get("theoretical_el_live", point.get("theoretical_el"))
+        if all(isinstance(value, (int, float)) for value in (actual_az, theoretical_az_live)):
+            actual_offset_az = self._signed_az_delta_deg(float(actual_az), float(theoretical_az_live))
+            offset_error_az = float(actual_offset_az) - requested_offset_az
+        if all(isinstance(value, (int, float)) for value in (actual_el, theoretical_el_live)):
+            actual_offset_el = float(actual_el) - float(theoretical_el_live)
+            offset_error_el = float(actual_offset_el) - requested_offset_el
         self.logger.info(
-            "[ScanPoint] idx=%d/%d target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f actual_az=%s actual_el=%s set_az=%s set_el=%s phase=measure",
+            "[ScanPoint] idx=%d/%d target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f actual_az=%s actual_el=%s set_az=%s set_el=%s actual_offset_az=%s actual_offset_el=%s offset_error_az=%s offset_error_el=%s phase=measure",
             current,
             total,
             az,
@@ -256,6 +276,10 @@ class ScanSession(QObject):
             telemetry.get("actual_el"),
             telemetry.get("set_az"),
             telemetry.get("set_el"),
+            actual_offset_az,
+            actual_offset_el,
+            offset_error_az,
+            offset_error_el,
         )
         value = float(self.measure(config))
         sample = make_scan_sample(
@@ -265,9 +289,15 @@ class ScanSession(QObject):
             theoretical_el_deg=float(point.get("theoretical_el", config.get("center_el_deg", el))),
         )
         sample.update(telemetry)
+        sample["requested_offset_az"] = requested_offset_az
+        sample["requested_offset_el"] = requested_offset_el
+        sample["actual_offset_az"] = actual_offset_az
+        sample["actual_offset_el"] = actual_offset_el
+        sample["offset_error_az"] = offset_error_az
+        sample["offset_error_el"] = offset_error_el
         self.point_measured.emit(sample)
         self.logger.info(
-            "[ScanPoint] idx=%d/%d value=%.3f target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f actual_az=%s actual_el=%s",
+            "[ScanPoint] idx=%d/%d value=%.3f target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f actual_az=%s actual_el=%s actual_offset_az=%s actual_offset_el=%s offset_error_az=%s offset_error_el=%s",
             current,
             total,
             value,
@@ -279,6 +309,10 @@ class ScanSession(QObject):
             float(point.get("relative_el_deg", point.get("offset_el", 0.0))),
             telemetry.get("actual_az"),
             telemetry.get("actual_el"),
+            actual_offset_az,
+            actual_offset_el,
+            offset_error_az,
+            offset_error_el,
         )
         self.progress_updated.emit({"current": current, "total": total, "point": sample, "stage": "done"})
         return sample

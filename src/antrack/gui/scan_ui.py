@@ -359,16 +359,26 @@ class ScanUiMixin:
         stable_cycles_required = max(2, int(antenna.get("positioning_stable_cycles", 3)))
         if tracking_relative:
             step_deg = abs(float(config.get("step_deg", 0.5) or 0.5))
-            relaxed_tol = max(az_err_th, min(0.75, step_deg * 1.25))
-            az_err_th = max(az_err_th, relaxed_tol)
-            el_err_th = max(el_err_th, relaxed_tol)
-            stable_cycles_required = 1
+            offset_tol = float(config.get("offset_settle_tolerance_deg", max(0.10, min(0.20, step_deg * 0.30))))
+            az_err_th = offset_tol
+            el_err_th = offset_tol
+            stable_cycles_required = max(2, int(config.get("offset_stable_cycles", 2)))
         az_forbidden = parse_forbidden_ranges(antenna.get("az_forbidden_ranges"), default=[(45.0, 90.0), (270.0, 300.0)])
         el_forbidden = parse_forbidden_ranges(antenna.get("el_forbidden_ranges"), default=[(-10.0, 0.0), (95.0, 100.0)])
         stable_cycles = 0
-        timeout_t = time.monotonic() + max(5.0, float(settle_s) + (12.0 if tracking_relative else 20.0))
+        timeout_t = time.monotonic() + max(5.0, float(settle_s) + (20.0 if tracking_relative else 20.0))
         az_error = None
         el_error = None
+        actual_offset_az = None
+        actual_offset_el = None
+        offset_error_az = None
+        offset_error_el = None
+        az_cur = None
+        el_cur = None
+        az_set = None
+        el_set = None
+        requested_offset_az = float(point.get("relative_az_deg", point.get("offset_az", 0.0)))
+        requested_offset_el = float(point.get("relative_el_deg", point.get("offset_el", 0.0)))
         while time.monotonic() < timeout_t:
             antenna_state = getattr(getattr(self, "axis_client", None), "antenna", None)
             az_cur = getattr(antenna_state, "az", None)
@@ -385,7 +395,21 @@ class ScanUiMixin:
                 stable_cycles = 0
                 time.sleep(0.05)
                 continue
-            if abs(float(az_error)) <= az_err_th and abs(float(el_error)) <= el_err_th:
+            if tracking_relative:
+                theoretical_az = getattr(target, "az_theoretical_deg", point.get("theoretical_az"))
+                theoretical_el = getattr(target, "el_theoretical_deg", point.get("theoretical_el"))
+                if not all(isinstance(value, (int, float)) for value in (theoretical_az, theoretical_el)):
+                    stable_cycles = 0
+                    time.sleep(0.05)
+                    continue
+                actual_offset_az = ((float(az_cur) - float(theoretical_az) + 180.0) % 360.0) - 180.0
+                actual_offset_el = float(el_cur) - float(theoretical_el)
+                offset_error_az = float(actual_offset_az) - requested_offset_az
+                offset_error_el = float(actual_offset_el) - requested_offset_el
+                settled = abs(float(offset_error_az)) <= az_err_th and abs(float(offset_error_el)) <= el_err_th
+            else:
+                settled = abs(float(az_error)) <= az_err_th and abs(float(el_error)) <= el_err_th
+            if settled:
                 stable_cycles += 1
                 if stable_cycles >= stable_cycles_required:
                     if float(settle_s) > 0.0:
@@ -397,22 +421,28 @@ class ScanUiMixin:
         az_text = f"{float(az_error):+.2f}" if isinstance(az_error, (int, float)) else "?"
         el_text = f"{float(el_error):+.2f}" if isinstance(el_error, (int, float)) else "?"
         if tracking_relative:
-            self.status_bar.showMessage(
-                f"Scan: soft timeout on point, measuring anyway (az_err={az_text}, el_err={el_text})",
-                4000,
-            )
+            offset_az_text = f"{float(actual_offset_az):+.2f}" if isinstance(actual_offset_az, (int, float)) else "?"
+            offset_el_text = f"{float(actual_offset_el):+.2f}" if isinstance(actual_offset_el, (int, float)) else "?"
+            off_err_az_text = f"{float(offset_error_az):+.2f}" if isinstance(offset_error_az, (int, float)) else "?"
+            off_err_el_text = f"{float(offset_error_el):+.2f}" if isinstance(offset_error_el, (int, float)) else "?"
             self.logger.info(
-                "[ScanSettle] soft-timeout target_az=%.3f target_el=%.3f actual_az=%s actual_el=%s set_az=%s set_el=%s az_err=%s el_err=%s",
+                "[ScanSettle] timeout target_az=%.3f target_el=%.3f req_offset_az=%.3f req_offset_el=%.3f actual_offset_az=%s actual_offset_el=%s offset_error_az=%s offset_error_el=%s actual_az=%s actual_el=%s set_az=%s set_el=%s",
                 float(point.get("az", 0.0)),
                 float(point.get("el", 0.0)),
-                getattr(getattr(self, "axis_client", None), "antenna", None).az if getattr(getattr(self, "axis_client", None), "antenna", None) is not None else None,
-                getattr(getattr(self, "axis_client", None), "antenna", None).el if getattr(getattr(self, "axis_client", None), "antenna", None) is not None else None,
-                getattr(getattr(self, "tracked_object", None), "az_set", None),
-                getattr(getattr(self, "tracked_object", None), "el_set", None),
-                az_text,
-                el_text,
+                requested_offset_az,
+                requested_offset_el,
+                offset_az_text,
+                offset_el_text,
+                off_err_az_text,
+                off_err_el_text,
+                az_cur if isinstance(az_cur, (int, float)) else None,
+                el_cur if isinstance(el_cur, (int, float)) else None,
+                az_set if isinstance(az_set, (int, float)) else None,
+                el_set if isinstance(el_set, (int, float)) else None,
             )
-            return
+            raise TimeoutError(
+                f"Scan offset did not settle before timeout (offset_err_az={off_err_az_text}, offset_err_el={off_err_el_text})."
+            )
         raise TimeoutError(f"Scan move did not settle before timeout (az_err={az_text}, el_err={el_text}).")
 
     def _scan_telemetry_snapshot(self) -> dict:

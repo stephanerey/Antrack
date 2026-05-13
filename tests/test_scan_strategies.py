@@ -200,6 +200,12 @@ def test_scan_session_includes_telemetry_snapshot_in_sample():
     assert sample["actual_el"] == 34.5
     assert sample["set_az"] == 13.0
     assert sample["set_el"] == 35.0
+    assert sample["requested_offset_az"] == 1.0
+    assert sample["requested_offset_el"] == 2.0
+    assert sample["actual_offset_az"] == 0.5
+    assert sample["actual_offset_el"] == 1.5
+    assert sample["offset_error_az"] == -0.5
+    assert sample["offset_error_el"] == -0.5
 
 
 def test_scan_session_can_use_four_point_peak_estimator():
