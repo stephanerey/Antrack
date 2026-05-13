@@ -293,12 +293,7 @@ class Tracker:
                     pass
 
                 # Ajuster vitesses + mouvements via le core (Axis) en utilisant l'event loop asyncio
-                if az_blocked or el_blocked:
-                    try:
-                        self._stop_motors()
-                    except Exception:
-                        pass
-                elif need_az or need_el:
+                if need_az or need_el or az_blocked or el_blocked:
                     # AZ speed
                     try:
                         if abs(self.tracked_object.az_error) > approach_deg:
@@ -416,7 +411,7 @@ class Tracker:
                         server_st = getattr(getattr(self.axis_client_qt, 'axisClient', None), 'server_status', None)
                         log.info(
                             "DECIDE tel_ok=%s set_ok=%s | az_cur=%.3f el_cur=%.3f | az_set=%.3f el_set=%.3f | "
-                            "err=(%.2f, %.2f) thr=(%.2f, %.2f) need=(%s,%s) desired=(%s,%s) | "
+                            "err=(%.2f, %.2f) blocked=(%s,%s) thr=(%.2f, %.2f) need=(%s,%s) desired=(%s,%s) | "
                             "endstop=(%s,%s) setrate=(%s,%s) rate=(%s,%s) server=%s",
                             tel_ok, set_ok,
                             az_cur if isinstance(az_cur, (int, float)) else float('nan'),
@@ -424,6 +419,7 @@ class Tracker:
                             self.tracked_object.az_set if isinstance(self.tracked_object.az_set, (int, float)) else float('nan'),
                             self.tracked_object.el_set if isinstance(self.tracked_object.el_set, (int, float)) else float('nan'),
                             self.tracked_object.az_error, self.tracked_object.el_error,
+                            az_blocked, el_blocked,
                             az_err_th, el_err_th, need_az, need_el, desired_az, desired_el,
                             end_az, end_el, az_setrate, el_setrate, az_rate, el_rate, getattr(server_st, "name", server_st)
                         )
