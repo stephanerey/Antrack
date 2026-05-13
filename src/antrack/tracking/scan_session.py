@@ -36,6 +36,7 @@ class ScanSession(QObject):
         measure: Optional[Callable[[dict], float]] = None,
         wait_for_settle: Optional[Callable[[float, float, float], None]] = None,
         center_provider: Optional[Callable[[], object]] = None,
+        telemetry_provider: Optional[Callable[[], object]] = None,
         logger: Optional[logging.Logger] = None,
         export_dir: Optional[Path] = None,
         parent=None,
@@ -46,6 +47,7 @@ class ScanSession(QObject):
         self.measure = measure
         self.wait_for_settle = wait_for_settle
         self.center_provider = center_provider
+        self.telemetry_provider = telemetry_provider
         self.logger = logger or logging.getLogger("ScanSession")
         self.export_dir = export_dir
         self._thread_name = "ScanSession"
@@ -171,6 +173,18 @@ class ScanSession(QObject):
         materialized["theoretical_el"] = theoretical_el
         return materialized
 
+    def _telemetry_snapshot(self) -> dict:
+        if self.telemetry_provider is None:
+            return {}
+        try:
+            snapshot = self.telemetry_provider()
+        except Exception as exc:
+            self.logger.debug("Unable to read scan telemetry snapshot: %s", exc)
+            return {}
+        if not isinstance(snapshot, dict):
+            return {}
+        return dict(snapshot)
+
     @staticmethod
     def _estimate_peak(samples: list[dict], config: dict) -> dict | None:
         estimator = str(config.get("peak_estimator", "best_sample")).strip().lower()
@@ -187,6 +201,17 @@ class ScanSession(QObject):
         current = int(config.get("_progress_current", 0))
         total = int(config.get("_progress_total", 0))
         self.progress_updated.emit({"current": current, "total": total, "point": progress_snapshot, "stage": "move"})
+        self.logger.info(
+            "[ScanPoint] idx=%d/%d target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f phase=move",
+            current,
+            total,
+            az,
+            el,
+            float(point.get("theoretical_az", az)),
+            float(point.get("theoretical_el", el)),
+            float(point.get("relative_az_deg", point.get("offset_az", 0.0))),
+            float(point.get("relative_el_deg", point.get("offset_el", 0.0))),
+        )
         if self.move_to is not None:
             try:
                 self.move_to(point=point, config=config)
@@ -216,6 +241,22 @@ class ScanSession(QObject):
         if self.measure is None:
             raise RuntimeError("No measure callback configured for ScanSession.")
         self.progress_updated.emit({"current": current, "total": total, "point": progress_snapshot, "stage": "measure"})
+        telemetry = self._telemetry_snapshot()
+        self.logger.info(
+            "[ScanPoint] idx=%d/%d target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f actual_az=%s actual_el=%s set_az=%s set_el=%s phase=measure",
+            current,
+            total,
+            az,
+            el,
+            float(point.get("theoretical_az", az)),
+            float(point.get("theoretical_el", el)),
+            float(point.get("relative_az_deg", point.get("offset_az", 0.0))),
+            float(point.get("relative_el_deg", point.get("offset_el", 0.0))),
+            telemetry.get("actual_az"),
+            telemetry.get("actual_el"),
+            telemetry.get("set_az"),
+            telemetry.get("set_el"),
+        )
         value = float(self.measure(config))
         sample = make_scan_sample(
             point,
@@ -223,7 +264,22 @@ class ScanSession(QObject):
             theoretical_az_deg=float(point.get("theoretical_az", config.get("center_az_deg", az))),
             theoretical_el_deg=float(point.get("theoretical_el", config.get("center_el_deg", el))),
         )
+        sample.update(telemetry)
         self.point_measured.emit(sample)
+        self.logger.info(
+            "[ScanPoint] idx=%d/%d value=%.3f target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f actual_az=%s actual_el=%s",
+            current,
+            total,
+            value,
+            az,
+            el,
+            float(point.get("theoretical_az", az)),
+            float(point.get("theoretical_el", el)),
+            float(point.get("relative_az_deg", point.get("offset_az", 0.0))),
+            float(point.get("relative_el_deg", point.get("offset_el", 0.0))),
+            telemetry.get("actual_az"),
+            telemetry.get("actual_el"),
+        )
         self.progress_updated.emit({"current": current, "total": total, "point": sample, "stage": "done"})
         return sample
 

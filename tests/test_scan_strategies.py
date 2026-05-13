@@ -182,6 +182,26 @@ def test_scan_session_emits_progress_stages_during_point_measurement():
     assert all(snapshot["total"] == 9 for snapshot in progress)
 
 
+def test_scan_session_includes_telemetry_snapshot_in_sample():
+    session = ScanSession(
+        thread_manager=None,
+        move_to=lambda az_deg, el_deg: None,
+        wait_for_settle=lambda az_deg, el_deg, settle_s: None,
+        telemetry_provider=lambda: {"actual_az": 12.5, "actual_el": 34.5, "set_az": 13.0, "set_el": 35.0},
+        measure=lambda _config: 7.0,
+    )
+
+    sample = session._measure_point(
+        {"az": 13.0, "el": 35.0, "relative_az_deg": 1.0, "relative_el_deg": 2.0},
+        {"center_az_deg": 12.0, "center_el_deg": 33.0, "_progress_current": 1, "_progress_total": 4},
+    )
+
+    assert sample["actual_az"] == 12.5
+    assert sample["actual_el"] == 34.5
+    assert sample["set_az"] == 13.0
+    assert sample["set_el"] == 35.0
+
+
 def test_scan_session_can_use_four_point_peak_estimator():
     current = {"az": 0.0, "el": 0.0}
 

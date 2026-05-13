@@ -166,6 +166,7 @@ class ScanUiMixin:
             measure=self._scan_measure,
             wait_for_settle=self._scan_wait_for_settle,
             center_provider=self._scan_current_theoretical_center,
+            telemetry_provider=self._scan_telemetry_snapshot,
             logger=self.logger.getChild("Scan"),
         )
         self._scan_move_bridge = _ScanMoveBridge(self)
@@ -400,8 +401,31 @@ class ScanUiMixin:
                 f"Scan: soft timeout on point, measuring anyway (az_err={az_text}, el_err={el_text})",
                 4000,
             )
+            self.logger.info(
+                "[ScanSettle] soft-timeout target_az=%.3f target_el=%.3f actual_az=%s actual_el=%s set_az=%s set_el=%s az_err=%s el_err=%s",
+                float(point.get("az", 0.0)),
+                float(point.get("el", 0.0)),
+                getattr(getattr(self, "axis_client", None), "antenna", None).az if getattr(getattr(self, "axis_client", None), "antenna", None) is not None else None,
+                getattr(getattr(self, "axis_client", None), "antenna", None).el if getattr(getattr(self, "axis_client", None), "antenna", None) is not None else None,
+                getattr(getattr(self, "tracked_object", None), "az_set", None),
+                getattr(getattr(self, "tracked_object", None), "el_set", None),
+                az_text,
+                el_text,
+            )
             return
         raise TimeoutError(f"Scan move did not settle before timeout (az_err={az_text}, el_err={el_text}).")
+
+    def _scan_telemetry_snapshot(self) -> dict:
+        antenna = getattr(getattr(self, "axis_client", None), "antenna", None)
+        tracked = getattr(self, "tracked_object", None)
+        return {
+            "actual_az": getattr(antenna, "az", None),
+            "actual_el": getattr(antenna, "el", None),
+            "set_az": getattr(tracked, "az_set", None),
+            "set_el": getattr(tracked, "el_set", None),
+            "theoretical_az_live": getattr(tracked, "az_theoretical_deg", None),
+            "theoretical_el_live": getattr(tracked, "el_theoretical_deg", None),
+        }
 
     def _build_scan_preview_points(self, config: dict) -> list[dict]:
         strategy = str(config.get("strategy", "grid")).strip().lower()
