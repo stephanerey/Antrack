@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSplitter,
     QVBoxLayout,
+    QWidget,
 )
 
 from antrack.core.dsp.snr import compute_snr
@@ -149,17 +150,68 @@ class ScanUiMixin:
         control_form.addRow(self.scan_save_button)
 
         splitter = QSplitter(Qt.Vertical, container)
-        self.scan_heatmap_widget = HeatmapWidget(splitter)
-        self.scan_cross_plot = pg.PlotWidget(splitter)
-        self.scan_cross_plot.addLegend()
-        self.scan_cross_plot.setLabel("bottom", "Angle", units="deg")
-        self.scan_cross_plot.setLabel("left", "Metric")
-        self.scan_cross_az_curve = self.scan_cross_plot.plot(name="Azimuth", pen=pg.mkPen("y"))
-        self.scan_cross_el_curve = self.scan_cross_plot.plot(name="Elevation", pen=pg.mkPen("c"))
-        self.scan_cross_theoretical_marker = pg.ScatterPlotItem(name="Theoretical", symbol="t", size=11, brush=pg.mkBrush(255, 220, 120, 220), pen=pg.mkPen("k"))
-        self.scan_cross_real_marker = pg.ScatterPlotItem(name="Measured Peak", symbol="o", size=11, brush=pg.mkBrush(255, 255, 255, 220), pen=pg.mkPen("k"))
-        self.scan_cross_plot.addItem(self.scan_cross_theoretical_marker)
-        self.scan_cross_plot.addItem(self.scan_cross_real_marker)
+        visual_panel = QWidget(splitter)
+        visual_layout = QGridLayout(visual_panel)
+        visual_layout.setContentsMargins(0, 0, 0, 0)
+        visual_layout.setHorizontalSpacing(6)
+        visual_layout.setVerticalSpacing(6)
+        self.scan_vertical_plot = pg.PlotWidget(visual_panel)
+        self.scan_vertical_plot.addLegend()
+        self.scan_vertical_plot.showGrid(x=True, y=True)
+        self.scan_vertical_plot.setMaximumWidth(220)
+        self.scan_vertical_plot.setLabel("bottom", "Metric")
+        self.scan_vertical_plot.setLabel("left", "Elevation", units="deg")
+        self.scan_vertical_curve = self.scan_vertical_plot.plot(name="Elevation", pen=pg.mkPen("c"))
+        self.scan_vertical_theoretical_marker = pg.ScatterPlotItem(
+            name="Theoretical",
+            symbol="t",
+            size=11,
+            brush=pg.mkBrush(255, 220, 120, 220),
+            pen=pg.mkPen("k"),
+        )
+        self.scan_vertical_real_marker = pg.ScatterPlotItem(
+            name="Measured Peak",
+            symbol="o",
+            size=11,
+            brush=pg.mkBrush(255, 255, 255, 220),
+            pen=pg.mkPen("k"),
+        )
+        self.scan_vertical_plot.addItem(self.scan_vertical_theoretical_marker)
+        self.scan_vertical_plot.addItem(self.scan_vertical_real_marker)
+
+        self.scan_heatmap_widget = HeatmapWidget(visual_panel)
+
+        self.scan_horizontal_plot = pg.PlotWidget(visual_panel)
+        self.scan_horizontal_plot.addLegend()
+        self.scan_horizontal_plot.showGrid(x=True, y=True)
+        self.scan_horizontal_plot.setLabel("bottom", "Azimuth", units="deg")
+        self.scan_horizontal_plot.setLabel("left", "Metric")
+        self.scan_horizontal_curve = self.scan_horizontal_plot.plot(name="Azimuth", pen=pg.mkPen("y"))
+        self.scan_horizontal_theoretical_marker = pg.ScatterPlotItem(
+            name="Theoretical",
+            symbol="t",
+            size=11,
+            brush=pg.mkBrush(255, 220, 120, 220),
+            pen=pg.mkPen("k"),
+        )
+        self.scan_horizontal_real_marker = pg.ScatterPlotItem(
+            name="Measured Peak",
+            symbol="o",
+            size=11,
+            brush=pg.mkBrush(255, 255, 255, 220),
+            pen=pg.mkPen("k"),
+        )
+        self.scan_horizontal_plot.addItem(self.scan_horizontal_theoretical_marker)
+        self.scan_horizontal_plot.addItem(self.scan_horizontal_real_marker)
+
+        visual_layout.addWidget(self.scan_vertical_plot, 0, 0)
+        visual_layout.addWidget(self.scan_heatmap_widget, 0, 1)
+        visual_layout.addWidget(self.scan_horizontal_plot, 1, 1)
+        visual_layout.setColumnStretch(1, 1)
+        visual_layout.setRowStretch(0, 1)
+        self.scan_vertical_plot.setYLink(self.scan_heatmap_widget.plot)
+        self.scan_horizontal_plot.setXLink(self.scan_heatmap_widget.plot)
+
         self.scan_error_plot = pg.PlotWidget(splitter)
         self.scan_error_plot.addLegend()
         self.scan_error_plot.setLabel("bottom", "Estimate", units="#")
@@ -167,10 +219,9 @@ class ScanUiMixin:
         self.scan_error_az_curve = self.scan_error_plot.plot(name="AZ error", pen=pg.mkPen("y"))
         self.scan_error_el_curve = self.scan_error_plot.plot(name="EL error", pen=pg.mkPen("c"))
         self.scan_error_total_curve = self.scan_error_plot.plot(name="Angular error", pen=pg.mkPen("m"))
-        splitter.addWidget(self.scan_heatmap_widget)
-        splitter.addWidget(self.scan_cross_plot)
+        splitter.addWidget(visual_panel)
         splitter.addWidget(self.scan_error_plot)
-        splitter.setSizes([550, 250, 250])
+        splitter.setSizes([700, 220])
 
         root_layout.addWidget(config_group)
         root_layout.addWidget(control_group)
@@ -272,11 +323,13 @@ class ScanUiMixin:
         self._scan_progress_current = 0
         self._scan_progress_total = len(self._scan_plan_points)
         self.scan_heatmap_widget.clear()
-        self.scan_heatmap_widget.set_axis_mode(relative=self._scan_uses_tracking_relative(config))
-        self.scan_cross_az_curve.clear()
-        self.scan_cross_el_curve.clear()
-        self.scan_cross_theoretical_marker.clear()
-        self.scan_cross_real_marker.clear()
+        self._update_scan_profile_axes(self._scan_uses_tracking_relative(config))
+        self.scan_horizontal_curve.clear()
+        self.scan_vertical_curve.clear()
+        self.scan_horizontal_theoretical_marker.clear()
+        self.scan_horizontal_real_marker.clear()
+        self.scan_vertical_theoretical_marker.clear()
+        self.scan_vertical_real_marker.clear()
         self._update_scan_error_plot(self._scan_error_history)
         self._scan_active_center_mode = str(config.get("center_mode", "fixed")).strip().lower()
         self._refresh_scan_path_visuals()
@@ -289,6 +342,21 @@ class ScanUiMixin:
             return False
         mode = str(config.get("center_mode", "fixed")).strip().lower()
         return mode in {"dynamic", "follow", "orbit", "theoretical", "tracking", "tracking_relative"}
+
+    def _update_scan_profile_axes(self, relative: bool) -> None:
+        self.scan_heatmap_widget.set_axis_mode(relative=relative)
+        self.scan_horizontal_plot.setLabel(
+            "bottom",
+            "Offset Azimuth" if relative else "Azimuth",
+            units="deg",
+        )
+        self.scan_horizontal_plot.setLabel("left", "Metric")
+        self.scan_vertical_plot.setLabel("bottom", "Metric")
+        self.scan_vertical_plot.setLabel(
+            "left",
+            "Offset Elevation" if relative else "Elevation",
+            units="deg",
+        )
 
     def _prepare_scan_session(self, config: dict) -> bool:
         if not self.has_connection():
@@ -696,8 +764,8 @@ class ScanUiMixin:
         relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
         az_xs, az_ys = self._project_scan_profile(self._scan_samples, "az", relative=relative)
         el_xs, el_ys = self._project_scan_profile(self._scan_samples, "el", relative=relative)
-        self.scan_cross_az_curve.setData(az_xs, az_ys)
-        self.scan_cross_el_curve.setData(el_xs, el_ys)
+        self.scan_horizontal_curve.setData(az_xs, az_ys)
+        self.scan_vertical_curve.setData(el_ys, el_xs)
 
     def _on_scan_progress_updated(self, snapshot: dict) -> None:
         current = int(snapshot.get("current", 0))
@@ -756,7 +824,7 @@ class ScanUiMixin:
         self._refresh_scan_path_visuals()
         self._append_scan_error_history(peak)
         self._update_scan_error_plot(self._scan_error_history)
-        self._update_cross_markers(peak)
+        self._update_profile_markers(peak)
         if self._scan_repeat_active and getattr(self, "tracker", None) and self.tracker.is_running():
             interval_ms = int(max(1000.0, float(self.scan_repeat_interval_spin.value()) * 1000.0))
             self._scan_repeat_pending = True
@@ -773,30 +841,34 @@ class ScanUiMixin:
         if isinstance(peak, dict) and peak:
             self._scan_error_history.append(dict(peak))
 
-    def _update_cross_markers(self, peak: dict) -> None:
+    def _update_profile_markers(self, peak: dict) -> None:
         relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
         az_xs, az_ys = self._project_scan_profile(self._scan_samples, "az", relative=relative)
         el_xs, el_ys = self._project_scan_profile(self._scan_samples, "el", relative=relative)
         theoretical_az_x = 0.0 if relative else float(peak.get("theoretical_az", 0.0))
-        theoretical_el_x = 0.0 if relative else float(peak.get("theoretical_el", 0.0))
+        theoretical_el_y = 0.0 if relative else float(peak.get("theoretical_el", 0.0))
         az_peak_x = float(peak.get("az_error_deg", 0.0)) if relative else float(peak.get("az", 0.0))
-        el_peak_x = float(peak.get("el_error_deg", 0.0)) if relative else float(peak.get("el", 0.0))
-        theoretical_points = []
-        real_points = []
-        az_theoretical_y = self._nearest_curve_value(az_xs, az_ys, theoretical_az_x)
-        el_theoretical_y = self._nearest_curve_value(el_xs, el_ys, theoretical_el_x)
+        el_peak_y = float(peak.get("el_error_deg", 0.0)) if relative else float(peak.get("el", 0.0))
+        horizontal_theoretical_points = []
+        horizontal_real_points = []
+        vertical_theoretical_points = []
+        vertical_real_points = []
+        az_theoretical_metric = self._nearest_curve_value(az_xs, az_ys, theoretical_az_x)
         az_peak_y = self._nearest_curve_value(az_xs, az_ys, az_peak_x)
-        el_peak_y = self._nearest_curve_value(el_xs, el_ys, el_peak_x)
-        if az_theoretical_y is not None:
-            theoretical_points.append({"pos": (theoretical_az_x, az_theoretical_y)})
-        if el_theoretical_y is not None:
-            theoretical_points.append({"pos": (theoretical_el_x, el_theoretical_y)})
+        el_theoretical_metric = self._nearest_curve_value(el_xs, el_ys, theoretical_el_y)
+        el_peak_metric = self._nearest_curve_value(el_xs, el_ys, el_peak_y)
+        if az_theoretical_metric is not None:
+            horizontal_theoretical_points.append({"pos": (theoretical_az_x, az_theoretical_metric)})
         if az_peak_y is not None:
-            real_points.append({"pos": (az_peak_x, az_peak_y)})
-        if el_peak_y is not None:
-            real_points.append({"pos": (el_peak_x, el_peak_y)})
-        self.scan_cross_theoretical_marker.setData(theoretical_points)
-        self.scan_cross_real_marker.setData(real_points)
+            horizontal_real_points.append({"pos": (az_peak_x, az_peak_y)})
+        if el_theoretical_metric is not None:
+            vertical_theoretical_points.append({"pos": (el_theoretical_metric, theoretical_el_y)})
+        if el_peak_metric is not None:
+            vertical_real_points.append({"pos": (el_peak_metric, el_peak_y)})
+        self.scan_horizontal_theoretical_marker.setData(horizontal_theoretical_points)
+        self.scan_horizontal_real_marker.setData(horizontal_real_points)
+        self.scan_vertical_theoretical_marker.setData(vertical_theoretical_points)
+        self.scan_vertical_real_marker.setData(vertical_real_points)
 
     def _on_scan_state_changed(self, state: str) -> None:
         if state in {"stopped", "error"}:
