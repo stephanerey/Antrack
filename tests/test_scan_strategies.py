@@ -161,6 +161,27 @@ def test_scan_session_recovers_synthetic_offset():
     assert all("relative_az_deg" in sample for sample in result["samples"])
 
 
+def test_scan_session_emits_progress_stages_during_point_measurement():
+    progress = []
+
+    session = ScanSession(
+        thread_manager=None,
+        move_to=lambda az_deg, el_deg: None,
+        wait_for_settle=lambda az_deg, el_deg, settle_s: None,
+        measure=lambda _config: 1.0,
+    )
+    session.progress_updated.connect(progress.append)
+
+    session._measure_point(
+        {"az": 1.0, "el": 2.0, "relative_az_deg": 0.1, "relative_el_deg": -0.1},
+        {"center_az_deg": 1.0, "center_el_deg": 2.0, "_progress_current": 3, "_progress_total": 9},
+    )
+
+    assert [snapshot["stage"] for snapshot in progress] == ["move", "settle", "measure", "done"]
+    assert all(snapshot["current"] == 3 for snapshot in progress)
+    assert all(snapshot["total"] == 9 for snapshot in progress)
+
+
 def test_scan_session_can_use_four_point_peak_estimator():
     current = {"az": 0.0, "el": 0.0}
 

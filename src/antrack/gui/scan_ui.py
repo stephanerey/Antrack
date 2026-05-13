@@ -29,8 +29,11 @@ from antrack.tracking.motion_constraints import (
     constrained_elevation_error,
     parse_forbidden_ranges,
 )
+from antrack.tracking.scan_cross import generate_cross_points
+from antrack.tracking.scan_grid import generate_grid_points, generate_two_pass_grid_points
 from antrack.tracking.scan_results import scan_error_series
 from antrack.tracking.scan_session import ScanSession
+from antrack.tracking.scan_spiral import generate_spiral_points
 
 
 class _ScanMoveBridge(QObject):
@@ -175,6 +178,9 @@ class ScanUiMixin:
 
         self._scan_samples = []
         self._scan_current_result = None
+        self._scan_plan_points = []
+        self._scan_current_point = None
+        self._scan_current_stage = "idle"
         self.scan_start_button.clicked.connect(self.start_scan_session)
         self.scan_pause_button.clicked.connect(self.scan_session.pause)
         self.scan_resume_button.clicked.connect(self.scan_session.resume)
@@ -231,11 +237,17 @@ class ScanUiMixin:
             return
         self._scan_samples = []
         self._scan_current_result = None
+        self._scan_plan_points = self._build_scan_preview_points(config)
+        self._scan_current_point = None
+        self._scan_current_stage = "queued"
         self.scan_heatmap_widget.clear()
+        self.scan_heatmap_widget.set_axis_mode(relative=self._scan_uses_tracking_relative(config))
         self.scan_cross_az_curve.clear()
         self.scan_cross_el_curve.clear()
         self._update_scan_error_plot([])
         self._scan_active_center_mode = str(config.get("center_mode", "fixed")).strip().lower()
+        self._refresh_scan_path_visuals()
+        self.scan_progress_label.setText(f"0/{len(self._scan_plan_points) or 0} | queued")
         self.scan_session.start(config)
 
     @staticmethod
@@ -370,6 +382,63 @@ class ScanUiMixin:
             time.sleep(0.05)
         raise TimeoutError("Scan move did not settle before timeout.")
 
+    def _build_scan_preview_points(self, config: dict) -> list[dict]:
+        strategy = str(config.get("strategy", "grid")).strip().lower()
+        center_az = float(config.get("center_az_deg", 0.0))
+        center_el = float(config.get("center_el_deg", 0.0))
+        if strategy == "cross":
+            curves = generate_cross_points(
+                center_az,
+                center_el,
+                float(config.get("span_deg", 2.0)),
+                float(config.get("step_deg", 0.5)),
+            )
+            return list(curves["azimuth"]) + list(curves["elevation"])
+        if strategy == "spiral":
+            return generate_spiral_points(
+                center_az,
+                center_el,
+                float(config.get("span_deg", 2.0)),
+                float(config.get("radial_step_deg", config.get("step_deg", 0.25))),
+            )
+        if strategy == "adaptive":
+            return generate_two_pass_grid_points(
+                center_az,
+                center_el,
+                float(config.get("coarse_span_deg", config.get("span_deg", 2.0))),
+                float(config.get("coarse_step_deg", config.get("step_deg", 0.5))),
+                float(config.get("fine_span_deg", max(0.2, float(config.get("span_deg", 2.0)) / 4.0))),
+                float(config.get("fine_step_deg", max(0.05, float(config.get("step_deg", 0.5)) / 4.0))),
+                order=str(config.get("order", "zigzag")),
+            )
+        return generate_grid_points(
+            center_az,
+            center_el,
+            float(config.get("span_az_deg", config.get("span_deg", 2.0))),
+            float(config.get("span_el_deg", config.get("span_deg", 2.0))),
+            float(config.get("step_deg", 0.5)),
+            order=str(config.get("order", "zigzag")),
+        )
+
+    def _scan_plot_coordinates(self, point: dict | None) -> tuple[float, float] | None:
+        if not isinstance(point, dict):
+            return None
+        if str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative":
+            az = point.get("relative_az_deg", point.get("offset_az", point.get("az")))
+            el = point.get("relative_el_deg", point.get("offset_el", point.get("el")))
+        else:
+            az = point.get("az")
+            el = point.get("el")
+        if not isinstance(az, (int, float)) or not isinstance(el, (int, float)):
+            return None
+        return float(az), float(el)
+
+    def _refresh_scan_path_visuals(self) -> None:
+        planned = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coords is not None]
+        measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
+        current = self._scan_plot_coordinates(self._scan_current_point)
+        self.scan_heatmap_widget.set_scan_points(planned, measured, current)
+
     def _scan_measure(self, config: dict) -> float:
         metric = str(config.get("metric", "band_power")).strip().lower()
         if not hasattr(self, "sdr_client") or self.sdr_client is None:
@@ -393,6 +462,7 @@ class ScanUiMixin:
 
     def _on_scan_point_measured(self, sample: dict) -> None:
         self._scan_samples.append(sample)
+        self._refresh_scan_path_visuals()
         az_points = [point for point in self._scan_samples if point.get("axis") == "az"]
         el_points = [point for point in self._scan_samples if point.get("axis") == "el"]
         if az_points:
@@ -404,27 +474,43 @@ class ScanUiMixin:
         current = int(snapshot.get("current", 0))
         total = int(snapshot.get("total", 0))
         point = snapshot.get("point", {})
-        self.scan_progress_label.setText(f"{current}/{total} @ AZ={point.get('az', 0.0):.2f} EL={point.get('el', 0.0):.2f}")
+        stage = str(snapshot.get("stage", "running")).strip().lower()
+        self._scan_current_stage = stage
+        self._scan_current_point = point if stage in {"move", "settle", "measure"} else None
+        self._refresh_scan_path_visuals()
+        coords = self._scan_plot_coordinates(point)
+        if coords is None:
+            self.scan_progress_label.setText(f"{current}/{total} | {stage}")
+            return
+        axis_label = "dAZ/dEL" if str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative" else "AZ/EL"
+        self.scan_progress_label.setText(f"{current}/{total} | {stage} | {axis_label}={coords[0]:+.2f}/{coords[1]:+.2f}")
 
     def _on_scan_completed(self, result: dict) -> None:
         self._scan_current_result = result
         self._reset_scan_probe_offset()
+        self._scan_current_point = None
+        self._scan_current_stage = "completed"
         best = result.get("best_point", {})
         self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
         self.scan_offset_label.setText(f"dAZ={result.get('az_offset_deg', 0.0):.3f} dEL={result.get('el_offset_deg', 0.0):.3f}")
-        self.scan_heatmap_widget.set_best_point(float(best.get("az", 0.0)), float(best.get("el", 0.0)))
+        best_coords = self._scan_plot_coordinates(best)
+        if best_coords is not None:
+            self.scan_heatmap_widget.set_best_point(best_coords[0], best_coords[1])
         if result.get("strategy") == "spiral" and "heatmap" in result:
             heatmap = result["heatmap"]
             self.scan_heatmap_widget.set_heatmap(heatmap["az_values"], heatmap["el_values"], heatmap["grid"])
         elif result.get("strategy") in {"grid", "adaptive"} and self._scan_samples:
-            az_unique = sorted({round(point["az"], 6) for point in self._scan_samples})
-            el_unique = sorted({round(point["el"], 6) for point in self._scan_samples})
+            coords = [(self._scan_plot_coordinates(point), point) for point in self._scan_samples]
+            coords = [(coord, point) for coord, point in coords if coord is not None]
+            az_unique = sorted({round(coord[0], 6) for coord, _point in coords})
+            el_unique = sorted({round(coord[1], 6) for coord, _point in coords})
             grid = np.full((len(el_unique), len(az_unique)), np.nan, dtype=np.float32)
             az_index = {value: index for index, value in enumerate(az_unique)}
             el_index = {value: index for index, value in enumerate(el_unique)}
-            for point in self._scan_samples:
-                grid[el_index[round(point["el"], 6)], az_index[round(point["az"], 6)]] = float(point["value"])
+            for coord, point in coords:
+                grid[el_index[round(coord[1], 6)], az_index[round(coord[0], 6)]] = float(point["value"])
             self.scan_heatmap_widget.set_heatmap(az_unique, el_unique, grid)
+        self._refresh_scan_path_visuals()
         self._update_scan_error_plot(result.get("error_trace", []))
 
     def _update_scan_error_plot(self, error_trace: list[dict]) -> None:
@@ -436,6 +522,8 @@ class ScanUiMixin:
     def _on_scan_state_changed(self, state: str) -> None:
         if state in {"stopped", "error"}:
             self._reset_scan_probe_offset(stop_fixed_positioner=True)
+            self._scan_current_point = None
+            self._refresh_scan_path_visuals()
         self.status_bar.showMessage(f"Scan state: {state}", 3000)
 
     def _apply_scan_offset(self, persist: bool) -> None:

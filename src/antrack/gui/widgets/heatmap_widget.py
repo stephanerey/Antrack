@@ -24,7 +24,13 @@ class HeatmapWidget(QWidget):
         layout.addWidget(self.plot)
         self.image = pg.ImageItem()
         self.plot.addItem(self.image)
+        self.planned_marker = pg.ScatterPlotItem(size=8, brush=pg.mkBrush(180, 180, 180, 90), pen=pg.mkPen(120, 120, 120, 120))
+        self.measured_marker = pg.ScatterPlotItem(size=9, brush=pg.mkBrush(80, 220, 120, 180), pen=pg.mkPen(20, 60, 20, 160))
+        self.current_marker = pg.ScatterPlotItem(size=13, brush=pg.mkBrush(255, 170, 40, 220), pen=pg.mkPen("k"))
         self.best_marker = pg.ScatterPlotItem(size=12, brush=pg.mkBrush(255, 255, 255, 220), pen=pg.mkPen("k"))
+        self.plot.addItem(self.planned_marker)
+        self.plot.addItem(self.measured_marker)
+        self.plot.addItem(self.current_marker)
         self.plot.addItem(self.best_marker)
 
     def set_heatmap(self, az_values, el_values, grid_values) -> None:
@@ -48,6 +54,38 @@ class HeatmapWidget(QWidget):
     def set_best_point(self, az_deg: float, el_deg: float) -> None:
         self.best_marker.setData([az_deg], [el_deg])
 
+    def set_axis_mode(self, *, relative: bool) -> None:
+        if relative:
+            self.plot.setLabel("bottom", "Offset Azimuth", units="deg")
+            self.plot.setLabel("left", "Offset Elevation", units="deg")
+        else:
+            self.plot.setLabel("bottom", "Azimuth", units="deg")
+            self.plot.setLabel("left", "Elevation", units="deg")
+
+    def set_scan_points(
+        self,
+        planned_points: list[tuple[float, float]] | None,
+        measured_points: list[tuple[float, float]] | None,
+        current_point: tuple[float, float] | None,
+    ) -> None:
+        planned = list(planned_points or [])
+        measured = list(measured_points or [])
+        if planned:
+            self.planned_marker.setData([point[0] for point in planned], [point[1] for point in planned])
+        else:
+            self.planned_marker.clear()
+        if measured:
+            self.measured_marker.setData([point[0] for point in measured], [point[1] for point in measured])
+        else:
+            self.measured_marker.clear()
+        if current_point is not None:
+            self.current_marker.setData([current_point[0]], [current_point[1]])
+        else:
+            self.current_marker.clear()
+
     def clear(self) -> None:
         self.image.clear()
+        self.planned_marker.clear()
+        self.measured_marker.clear()
+        self.current_marker.clear()
         self.best_marker.clear()

@@ -183,6 +183,10 @@ class ScanSession(QObject):
         point = self._materialize_point(point, config)
         az = float(point["az"])
         el = float(point["el"])
+        progress_snapshot = dict(point)
+        current = int(config.get("_progress_current", 0))
+        total = int(config.get("_progress_total", 0))
+        self.progress_updated.emit({"current": current, "total": total, "point": progress_snapshot, "stage": "move"})
         if self.move_to is not None:
             try:
                 self.move_to(point=point, config=config)
@@ -196,6 +200,7 @@ class ScanSession(QObject):
                     raise exc
         settle_s = float(config.get("settle_s", 0.2))
         if self.wait_for_settle is not None:
+            self.progress_updated.emit({"current": current, "total": total, "point": progress_snapshot, "stage": "settle"})
             try:
                 self.wait_for_settle(point=point, config=config, settle_s=settle_s)
             except TypeError as exc:
@@ -210,6 +215,7 @@ class ScanSession(QObject):
             time.sleep(settle_s)
         if self.measure is None:
             raise RuntimeError("No measure callback configured for ScanSession.")
+        self.progress_updated.emit({"current": current, "total": total, "point": progress_snapshot, "stage": "measure"})
         value = float(self.measure(config))
         sample = make_scan_sample(
             point,
@@ -218,6 +224,7 @@ class ScanSession(QObject):
             theoretical_el_deg=float(point.get("theoretical_el", config.get("center_el_deg", el))),
         )
         self.point_measured.emit(sample)
+        self.progress_updated.emit({"current": current, "total": total, "point": sample, "stage": "done"})
         return sample
 
     def _run(self, config: dict) -> None:
@@ -236,9 +243,11 @@ class ScanSession(QObject):
                 )
                 total = len(curves["azimuth"]) + len(curves["elevation"])
                 for index, point in enumerate(curves["azimuth"] + curves["elevation"], start=1):
-                    sample = self._measure_point(point, config)
+                    point_config = dict(config)
+                    point_config["_progress_current"] = index
+                    point_config["_progress_total"] = total
+                    sample = self._measure_point(point, point_config)
                     samples.append(sample)
-                    self.progress_updated.emit({"current": index, "total": total, "point": sample})
                 az_curve = [sample for sample in samples if sample.get("axis") == "az"]
                 el_curve = [sample for sample in samples if sample.get("axis") == "el"]
                 cross_result = estimate_cross_offset(az_curve, el_curve, center_az, center_el)
@@ -289,9 +298,11 @@ class ScanSession(QObject):
                     )
                     total = len(coarse_points)
                     for index, point in enumerate(coarse_points, start=1):
-                        sample = self._measure_point(point, config)
+                        point_config = dict(config)
+                        point_config["_progress_current"] = index
+                        point_config["_progress_total"] = total
+                        sample = self._measure_point(point, point_config)
                         samples.append(sample)
-                        self.progress_updated.emit({"current": index, "total": total, "point": sample})
                     coarse_best = max(samples, key=lambda point: point["value"])
                     fine_points = generate_grid_points(
                         float(coarse_best["az"]),
@@ -312,9 +323,11 @@ class ScanSession(QObject):
                     start_index = len(samples)
                     total = start_index + len(fine_points)
                     for offset, point in enumerate(fine_points, start=1):
-                        sample = self._measure_point(point, config)
+                        point_config = dict(config)
+                        point_config["_progress_current"] = start_index + offset
+                        point_config["_progress_total"] = total
+                        sample = self._measure_point(point, point_config)
                         samples.append(sample)
-                        self.progress_updated.emit({"current": start_index + offset, "total": total, "point": sample})
                     points = []
                 else:
                     points = generate_grid_points(
@@ -329,9 +342,11 @@ class ScanSession(QObject):
                 if strategy in {"grid", "spiral"}:
                     total = len(points)
                     for index, point in enumerate(points, start=1):
-                        sample = self._measure_point(point, config)
+                        point_config = dict(config)
+                        point_config["_progress_current"] = index
+                        point_config["_progress_total"] = total
+                        sample = self._measure_point(point, point_config)
                         samples.append(sample)
-                        self.progress_updated.emit({"current": index, "total": total, "point": sample})
 
                 result = make_scan_result(
                     strategy=strategy,
