@@ -36,10 +36,16 @@ def generate_grid_points(
         if normalized_order in {"zigzag", "serpentine", "serpentin"} and row_index % 2 == 1:
             row_az.reverse()
         for col_index, az_deg in enumerate(row_az):
+            relative_az = float(az_deg) - float(center_az_deg)
+            relative_el = float(el_deg) - float(center_el_deg)
             points.append(
                 {
                     "az": float(az_deg),
                     "el": float(el_deg),
+                    "relative_az_deg": relative_az,
+                    "relative_el_deg": relative_el,
+                    "scan_offset_az_deg": relative_az,
+                    "scan_offset_el_deg": relative_el,
                     "phase": phase,
                     "row": int(row_index),
                     "col": int(col_index),

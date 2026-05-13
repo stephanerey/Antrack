@@ -12,10 +12,14 @@ def test_generate_grid_points_uses_zigzag_order():
     second_row = points[3:6]
     assert [round(point["az"], 3) for point in first_row] == [9.0, 10.0, 11.0]
     assert [round(point["az"], 3) for point in second_row] == [11.0, 10.0, 9.0]
+    assert [round(point["relative_az_deg"], 3) for point in first_row] == [-1.0, 0.0, 1.0]
+    assert [round(point["relative_el_deg"], 3) for point in first_row] == [-1.0, -1.0, -1.0]
 
 
 def test_generate_cross_points_and_estimate_offset():
     curves = generate_cross_points(100.0, 30.0, 2.0, 1.0)
+    assert [point["relative_el_deg"] for point in curves["azimuth"]] == [0.0, 0.0, 0.0]
+    assert [point["relative_az_deg"] for point in curves["elevation"]] == [0.0, 0.0, 0.0]
     az_curve = [{**point, "value": value} for point, value in zip(curves["azimuth"], [1.0, 5.0, 2.0])]
     el_curve = [{**point, "value": value} for point, value in zip(curves["elevation"], [0.5, 1.0, 4.0])]
     result = estimate_cross_offset(az_curve, el_curve, 100.0, 30.0)
@@ -28,6 +32,8 @@ def test_generate_spiral_points_respect_requested_span():
     assert points
     max_radius = max(point["radius"] for point in points)
     assert max_radius <= 2.0 + 1e-6
+    assert all(abs(point["relative_az_deg"] - point["az"]) <= 1e-9 for point in points)
+    assert all(abs(point["relative_el_deg"] - point["el"]) <= 1e-9 for point in points)
 
 
 def test_spiral_samples_to_grid_projects_values():
@@ -107,3 +113,4 @@ def test_scan_session_recovers_synthetic_offset():
     assert result["error_trace"]
     assert all("theoretical_az" in sample for sample in result["samples"])
     assert all("offset_az" in sample for sample in result["samples"])
+    assert all("relative_az_deg" in sample for sample in result["samples"])

@@ -27,9 +27,23 @@ def generate_spiral_points(
     for index in range(total_points):
         t = 2.0 * math.pi * turns * index / float(max(1, total_points - 1))
         radius = min(radius_max, radial_step_deg * t / (2.0 * math.pi))
-        az = float(center_az_deg + radius * math.cos(t))
-        el = float(center_el_deg + radius * math.sin(t))
-        points.append({"az": az, "el": el, "phase": "spiral", "radius": radius, "theta": t})
+        relative_az = float(radius * math.cos(t))
+        relative_el = float(radius * math.sin(t))
+        az = float(center_az_deg + relative_az)
+        el = float(center_el_deg + relative_el)
+        points.append(
+            {
+                "az": az,
+                "el": el,
+                "relative_az_deg": relative_az,
+                "relative_el_deg": relative_el,
+                "scan_offset_az_deg": relative_az,
+                "scan_offset_el_deg": relative_el,
+                "phase": "spiral",
+                "radius": radius,
+                "theta": t,
+            }
+        )
     return points
 
 

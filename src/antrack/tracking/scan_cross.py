@@ -24,11 +24,29 @@ def generate_cross_points(
 ) -> Dict[str, List[dict]]:
     """Generate orthogonal 1D cuts around the requested center."""
     az_points = [
-        {"axis": "az", "az": float(az_deg), "el": float(center_el_deg), "phase": "cross_az"}
+        {
+            "axis": "az",
+            "az": float(az_deg),
+            "el": float(center_el_deg),
+            "relative_az_deg": float(az_deg) - float(center_az_deg),
+            "relative_el_deg": 0.0,
+            "scan_offset_az_deg": float(az_deg) - float(center_az_deg),
+            "scan_offset_el_deg": 0.0,
+            "phase": "cross_az",
+        }
         for az_deg in _axis_points(center_az_deg, span_deg, step_deg)
     ]
     el_points = [
-        {"axis": "el", "az": float(center_az_deg), "el": float(el_deg), "phase": "cross_el"}
+        {
+            "axis": "el",
+            "az": float(center_az_deg),
+            "el": float(el_deg),
+            "relative_az_deg": 0.0,
+            "relative_el_deg": float(el_deg) - float(center_el_deg),
+            "scan_offset_az_deg": 0.0,
+            "scan_offset_el_deg": float(el_deg) - float(center_el_deg),
+            "phase": "cross_el",
+        }
         for el_deg in _axis_points(center_el_deg, span_deg, step_deg)
     ]
     return {"azimuth": az_points, "elevation": el_points}
