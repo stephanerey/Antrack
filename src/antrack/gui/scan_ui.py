@@ -646,6 +646,26 @@ class ScanUiMixin:
         measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
         current = self._scan_plot_coordinates(self._scan_current_point)
         self.scan_heatmap_widget.set_scan_points(planned, measured, current)
+        current_result = getattr(self, "_scan_current_result", None) or {}
+        strategy = str(current_result.get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
+        if strategy in {"grid", "adaptive"} and self._scan_plan_points:
+            cell_width, cell_height = self._scan_grid_cell_size()
+            values = [float(point.get("value", 0.0)) for point in self._scan_samples]
+            self.scan_heatmap_widget.set_grid_cells(
+                measured,
+                values,
+                cell_width=cell_width,
+                cell_height=cell_height,
+            )
+            self.scan_heatmap_widget.set_sample_cells([], [])
+        elif measured:
+            values = [float(point.get("value", 0.0)) for point in self._scan_samples]
+            step_deg = float(self.scan_step_spin.value()) if hasattr(self, "scan_step_spin") else 0.5
+            symbol_size = max(14.0, min(36.0, 18.0 + step_deg * 8.0))
+            self.scan_heatmap_widget.set_sample_cells(measured, values, size=symbol_size)
+        else:
+            self.scan_heatmap_widget.set_grid_cells([], [], cell_width=1.0, cell_height=1.0)
+            self.scan_heatmap_widget.set_sample_cells([], [])
         if planned:
             x_min, x_max, y_min, y_max = self._scan_plot_bounds()
             self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
@@ -670,26 +690,6 @@ class ScanUiMixin:
                 self.scan_vertical_plot.enableAutoRange(y=True)
             except Exception:
                 pass
-        current_result = getattr(self, "_scan_current_result", None) or {}
-        strategy = str(current_result.get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
-        if strategy in {"grid", "adaptive"} and self._scan_plan_points:
-            cell_width, cell_height = self._scan_grid_cell_size()
-            values = [float(point.get("value", 0.0)) for point in self._scan_samples]
-            self.scan_heatmap_widget.set_grid_cells(
-                measured,
-                values,
-                cell_width=cell_width,
-                cell_height=cell_height,
-            )
-            self.scan_heatmap_widget.set_sample_cells([], [])
-        elif measured:
-            values = [float(point.get("value", 0.0)) for point in self._scan_samples]
-            step_deg = float(self.scan_step_spin.value()) if hasattr(self, "scan_step_spin") else 0.5
-            symbol_size = max(14.0, min(36.0, 18.0 + step_deg * 8.0))
-            self.scan_heatmap_widget.set_sample_cells(measured, values, size=symbol_size)
-        else:
-            self.scan_heatmap_widget.set_grid_cells([], [], cell_width=1.0, cell_height=1.0)
-            self.scan_heatmap_widget.set_sample_cells([], [])
 
     def _scan_live_grid_heatmap(self) -> dict | None:
         if not self._scan_samples or not self._scan_plan_points:
