@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from PyQt5 import QtCore, QtGui
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
@@ -34,19 +36,19 @@ class _LevelBarWidget(QWidget):
         painter.drawRoundedRect(rect, 4, 4)
 
         if self._relative:
-            center_x = rect.center().x()
+            usable_width = max(1, rect.width() - 1)
+            center_x = rect.left() + (usable_width // 2)
             painter.setPen(QtGui.QPen(QtGui.QColor("#d8e0e6"), 1))
             painter.drawLine(center_x, rect.top() + 2, center_x, rect.bottom() - 2)
-            span = max(1e-6, max(abs(self._minimum), abs(self._maximum)))
-            norm = max(-1.0, min(1.0, self._value / span))
-            bar_width = int(abs(norm) * (rect.width() * 0.5))
+            span_half = max(1e-6, max(abs(self._minimum), abs(self._maximum)))
+            value_norm = max(-1.0, min(1.0, self._value / span_half))
+            value_x = center_x + int(round(value_norm * (usable_width * 0.5)))
+            left_x = min(center_x, value_x)
+            right_x = max(center_x, value_x)
+            bar_width = max(0, right_x - left_x)
             if bar_width > 0:
-                color = QtGui.QColor("#58d26a") if norm >= 0.0 else QtGui.QColor("#e26a5a")
-                if norm >= 0.0:
-                    bar_rect = QtCore.QRect(center_x, rect.top() + 2, bar_width, rect.height() - 4)
-                else:
-                    bar_rect = QtCore.QRect(center_x - bar_width, rect.top() + 2, bar_width, rect.height() - 4)
-                painter.fillRect(bar_rect, color)
+                color = QtGui.QColor("#58d26a") if self._value >= 0.0 else QtGui.QColor("#e26a5a")
+                painter.fillRect(QtCore.QRect(left_x, rect.top() + 2, bar_width, rect.height() - 4), color)
         else:
             norm = (self._value - self._minimum) / max(1e-6, self._maximum - self._minimum)
             norm = max(0.0, min(1.0, norm))
@@ -97,8 +99,9 @@ class _LevelScaleWidget(QWidget):
         font = painter.font()
         font.setPointSize(8)
         painter.setFont(font)
+        usable_width = max(1, rect.width() - 1)
         for position, label, show_label in self._ticks:
-            x = rect.left() + int(max(0.0, min(1.0, position)) * rect.width())
+            x = rect.left() + int(round(max(0.0, min(1.0, position)) * usable_width))
             painter.drawLine(x, 0, x, 5)
             if not show_label:
                 continue
@@ -135,11 +138,11 @@ class LevelMeterWidget(QWidget):
         self._unit_button.setFixedWidth(56)
         self._unit_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._bar = _LevelBarWidget(self)
-        self._bar.setMinimumWidth(420)
+        self._bar.setMinimumWidth(332)
         self._bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._scale = _LevelScaleWidget(self)
         self._value_label = QLabel("-", self)
-        self._value_label.setMinimumWidth(96)
+        self._value_label.setMinimumWidth(108)
         self._value_label.setMaximumWidth(120)
         self._value_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self._value_label.setStyleSheet("color: #202020; font-weight: 600;")
@@ -154,15 +157,22 @@ class LevelMeterWidget(QWidget):
 
         value_box = QWidget(self)
         value_layout = QVBoxLayout(value_box)
-        value_layout.setContentsMargins(0, 8, 0, 0)
+        value_layout.setContentsMargins(-8, 8, 0, 0)
         value_layout.setSpacing(0)
         value_layout.addWidget(self._value_label)
         value_layout.addStretch(1)
 
+        unit_box = QWidget(self)
+        unit_layout = QVBoxLayout(unit_box)
+        unit_layout.setContentsMargins(0, 6, 0, 0)
+        unit_layout.setSpacing(0)
+        unit_layout.addWidget(self._unit_button)
+        unit_layout.addStretch(1)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(self._unit_button)
+        layout.setSpacing(6)
+        layout.addWidget(unit_box)
         layout.addWidget(center_box, 1)
         layout.addWidget(value_box)
 
@@ -188,11 +198,36 @@ class LevelMeterWidget(QWidget):
 
     def _update_scale_ticks(self, *, relative: bool) -> None:
         if relative:
-            values = list(range(-40, 41, 10))
-            ticks = [
-                ((value + 40.0) / 80.0, f"{value:+d}".replace("+0", "0"), value % 20 == 0)
-                for value in values
-            ]
+            minimum = float(self._minimum)
+            maximum = float(self._maximum)
+            span = max(1e-6, maximum - minimum)
+            total_span = abs(span)
+            if total_span <= 1.05:
+                step = 0.25
+                label_step = 0.5
+                precision = 1
+            elif total_span <= 5.05:
+                step = 0.5
+                label_step = 1.0
+                precision = 1
+            else:
+                step = 10.0
+                label_step = 20.0
+                precision = 0
+            start = math.ceil(minimum / step) * step
+            values = []
+            current = start
+            while current <= maximum + 1e-9:
+                values.append(round(current, 6))
+                current += step
+            ticks = []
+            for value in values:
+                position = (value - minimum) / span
+                is_zero = abs(value) < 1e-9
+                show_label = is_zero or abs((value / label_step) - round(value / label_step)) < 1e-6
+                label = f"{value:+.{precision}f}" if precision > 0 else f"{int(round(value)):+d}"
+                label = label.replace("+0", "0")
+                ticks.append((position, label, show_label))
         elif self._unit_key == "s_meter":
             minimum = float(self._minimum)
             maximum = float(self._maximum)

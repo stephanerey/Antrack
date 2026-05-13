@@ -82,10 +82,11 @@ class SdrUiMixin:
         self._sdr_level_unit = str(cfg.get("level_unit", "dbm")).strip().lower()
         if self._sdr_level_unit not in {"dbm", "db_per_hz", "s_meter"}:
             self._sdr_level_unit = "dbm"
-        self._sdr_snr_mode = str(cfg.get("snr_mode", "absolute")).strip().lower()
-        if self._sdr_snr_mode not in {"absolute", "relative"}:
-            self._sdr_snr_mode = "absolute"
+        self._sdr_snr_mode = "absolute"
         self._sdr_snr_integration_s = self._coerce_float(cfg.get("snr_integration_s", 2.0), 2.0, minimum=0.1)
+        self._sdr_relative_scale_mode = str(cfg.get("relative_scale_mode", "full")).strip().lower()
+        if self._sdr_relative_scale_mode not in {"full", "5db", "1db"}:
+            self._sdr_relative_scale_mode = "full"
         self._sdr_spectrum_y_min_db = self._coerce_float(cfg.get("spectrum_y_min_db", -130.0), -130.0)
         self._sdr_spectrum_y_range_db = self._coerce_float(cfg.get("spectrum_y_range_db", 100.0), 100.0, minimum=10.0)
         self._sdr_waterfall_baseline_db = self._coerce_float(cfg.get("waterfall_baseline_db", -120.0), -120.0)
@@ -166,6 +167,8 @@ class SdrUiMixin:
         self.sdr_snr_mode_button.setMinimumWidth(84)
         self.sdr_snr_zero_button = QPushButton("Zero", controls_widget)
         self.sdr_snr_zero_button.setMinimumWidth(48)
+        self.sdr_relative_scale_button = QPushButton("Full", controls_widget)
+        self.sdr_relative_scale_button.setMinimumWidth(56)
         self.sdr_snr_average_spin = QDoubleSpinBox(controls_widget)
         self.sdr_snr_average_spin.setDecimals(1)
         self.sdr_snr_average_spin.setRange(0.1, 30.0)
@@ -180,9 +183,24 @@ class SdrUiMixin:
         self.sdr_rbw_label = QLabel("RBW: -", controls_widget)
         self.sdr_rbw_label.setStyleSheet("color: #707070; font-size: 10px;")
 
-        self.sdr_run_toggle_button = QPushButton("Start", controls_widget)
+        sdr_run_parent = controls_widget
+        if hasattr(self, "groupBox_Time") and self.groupBox_Time.parentWidget() is not None:
+            sdr_run_parent = self.groupBox_Time.parentWidget()
+        elif hasattr(self, "groupBox_Time"):
+            sdr_run_parent = self.groupBox_Time
+        self.sdr_run_toggle_button = QPushButton("Start", sdr_run_parent)
         self.sdr_run_toggle_button.setCheckable(True)
-        self.sdr_run_toggle_button.setMinimumWidth(80)
+        self.sdr_run_toggle_button.setFixedSize(42, 42)
+        self.sdr_run_title_label = QLabel("SDR", sdr_run_parent)
+        self.sdr_run_title_label.setAlignment(Qt.AlignCenter)
+        self.sdr_run_title_label.setStyleSheet("font-size: 9px; font-weight: 600;")
+        if hasattr(self, "groupBox_Time"):
+            time_geom = self.groupBox_Time.geometry()
+            x = time_geom.x() + time_geom.width() + 8
+            self.sdr_run_title_label.setGeometry(x, time_geom.y() + 12, 42, 12)
+            self.sdr_run_toggle_button.setGeometry(x, time_geom.y() + 24, 42, 42)
+            self.sdr_run_title_label.show()
+            self.sdr_run_toggle_button.show()
 
         self.sdr_frequency_control = FrequencyControlWidget(controls_widget)
         self.sdr_frequency_control.set_range_hz(1_000.0, 999_999_999_999.0)
@@ -278,7 +296,7 @@ class SdrUiMixin:
         measure_layout.addWidget(self.sdr_snr_average_spin, 0, 3)
         measure_layout.addWidget(self.sdr_snr_mode_button, 0, 4)
         measure_layout.addWidget(self.sdr_snr_zero_button, 0, 5)
-        measure_layout.addWidget(self.sdr_run_toggle_button, 0, 6)
+        measure_layout.addWidget(self.sdr_relative_scale_button, 0, 6)
         measure_layout.addWidget(self.sdr_level_meter, 1, 0, 1, 7)
         measure_layout.setColumnStretch(3, 1)
 
@@ -299,12 +317,12 @@ class SdrUiMixin:
         spectrum_scale_layout = QVBoxLayout(spectrum_scale_box)
         spectrum_scale_layout.setContentsMargins(0, 0, 0, 0)
         spectrum_scale_layout.setSpacing(4)
-        spectrum_scale_layout.addWidget(QLabel("Spec Min", spectrum_scale_box))
+        spectrum_scale_layout.addWidget(QLabel("Min", spectrum_scale_box))
         self.sdr_spectrum_min_slider = QSlider(Qt.Vertical, spectrum_scale_box)
         self.sdr_spectrum_min_slider.setRange(-160, 20)
         self.sdr_spectrum_min_slider.setToolTip("Spectrum Y min")
         spectrum_scale_layout.addWidget(self.sdr_spectrum_min_slider, 1)
-        spectrum_scale_layout.addWidget(QLabel("Spec Max", spectrum_scale_box))
+        spectrum_scale_layout.addWidget(QLabel("Max", spectrum_scale_box))
         self.sdr_spectrum_range_slider = QSlider(Qt.Vertical, spectrum_scale_box)
         self.sdr_spectrum_range_slider.setRange(-140, 80)
         self.sdr_spectrum_range_slider.setToolTip("Spectrum and waterfall Y max")
@@ -323,7 +341,7 @@ class SdrUiMixin:
         waterfall_scale_layout = QVBoxLayout(waterfall_scale_box)
         waterfall_scale_layout.setContentsMargins(0, 0, 0, 0)
         waterfall_scale_layout.setSpacing(4)
-        waterfall_scale_layout.addWidget(QLabel("WF Avg", waterfall_scale_box))
+        waterfall_scale_layout.addWidget(QLabel("Avg", waterfall_scale_box))
         self.sdr_waterfall_stride_slider = QSlider(Qt.Vertical, waterfall_scale_box)
         self.sdr_waterfall_stride_slider.setRange(1, 20)
         self.sdr_waterfall_stride_slider.setToolTip("Waterfall line averaging")
@@ -355,6 +373,9 @@ class SdrUiMixin:
         self.sdr_client.settings_changed.connect(self._refresh_sdr_controls)
         self.sdr_client.started.connect(self._refresh_sdr_run_buttons)
         self.sdr_client.stopped.connect(self._refresh_sdr_run_buttons)
+        self.sdr_client.started.connect(self._update_sdr_snr_display)
+        self.sdr_client.stopped.connect(self._update_sdr_snr_display)
+        self.sdr_client.started.connect(self._on_sdr_started_refresh_level_meter)
 
         self.sdr_run_toggle_button.clicked.connect(self._on_sdr_run_toggle_clicked)
         self.sdr_source_combo.currentIndexChanged.connect(self._on_sdr_source_changed)
@@ -382,6 +403,7 @@ class SdrUiMixin:
         self.sdr_snr_average_spin.valueChanged.connect(self._on_sdr_snr_average_changed)
         self.sdr_snr_mode_button.clicked.connect(self._on_sdr_snr_mode_button_clicked)
         self.sdr_snr_zero_button.clicked.connect(self._on_sdr_snr_zero_clicked)
+        self.sdr_relative_scale_button.clicked.connect(self._on_sdr_relative_scale_button_clicked)
         self.sdr_level_meter.unitChanged.connect(self._on_sdr_level_unit_changed)
         self.sdr_spectrum_min_slider.valueChanged.connect(self._on_sdr_spectrum_min_changed)
         self.sdr_spectrum_range_slider.valueChanged.connect(self._on_sdr_spectrum_range_changed)
@@ -395,6 +417,7 @@ class SdrUiMixin:
             self._apply_auto_gain_profile()
         if self._sdr_snr_mode == "relative":
             self._capture_sdr_relative_reference()
+        QTimer.singleShot(0, self._update_sdr_snr_display)
 
     def _clear_layout(self, layout) -> None:
         while layout.count():
@@ -436,6 +459,10 @@ class SdrUiMixin:
             self.sdr_run_toggle_button.blockSignals(True)
             self.sdr_run_toggle_button.setChecked(running)
             self.sdr_run_toggle_button.setText("Stop" if running else "Start")
+            self.sdr_run_toggle_button.setStyleSheet(
+                "QPushButton {{ color: white; font-weight: 600; border: 1px solid #606060; border-radius: 4px; "
+                f"background-color: {'#2f9e44' if running else '#c92a2a'}; }}"
+            )
         finally:
             self.sdr_run_toggle_button.blockSignals(False)
 
@@ -1105,8 +1132,11 @@ class SdrUiMixin:
             self.sdr_snr_mode_button.setChecked(is_relative)
         finally:
             self.sdr_snr_mode_button.blockSignals(False)
-        self.sdr_snr_mode_button.setText("Relative" if is_relative else "Absolute")
-        self.sdr_snr_zero_button.setEnabled(True)
+        self.sdr_snr_mode_button.setText("Absolute" if is_relative else "Relative")
+        self.sdr_snr_zero_button.setEnabled(is_relative)
+        self.sdr_relative_scale_button.setEnabled(is_relative)
+        text_map = {"full": "Full", "5db": "5 dB", "1db": "1 dB"}
+        self.sdr_relative_scale_button.setText(text_map.get(self._sdr_relative_scale_mode, "Full"))
 
     def _set_sdr_snr_mode(self, mode: str, *, capture_reference: bool = False) -> None:
         normalized = "relative" if str(mode).strip().lower() == "relative" else "absolute"
@@ -1133,6 +1163,20 @@ class SdrUiMixin:
             return
         self._sdr_snr_reference_db = metrics["integrated_db"] if math.isfinite(metrics["integrated_db"]) else None
         self._sdr_snr_reference_per_bin_db = metrics["per_hz_db"] if math.isfinite(metrics["per_hz_db"]) else None
+
+    def _current_sdr_relative_limits(self) -> tuple[float, float]:
+        if self._sdr_relative_scale_mode == "1db":
+            return -0.5, 0.5
+        if self._sdr_relative_scale_mode == "5db":
+            return -2.5, 2.5
+        return -40.0, 40.0
+
+    def _on_sdr_relative_scale_button_clicked(self) -> None:
+        next_mode = {"full": "5db", "5db": "1db", "1db": "full"}
+        self._sdr_relative_scale_mode = next_mode.get(self._sdr_relative_scale_mode, "full")
+        self._persist_sdr_value("RELATIVE_SCALE_MODE", self._sdr_relative_scale_mode)
+        self._update_sdr_snr_mode_button()
+        self._update_sdr_snr_display()
 
     def _sync_plot_scale_controls(self) -> None:
         for slider, value in (
@@ -1232,13 +1276,14 @@ class SdrUiMixin:
         self._sdr_last_absolute_metrics = dict(absolute_metrics)
 
         if self._sdr_snr_mode == "relative":
+            rel_minimum, rel_maximum = self._current_sdr_relative_limits()
             if (
                 self._sdr_snr_reference_db is None
                 or not math.isfinite(self._sdr_snr_reference_db)
                 or self._sdr_snr_reference_per_bin_db is None
                 or not math.isfinite(self._sdr_snr_reference_per_bin_db)
             ):
-                self.sdr_level_meter.set_display(value=None, text="-", minimum=-40.0, maximum=40.0, relative=True)
+                self.sdr_level_meter.set_display(value=None, text="-", minimum=rel_minimum, maximum=rel_maximum, relative=True)
                 return
             integrated_db = absolute_metrics["integrated_db"] - float(self._sdr_snr_reference_db)
             per_hz_db = float(
@@ -1264,7 +1309,7 @@ class SdrUiMixin:
         if self._sdr_level_unit == "db_per_hz":
             display_value = per_hz_db
             display_text = f"{display_value:+.2f} dBm/Hz" if is_relative else f"{display_value:.2f} dBm/Hz"
-            minimum, maximum = (-40.0, 40.0) if is_relative else (-130.0, -30.0)
+            minimum, maximum = self._current_sdr_relative_limits() if is_relative else (-130.0, -30.0)
         elif self._sdr_level_unit == "s_meter" and not is_relative:
             display_text = self._format_s_meter(per_hz_db)
             self.sdr_level_meter.set_display(
@@ -1278,7 +1323,7 @@ class SdrUiMixin:
         else:
             display_value = integrated_db
             display_text = f"{display_value:+.2f} dBm" if is_relative else f"{display_value:.2f} dBm"
-            minimum, maximum = (-40.0, 40.0) if is_relative else (-130.0, -30.0)
+            minimum, maximum = self._current_sdr_relative_limits() if is_relative else (-130.0, -30.0)
 
         self.sdr_level_meter.set_display(
             value=display_value,
@@ -1293,6 +1338,12 @@ class SdrUiMixin:
         self.sdr_waterfall_plot.consume_profile_metrics()
         self.sdr_display_fps_label.setText(f"FPS: {float(snapshot.get('display_fps', 0.0)):.1f}")
         self._update_sdr_resolution_labels(snapshot)
+        self._update_sdr_snr_display()
+
+    def _on_sdr_started_refresh_level_meter(self) -> None:
+        self._refresh_sdr_controls(self.sdr_client.snapshot_state())
+        QTimer.singleShot(150, self._update_sdr_snr_display)
+        QTimer.singleShot(400, self._update_sdr_snr_display)
 
     def close_sdr_ui(self) -> None:
         if getattr(self, "sdr_auto_gain_dialog", None) is not None:
