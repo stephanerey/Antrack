@@ -566,7 +566,8 @@ class ScanUiMixin:
         measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
         current = self._scan_plot_coordinates(self._scan_current_point)
         self.scan_heatmap_widget.set_scan_points(planned, measured, current)
-        strategy = str(getattr(self, "_scan_current_result", {}) .get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
+        current_result = getattr(self, "_scan_current_result", None) or {}
+        strategy = str(current_result.get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
         if strategy in {"grid", "adaptive"} and self._scan_plan_points:
             heatmap = self._scan_live_grid_heatmap()
             if heatmap is not None:
