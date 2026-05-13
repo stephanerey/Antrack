@@ -637,8 +637,26 @@ class ScanUiMixin:
         if planned:
             x_min, x_max, y_min, y_max = self._scan_plot_bounds()
             self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
+            try:
+                self.scan_horizontal_plot.enableAutoRange(x=False)
+                self.scan_horizontal_plot.setXRange(float(x_min), float(x_max), padding=0.0)
+            except Exception:
+                pass
+            try:
+                self.scan_vertical_plot.enableAutoRange(y=False)
+                self.scan_vertical_plot.setYRange(float(y_min), float(y_max), padding=0.0)
+            except Exception:
+                pass
         else:
             self.scan_heatmap_widget.clear_scan_bounds()
+            try:
+                self.scan_horizontal_plot.enableAutoRange(x=True)
+            except Exception:
+                pass
+            try:
+                self.scan_vertical_plot.enableAutoRange(y=True)
+            except Exception:
+                pass
         current_result = getattr(self, "_scan_current_result", None) or {}
         strategy = str(current_result.get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
         if strategy in {"grid", "adaptive"} and self._scan_plan_points:
