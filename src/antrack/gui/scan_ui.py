@@ -71,6 +71,10 @@ class ScanUiMixin:
         self.scan_offset_hz_spin.setSuffix(" Hz")
         self.scan_metric_combo = QComboBox(config_group)
         self.scan_metric_combo.addItems(["band_power", "snr_relative", "snr_absolute"])
+        self.scan_center_mode_combo = QComboBox(config_group)
+        self.scan_center_mode_combo.addItems(["fixed", "dynamic"])
+        self.scan_peak_estimator_combo = QComboBox(config_group)
+        self.scan_peak_estimator_combo.addItems(["best_sample", "four_point_divergence"])
 
         config_layout.addWidget(QLabel("Strategy"), 0, 0)
         config_layout.addWidget(self.scan_strategy_combo, 0, 1)
@@ -92,6 +96,10 @@ class ScanUiMixin:
         config_layout.addWidget(self.scan_offset_hz_spin, 2, 5)
         config_layout.addWidget(QLabel("Metric"), 3, 0)
         config_layout.addWidget(self.scan_metric_combo, 3, 1)
+        config_layout.addWidget(QLabel("Center Mode"), 3, 2)
+        config_layout.addWidget(self.scan_center_mode_combo, 3, 3)
+        config_layout.addWidget(QLabel("Peak Estimator"), 3, 4)
+        config_layout.addWidget(self.scan_peak_estimator_combo, 3, 5)
 
         control_group = QGroupBox("Scan Control", container)
         control_form = QFormLayout(control_group)
@@ -173,7 +181,7 @@ class ScanUiMixin:
     def _build_scan_config(self) -> dict:
         return {
             "strategy": self.scan_strategy_combo.currentText(),
-            "center_mode": "fixed",
+            "center_mode": self.scan_center_mode_combo.currentText(),
             "center_az_deg": self.scan_center_az_spin.value(),
             "center_el_deg": self.scan_center_el_spin.value(),
             "span_deg": self.scan_span_spin.value(),
@@ -186,7 +194,7 @@ class ScanUiMixin:
             "bandwidth_hz": self.scan_bandwidth_spin.value(),
             "band_offset_hz": self.scan_offset_hz_spin.value(),
             "metric": self.scan_metric_combo.currentText(),
-            "peak_estimator": "best_sample",
+            "peak_estimator": self.scan_peak_estimator_combo.currentText(),
             "coarse_span_deg": self.scan_span_spin.value(),
             "coarse_step_deg": self.scan_step_spin.value(),
             "fine_span_deg": max(0.2, self.scan_span_spin.value() / 4.0),
