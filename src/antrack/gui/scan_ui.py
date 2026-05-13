@@ -351,14 +351,23 @@ class ScanUiMixin:
 
     def _scan_wait_for_settle(self, point: dict, config: dict | None = None, settle_s: float = 0.2) -> None:
         config = dict(config or {})
+        tracking_relative = self._scan_uses_tracking_relative(config)
         antenna = self.settings.get("ANTENNA", self.settings.get("antenna", {})) if isinstance(self.settings, dict) else {}
         az_err_th = float(antenna.get("positioning_az_error_threshold", antenna.get("az_error_threshold", 0.05)))
         el_err_th = float(antenna.get("positioning_el_error_threshold", antenna.get("el_error_threshold", 0.05)))
         stable_cycles_required = max(2, int(antenna.get("positioning_stable_cycles", 3)))
+        if tracking_relative:
+            step_deg = abs(float(config.get("step_deg", 0.5) or 0.5))
+            relaxed_tol = max(az_err_th, min(0.75, step_deg * 1.25))
+            az_err_th = max(az_err_th, relaxed_tol)
+            el_err_th = max(el_err_th, relaxed_tol)
+            stable_cycles_required = 1
         az_forbidden = parse_forbidden_ranges(antenna.get("az_forbidden_ranges"), default=[(45.0, 90.0), (270.0, 300.0)])
         el_forbidden = parse_forbidden_ranges(antenna.get("el_forbidden_ranges"), default=[(-10.0, 0.0), (95.0, 100.0)])
         stable_cycles = 0
-        timeout_t = time.monotonic() + max(5.0, float(settle_s) + 20.0)
+        timeout_t = time.monotonic() + max(5.0, float(settle_s) + (12.0 if tracking_relative else 20.0))
+        az_error = None
+        el_error = None
         while time.monotonic() < timeout_t:
             antenna_state = getattr(getattr(self, "axis_client", None), "antenna", None)
             az_cur = getattr(antenna_state, "az", None)
@@ -384,7 +393,15 @@ class ScanUiMixin:
             else:
                 stable_cycles = 0
             time.sleep(0.05)
-        raise TimeoutError("Scan move did not settle before timeout.")
+        az_text = f"{float(az_error):+.2f}" if isinstance(az_error, (int, float)) else "?"
+        el_text = f"{float(el_error):+.2f}" if isinstance(el_error, (int, float)) else "?"
+        if tracking_relative:
+            self.status_bar.showMessage(
+                f"Scan: soft timeout on point, measuring anyway (az_err={az_text}, el_err={el_text})",
+                4000,
+            )
+            return
+        raise TimeoutError(f"Scan move did not settle before timeout (az_err={az_text}, el_err={el_text}).")
 
     def _build_scan_preview_points(self, config: dict) -> list[dict]:
         strategy = str(config.get("strategy", "grid")).strip().lower()
@@ -442,6 +459,13 @@ class ScanUiMixin:
         measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
         current = self._scan_plot_coordinates(self._scan_current_point)
         self.scan_heatmap_widget.set_scan_points(planned, measured, current)
+        if measured:
+            values = [float(point.get("value", 0.0)) for point in self._scan_samples]
+            step_deg = float(self.scan_step_spin.value()) if hasattr(self, "scan_step_spin") else 0.5
+            symbol_size = max(14.0, min(36.0, 18.0 + step_deg * 8.0))
+            self.scan_heatmap_widget.set_sample_cells(measured, values, size=symbol_size)
+        else:
+            self.scan_heatmap_widget.set_sample_cells([], [])
 
     def _scan_measure(self, config: dict) -> float:
         metric = str(config.get("metric", "band_power")).strip().lower()

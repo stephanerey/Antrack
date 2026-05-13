@@ -24,10 +24,12 @@ class HeatmapWidget(QWidget):
         layout.addWidget(self.plot)
         self.image = pg.ImageItem()
         self.plot.addItem(self.image)
+        self.sample_cells = pg.ScatterPlotItem(symbol="s", size=18, pen=pg.mkPen(220, 220, 220, 100))
         self.planned_marker = pg.ScatterPlotItem(size=8, brush=pg.mkBrush(180, 180, 180, 90), pen=pg.mkPen(120, 120, 120, 120))
         self.measured_marker = pg.ScatterPlotItem(size=9, brush=pg.mkBrush(80, 220, 120, 180), pen=pg.mkPen(20, 60, 20, 160))
         self.current_marker = pg.ScatterPlotItem(size=13, brush=pg.mkBrush(255, 170, 40, 220), pen=pg.mkPen("k"))
         self.best_marker = pg.ScatterPlotItem(size=12, brush=pg.mkBrush(255, 255, 255, 220), pen=pg.mkPen("k"))
+        self.plot.addItem(self.sample_cells)
         self.plot.addItem(self.planned_marker)
         self.plot.addItem(self.measured_marker)
         self.plot.addItem(self.current_marker)
@@ -83,8 +85,32 @@ class HeatmapWidget(QWidget):
         else:
             self.current_marker.clear()
 
+    def set_sample_cells(self, points: list[tuple[float, float]], values: list[float], *, size: float = 18.0) -> None:
+        if not points or not values or len(points) != len(values):
+            self.sample_cells.clear()
+            return
+        val_min = float(min(values))
+        val_max = float(max(values))
+        span = val_max - val_min
+        spots = []
+        for (x, y), value in zip(points, values):
+            ratio = 0.5 if span <= 1e-9 else max(0.0, min(1.0, (float(value) - val_min) / span))
+            red = int(40 + 215 * ratio)
+            green = int(80 + 140 * ratio)
+            blue = int(180 - 120 * ratio)
+            spots.append(
+                {
+                    "pos": (float(x), float(y)),
+                    "brush": pg.mkBrush(red, green, blue, 220),
+                    "pen": pg.mkPen(240, 240, 240, 60),
+                    "size": float(size),
+                }
+            )
+        self.sample_cells.setData(spots)
+
     def clear(self) -> None:
         self.image.clear()
+        self.sample_cells.clear()
         self.planned_marker.clear()
         self.measured_marker.clear()
         self.current_marker.clear()
