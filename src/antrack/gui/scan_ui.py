@@ -209,8 +209,6 @@ class ScanUiMixin:
         visual_layout.addWidget(self.scan_horizontal_plot, 1, 1)
         visual_layout.setColumnStretch(1, 1)
         visual_layout.setRowStretch(0, 1)
-        self.scan_vertical_plot.setYLink(self.scan_heatmap_widget.plot)
-        self.scan_horizontal_plot.setXLink(self.scan_heatmap_widget.plot)
         self._sync_scan_profile_margins()
 
         self.scan_error_plot = pg.PlotWidget(splitter)
@@ -683,6 +681,7 @@ class ScanUiMixin:
             except Exception:
                 pass
             self._sync_scan_profile_margins()
+            self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
         else:
             try:
                 self.scan_horizontal_plot.enableAutoRange(x=True)

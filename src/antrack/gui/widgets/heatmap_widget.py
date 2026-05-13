@@ -92,12 +92,23 @@ class HeatmapWidget(QWidget):
         self.best_marker.setData([az_deg], [el_deg])
 
     def set_scan_bounds(self, x_min: float, x_max: float, y_min: float, y_max: float) -> None:
+        x_range = (float(x_min), float(x_max))
+        y_range = (float(y_min), float(y_max))
+        view_box = self.plot.getViewBox()
         try:
             self.plot.enableAutoRange(x=False, y=False)
         except Exception:
             pass
-        self.plot.setXRange(float(x_min), float(x_max), padding=0.0)
-        self.plot.setYRange(float(y_min), float(y_max), padding=0.0)
+        try:
+            view_box.enableAutoRange(x=False, y=False)
+        except Exception:
+            pass
+        view_box.setRange(
+            xRange=x_range,
+            yRange=y_range,
+            padding=0.0,
+            disableAutoRange=True,
+        )
 
     def clear_scan_bounds(self) -> None:
         try:
