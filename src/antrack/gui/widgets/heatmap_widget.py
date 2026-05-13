@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import QGraphicsRectItem, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 
 class HeatmapWidget(QWidget):
@@ -34,7 +34,7 @@ class HeatmapWidget(QWidget):
         self.plot.addItem(self.measured_marker)
         self.plot.addItem(self.current_marker)
         self.plot.addItem(self.best_marker)
-        self._grid_cell_items: list[QGraphicsRectItem] = []
+        self._grid_cell_items: list[pg.BarGraphItem] = []
 
     def set_heatmap(self, az_values, el_values, grid_values) -> None:
         az = np.asarray(az_values, dtype=np.float64)
@@ -81,9 +81,14 @@ class HeatmapWidget(QWidget):
             red = int(40 + 215 * ratio)
             green = int(80 + 140 * ratio)
             blue = int(180 - 120 * ratio)
-            item = QGraphicsRectItem(float(x) - width / 2.0, float(y) - height / 2.0, width, height)
-            item.setBrush(pg.mkBrush(red, green, blue, 220))
-            item.setPen(pg.mkPen(240, 240, 240, 70))
+            item = pg.BarGraphItem(
+                x=[float(x)],
+                y0=[float(y) - height / 2.0],
+                height=[height],
+                width=width,
+                brushes=[pg.mkBrush(red, green, blue, 220)],
+                pens=[pg.mkPen(240, 240, 240, 70)],
+            )
             item.setZValue(-5)
             self.plot.addItem(item)
             self._grid_cell_items.append(item)
