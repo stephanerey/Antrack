@@ -358,11 +358,9 @@ class ScanUiMixin:
         el_err_th = float(antenna.get("positioning_el_error_threshold", antenna.get("el_error_threshold", 0.05)))
         stable_cycles_required = max(2, int(antenna.get("positioning_stable_cycles", 3)))
         if tracking_relative:
-            step_deg = abs(float(config.get("step_deg", 0.5) or 0.5))
-            offset_tol = float(config.get("offset_settle_tolerance_deg", max(0.10, min(0.20, step_deg * 0.30))))
-            az_err_th = offset_tol
-            el_err_th = offset_tol
-            stable_cycles_required = max(2, int(config.get("offset_stable_cycles", 2)))
+            az_err_th = float(antenna.get("az_error_threshold", az_err_th))
+            el_err_th = float(antenna.get("el_error_threshold", el_err_th))
+            stable_cycles_required = max(2, int(antenna.get("positioning_stable_cycles", 3)))
         az_forbidden = parse_forbidden_ranges(antenna.get("az_forbidden_ranges"), default=[(45.0, 90.0), (270.0, 300.0)])
         el_forbidden = parse_forbidden_ranges(antenna.get("el_forbidden_ranges"), default=[(-10.0, 0.0), (95.0, 100.0)])
         stable_cycles = 0
