@@ -308,9 +308,23 @@ class ScanUiMixin:
                 self._stop_positioning_loop_from_ui()
 
     def _scan_move_to(self, point: dict, config: dict | None = None) -> None:
+        config = dict(config or {})
+        if self._scan_uses_tracking_relative(config):
+            az_deg = float(point.get("az", 0.0))
+            rel_az = float(point.get("relative_az_deg", az_deg - float(point.get("theoretical_az", az_deg))))
+            el_deg = float(point.get("el", 0.0))
+            rel_el = float(point.get("relative_el_deg", el_deg - float(point.get("theoretical_el", el_deg))))
+            tracker = getattr(self, "tracker", None)
+            if tracker is None or not tracker.is_running():
+                raise RuntimeError("tracking_relative requires an active tracking loop.")
+            if hasattr(self, "_set_scan_probe_offset_state"):
+                self._set_scan_probe_offset_state(rel_az, rel_el)
+            elif hasattr(self, "set_scan_probe_offset"):
+                self.set_scan_probe_offset(rel_az, rel_el)
+            return
         request = {
             "point": dict(point or {}),
-            "config": dict(config or {}),
+            "config": config,
             "done": threading.Event(),
             "error": None,
         }

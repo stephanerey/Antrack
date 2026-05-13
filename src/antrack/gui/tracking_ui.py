@@ -148,13 +148,16 @@ class TrackingUiMixin:
         self._refresh_tracking_setpoints_from_theoretical()
         self._update_selected_target_scan_offset_display()
 
-    def set_scan_probe_offset(self, az_offset_deg: float, el_offset_deg: float) -> None:
+    def _set_scan_probe_offset_state(self, az_offset_deg: float, el_offset_deg: float) -> None:
         self._scan_probe_offset_az_deg = float(az_offset_deg)
         self._scan_probe_offset_el_deg = float(el_offset_deg)
         if hasattr(self, "tracked_object"):
             self.tracked_object.scan_probe_offset_az_deg = float(az_offset_deg)
             self.tracked_object.scan_probe_offset_el_deg = float(el_offset_deg)
         self._refresh_tracking_setpoints_from_theoretical()
+
+    def set_scan_probe_offset(self, az_offset_deg: float, el_offset_deg: float) -> None:
+        self._set_scan_probe_offset_state(az_offset_deg, el_offset_deg)
 
     def clear_scan_probe_offset(self) -> None:
         self.set_scan_probe_offset(0.0, 0.0)
