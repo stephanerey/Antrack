@@ -323,7 +323,6 @@ class ScanUiMixin:
         self._scan_current_stage = "queued"
         self._scan_progress_current = 0
         self._scan_progress_total = len(self._scan_plan_points)
-        self._scan_active_config = dict(config)
         self.scan_heatmap_widget.clear()
         self._update_scan_profile_axes(self._scan_uses_tracking_relative(config))
         self.scan_horizontal_curve.clear()
@@ -646,6 +645,11 @@ class ScanUiMixin:
         measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
         current = self._scan_plot_coordinates(self._scan_current_point)
         self.scan_heatmap_widget.set_scan_points(planned, measured, current)
+        if planned:
+            x_min, x_max, y_min, y_max = self._scan_plot_bounds()
+            self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
+        else:
+            self.scan_heatmap_widget.clear_scan_bounds()
         current_result = getattr(self, "_scan_current_result", None) or {}
         strategy = str(current_result.get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
         if strategy in {"grid", "adaptive"} and self._scan_plan_points:
@@ -667,9 +671,6 @@ class ScanUiMixin:
             self.scan_heatmap_widget.set_grid_cells([], [], cell_width=1.0, cell_height=1.0)
             self.scan_heatmap_widget.set_sample_cells([], [])
         if planned:
-            x_min, x_max, y_min, y_max = self._scan_plot_bounds()
-            self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
-            self._sync_scan_profile_margins()
             try:
                 self.scan_horizontal_plot.enableAutoRange(x=False)
                 self.scan_horizontal_plot.setXRange(float(x_min), float(x_max), padding=0.0)
@@ -680,8 +681,8 @@ class ScanUiMixin:
                 self.scan_vertical_plot.setYRange(float(y_min), float(y_max), padding=0.0)
             except Exception:
                 pass
+            self._sync_scan_profile_margins()
         else:
-            self.scan_heatmap_widget.clear_scan_bounds()
             try:
                 self.scan_horizontal_plot.enableAutoRange(x=True)
             except Exception:
@@ -726,26 +727,6 @@ class ScanUiMixin:
         return float(cell_width), float(cell_height)
 
     def _scan_plot_bounds(self) -> tuple[float, float, float, float]:
-        config = getattr(self, "_scan_active_config", None)
-        if isinstance(config, dict):
-            relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
-            span_az = float(config.get("span_az_deg", config.get("span_deg", self.scan_span_spin.value() if hasattr(self, "scan_span_spin") else 2.0)))
-            span_el = float(config.get("span_el_deg", config.get("span_deg", self.scan_span_spin.value() if hasattr(self, "scan_span_spin") else 2.0)))
-            step = float(config.get("step_deg", self.scan_step_spin.value() if hasattr(self, "scan_step_spin") else 0.5))
-            half_w = step / 2.0
-            half_h = step / 2.0
-            if relative:
-                center_x = 0.0
-                center_y = 0.0
-            else:
-                center_x = float(config.get("center_az_deg", 0.0))
-                center_y = float(config.get("center_el_deg", 0.0))
-            return (
-                center_x - (span_az / 2.0) - half_w,
-                center_x + (span_az / 2.0) + half_w,
-                center_y - (span_el / 2.0) - half_h,
-                center_y + (span_el / 2.0) + half_h,
-            )
         coords = [coord for coord in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coord is not None]
         if not coords:
             return -1.0, 1.0, -1.0, 1.0
