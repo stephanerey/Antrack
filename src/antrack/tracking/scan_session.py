@@ -13,6 +13,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 
 from antrack.tracking.scan_cross import estimate_cross_offset, generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points
+from antrack.tracking.scan_results import make_peak_estimate, make_scan_result, make_scan_sample
 from antrack.tracking.scan_spiral import generate_spiral_points, spiral_samples_to_grid
 
 
@@ -84,7 +85,20 @@ class ScanSession(QObject):
     def export_csv(self, samples: list[dict], path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["az", "el", "value", "timestamp", "phase"])
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "az",
+                    "el",
+                    "value",
+                    "timestamp",
+                    "phase",
+                    "theoretical_az",
+                    "theoretical_el",
+                    "offset_az",
+                    "offset_el",
+                ],
+            )
             writer.writeheader()
             for sample in samples:
                 writer.writerow(
@@ -94,6 +108,10 @@ class ScanSession(QObject):
                         "value": sample.get("value"),
                         "timestamp": sample.get("timestamp"),
                         "phase": sample.get("phase"),
+                        "theoretical_az": sample.get("theoretical_az"),
+                        "theoretical_el": sample.get("theoretical_el"),
+                        "offset_az": sample.get("offset_az"),
+                        "offset_el": sample.get("offset_el"),
                     }
                 )
         return path
@@ -120,14 +138,12 @@ class ScanSession(QObject):
         if self.measure is None:
             raise RuntimeError("No measure callback configured for ScanSession.")
         value = float(self.measure(config))
-        sample = {
-            "az": az,
-            "el": el,
-            "value": value,
-            "timestamp": time.time(),
-            "phase": point.get("phase", "main"),
-            "axis": point.get("axis"),
-        }
+        sample = make_scan_sample(
+            point,
+            value,
+            theoretical_az_deg=float(point.get("theoretical_az", config.get("center_az_deg", az))),
+            theoretical_el_deg=float(point.get("theoretical_el", config.get("center_el_deg", el))),
+        )
         self.point_measured.emit(sample)
         return sample
 
@@ -152,8 +168,33 @@ class ScanSession(QObject):
                     self.progress_updated.emit({"current": index, "total": total, "point": sample})
                 az_curve = [sample for sample in samples if sample.get("axis") == "az"]
                 el_curve = [sample for sample in samples if sample.get("axis") == "el"]
-                result = estimate_cross_offset(az_curve, el_curve, center_az, center_el)
-                result.update({"strategy": strategy, "samples": samples, "best_point": max(samples, key=lambda point: point["value"])})
+                cross_result = estimate_cross_offset(az_curve, el_curve, center_az, center_el)
+                best_point = max(samples, key=lambda point: point["value"])
+                peak_point = {
+                    "az": center_az + float(cross_result.get("az_offset_deg", 0.0)),
+                    "el": center_el + float(cross_result.get("el_offset_deg", 0.0)),
+                    "value": float(best_point["value"]),
+                    "timestamp": float(best_point["timestamp"]),
+                }
+                result = make_scan_result(
+                    strategy=strategy,
+                    samples=samples,
+                    center_az_deg=center_az,
+                    center_el_deg=center_el,
+                    best_point=best_point,
+                    peak_estimate=make_peak_estimate(
+                        peak_point,
+                        method="cross_max",
+                        theoretical_az_deg=center_az,
+                        theoretical_el_deg=center_el,
+                    ),
+                )
+                result.update(
+                    {
+                        "best_az_point": cross_result.get("best_az_point"),
+                        "best_el_point": cross_result.get("best_el_point"),
+                    }
+                )
             else:
                 if strategy == "spiral":
                     points = generate_spiral_points(
@@ -212,14 +253,12 @@ class ScanSession(QObject):
                         samples.append(sample)
                         self.progress_updated.emit({"current": index, "total": total, "point": sample})
 
-                best_point = max(samples, key=lambda point: point["value"])
-                result = {
-                    "strategy": strategy,
-                    "samples": samples,
-                    "best_point": best_point,
-                    "az_offset_deg": float(best_point["az"]) - center_az,
-                    "el_offset_deg": float(best_point["el"]) - center_el,
-                }
+                result = make_scan_result(
+                    strategy=strategy,
+                    samples=samples,
+                    center_az_deg=center_az,
+                    center_el_deg=center_el,
+                )
                 if strategy == "spiral":
                     result["heatmap"] = spiral_samples_to_grid(samples, float(config.get("grid_step_deg", config.get("step_deg", 0.25))))
 

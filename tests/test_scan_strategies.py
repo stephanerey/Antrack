@@ -1,5 +1,6 @@
 from antrack.tracking.scan_cross import estimate_cross_offset, generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points
+from antrack.tracking.scan_results import make_scan_result, make_scan_sample
 from antrack.tracking.scan_session import ScanSession
 from antrack.tracking.scan_spiral import generate_spiral_points, spiral_samples_to_grid
 
@@ -41,6 +42,40 @@ def test_spiral_samples_to_grid_projects_values():
     assert heatmap["grid"][1, 1] == 4.0
 
 
+def test_scan_sample_records_theoretical_center_and_offsets():
+    sample = make_scan_sample(
+        {"az": 11.0, "el": 19.5, "phase": "coarse"},
+        42.0,
+        theoretical_az_deg=10.0,
+        theoretical_el_deg=20.0,
+        timestamp=123.0,
+    )
+
+    assert sample["az"] == 11.0
+    assert sample["el"] == 19.5
+    assert sample["value"] == 42.0
+    assert sample["timestamp"] == 123.0
+    assert sample["theoretical_az"] == 10.0
+    assert sample["theoretical_el"] == 20.0
+    assert sample["offset_az"] == 1.0
+    assert sample["offset_el"] == -0.5
+
+
+def test_scan_result_exposes_peak_estimate_and_error_trace():
+    samples = [
+        make_scan_sample({"az": 9.5, "el": 20.0}, 1.0, theoretical_az_deg=10.0, theoretical_el_deg=20.0),
+        make_scan_sample({"az": 10.5, "el": 20.5}, 5.0, theoretical_az_deg=10.0, theoretical_el_deg=20.0),
+    ]
+
+    result = make_scan_result(strategy="grid", samples=samples, center_az_deg=10.0, center_el_deg=20.0)
+
+    assert result["best_point"] == samples[1]
+    assert result["peak_estimate"]["method"] == "best_sample"
+    assert result["az_offset_deg"] == 0.5
+    assert result["el_offset_deg"] == 0.5
+    assert result["error_trace"][0]["angular_error_deg"] > 0.7
+
+
 def test_scan_session_recovers_synthetic_offset():
     current = {"az": 0.0, "el": 0.0}
     true_peak = {"az": 1.0, "el": -0.5}
@@ -68,3 +103,7 @@ def test_scan_session_recovers_synthetic_offset():
     assert result is not None
     assert abs(result["az_offset_deg"] - 1.0) <= 0.5
     assert abs(result["el_offset_deg"] + 0.5) <= 0.5
+    assert result["peak_estimate"]["method"] == "best_sample"
+    assert result["error_trace"]
+    assert all("theoretical_az" in sample for sample in result["samples"])
+    assert all("offset_az" in sample for sample in result["samples"])
