@@ -177,6 +177,7 @@ class ScanUiMixin:
             "bandwidth_hz": self.scan_bandwidth_spin.value(),
             "band_offset_hz": self.scan_offset_hz_spin.value(),
             "metric": self.scan_metric_combo.currentText(),
+            "peak_estimator": "best_sample",
             "coarse_span_deg": self.scan_span_spin.value(),
             "coarse_step_deg": self.scan_step_spin.value(),
             "fine_span_deg": max(0.2, self.scan_span_spin.value() / 4.0),

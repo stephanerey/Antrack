@@ -1,5 +1,6 @@
 from antrack.tracking.scan_cross import estimate_cross_offset, generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points
+from antrack.tracking.scan_peak import estimate_four_point_divergence_peak
 from antrack.tracking.scan_results import make_scan_result, make_scan_sample
 from antrack.tracking.scan_session import ScanSession
 from antrack.tracking.scan_spiral import generate_spiral_points, spiral_samples_to_grid
@@ -93,6 +94,24 @@ def test_scan_result_offsets_follow_peak_theoretical_center():
     assert result["el_offset_deg"] == -1.0
 
 
+def test_four_point_divergence_peak_estimates_inside_best_cell():
+    samples = [
+        make_scan_sample({"az": 0.0, "el": 0.0}, 1.0, theoretical_az_deg=0.0, theoretical_el_deg=0.0),
+        make_scan_sample({"az": 1.0, "el": 0.0}, 2.0, theoretical_az_deg=0.0, theoretical_el_deg=0.0),
+        make_scan_sample({"az": 0.0, "el": 1.0}, 3.0, theoretical_az_deg=0.0, theoretical_el_deg=0.0),
+        make_scan_sample({"az": 1.0, "el": 1.0}, 5.0, theoretical_az_deg=0.0, theoretical_el_deg=0.0),
+    ]
+
+    peak = estimate_four_point_divergence_peak(samples)
+
+    assert peak is not None
+    assert peak["method"] == "four_point_divergence"
+    assert 0.0 < peak["az"] < 1.0
+    assert 0.0 < peak["el"] < 1.0
+    assert peak["confidence"] > 0.25
+    assert peak["cell"]["az_min"] == 0.0
+
+
 def test_scan_session_recovers_synthetic_offset():
     current = {"az": 0.0, "el": 0.0}
     true_peak = {"az": 1.0, "el": -0.5}
@@ -125,6 +144,37 @@ def test_scan_session_recovers_synthetic_offset():
     assert all("theoretical_az" in sample for sample in result["samples"])
     assert all("offset_az" in sample for sample in result["samples"])
     assert all("relative_az_deg" in sample for sample in result["samples"])
+
+
+def test_scan_session_can_use_four_point_peak_estimator():
+    current = {"az": 0.0, "el": 0.0}
+
+    def move_to(az_deg: float, el_deg: float) -> None:
+        current["az"] = az_deg
+        current["el"] = el_deg
+
+    def measure(_config: dict) -> float:
+        return current["az"] + current["el"]
+
+    session = ScanSession(thread_manager=None, move_to=move_to, measure=measure)
+    session._run(
+        {
+            "strategy": "grid",
+            "peak_estimator": "four_point_divergence",
+            "center_az_deg": 0.0,
+            "center_el_deg": 0.0,
+            "span_deg": 2.0,
+            "step_deg": 2.0,
+            "settle_s": 0.0,
+            "integration_s": 0.01,
+        }
+    )
+
+    result = session.latest_result
+    assert result is not None
+    assert result["peak_estimate"]["method"] == "four_point_divergence"
+    assert -1.0 < result["az_offset_deg"] < 1.0
+    assert -1.0 < result["el_offset_deg"] < 1.0
 
 
 def test_scan_session_can_materialize_points_around_dynamic_center():

@@ -13,6 +13,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 
 from antrack.tracking.scan_cross import estimate_cross_offset, generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points
+from antrack.tracking.scan_peak import estimate_four_point_divergence_peak
 from antrack.tracking.scan_results import make_peak_estimate, make_scan_result, make_scan_sample
 from antrack.tracking.scan_spiral import generate_spiral_points, spiral_samples_to_grid
 
@@ -168,6 +169,13 @@ class ScanSession(QObject):
         materialized["theoretical_el"] = theoretical_el
         return materialized
 
+    @staticmethod
+    def _estimate_peak(samples: list[dict], config: dict) -> dict | None:
+        estimator = str(config.get("peak_estimator", "best_sample")).strip().lower()
+        if estimator in {"4point", "four_point", "four_point_divergence", "divergence"}:
+            return estimate_four_point_divergence_peak(samples)
+        return None
+
     def _measure_point(self, point: dict, config: dict) -> dict:
         self._wait_if_paused_or_stopped()
         point = self._materialize_point(point, config)
@@ -310,6 +318,7 @@ class ScanSession(QObject):
                     samples=samples,
                     center_az_deg=center_az,
                     center_el_deg=center_el,
+                    peak_estimate=self._estimate_peak(samples, config),
                 )
                 if strategy == "spiral":
                     result["heatmap"] = spiral_samples_to_grid(samples, float(config.get("grid_step_deg", config.get("step_deg", 0.25))))
