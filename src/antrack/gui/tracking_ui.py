@@ -87,9 +87,15 @@ class TrackingUiMixin:
         persistent_az, persistent_el = self._persistent_tracking_offset()
         return session_az + persistent_az, session_el + persistent_el
 
+    def _scan_probe_tracking_offset(self) -> tuple[float, float]:
+        az = float(getattr(self, "_scan_probe_offset_az_deg", 0.0) or 0.0)
+        el = float(getattr(self, "_scan_probe_offset_el_deg", 0.0) or 0.0)
+        return az, el
+
     def _apply_tracking_offset_to_pointing(self, az_deg: float, el_deg: float) -> tuple[float, float]:
         offset_az, offset_el = self._current_tracking_offset()
-        return float(az_deg) + offset_az, float(el_deg) + offset_el
+        probe_az, probe_el = self._scan_probe_tracking_offset()
+        return float(az_deg) + offset_az + probe_az, float(el_deg) + offset_el + probe_el
 
     def _format_tracking_offset(self) -> str:
         offset_az, offset_el = self._current_tracking_offset()
@@ -121,6 +127,16 @@ class TrackingUiMixin:
             self._scan_session_offset_az_deg = float(az_offset_deg)
             self._scan_session_offset_el_deg = float(el_offset_deg)
         self._update_selected_target_scan_offset_display()
+
+    def set_scan_probe_offset(self, az_offset_deg: float, el_offset_deg: float) -> None:
+        self._scan_probe_offset_az_deg = float(az_offset_deg)
+        self._scan_probe_offset_el_deg = float(el_offset_deg)
+        if hasattr(self, "tracked_object"):
+            self.tracked_object.scan_probe_offset_az_deg = float(az_offset_deg)
+            self.tracked_object.scan_probe_offset_el_deg = float(el_offset_deg)
+
+    def clear_scan_probe_offset(self) -> None:
+        self.set_scan_probe_offset(0.0, 0.0)
 
     def _stop_tracking_loop_from_ui(self):
         """Stop the motor tracking loop and restore the idle UI state."""
@@ -919,6 +935,11 @@ class TrackingUiMixin:
             dist_au = payload.get("dist_au")
             ra_hms = payload.get("ra_hms")
             dec_dms = payload.get("dec_dms")
+
+            if isinstance(az, (int, float)):
+                self.tracked_object.az_theoretical_deg = float(az)
+            if isinstance(el, (int, float)):
+                self.tracked_object.el_theoretical_deg = float(el)
 
             corrected_az = az
             corrected_el = el

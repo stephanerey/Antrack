@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QObject, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -15,6 +16,7 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -22,8 +24,17 @@ from PyQt5.QtWidgets import (
 
 from antrack.core.dsp.snr import compute_snr
 from antrack.gui.widgets.heatmap_widget import HeatmapWidget
+from antrack.tracking.motion_constraints import (
+    constrained_azimuth_error,
+    constrained_elevation_error,
+    parse_forbidden_ranges,
+)
 from antrack.tracking.scan_results import scan_error_series
 from antrack.tracking.scan_session import ScanSession
+
+
+class _ScanMoveBridge(QObject):
+    move_requested = pyqtSignal(object)
 
 
 class ScanUiMixin:
@@ -72,7 +83,7 @@ class ScanUiMixin:
         self.scan_metric_combo = QComboBox(config_group)
         self.scan_metric_combo.addItems(["band_power", "snr_relative", "snr_absolute"])
         self.scan_center_mode_combo = QComboBox(config_group)
-        self.scan_center_mode_combo.addItems(["fixed", "dynamic"])
+        self.scan_center_mode_combo.addItems(["fixed", "tracking_relative"])
         self.scan_peak_estimator_combo = QComboBox(config_group)
         self.scan_peak_estimator_combo.addItems(["best_sample", "four_point_divergence"])
 
@@ -154,6 +165,8 @@ class ScanUiMixin:
             center_provider=self._scan_current_theoretical_center,
             logger=self.logger.getChild("Scan"),
         )
+        self._scan_move_bridge = _ScanMoveBridge(self)
+        self._scan_move_bridge.move_requested.connect(self._scan_apply_move_request)
         self.scan_session.progress_updated.connect(self._on_scan_progress_updated)
         self.scan_session.point_measured.connect(self._on_scan_point_measured)
         self.scan_session.completed.connect(self._on_scan_completed)
@@ -165,7 +178,7 @@ class ScanUiMixin:
         self.scan_start_button.clicked.connect(self.start_scan_session)
         self.scan_pause_button.clicked.connect(self.scan_session.pause)
         self.scan_resume_button.clicked.connect(self.scan_session.resume)
-        self.scan_stop_button.clicked.connect(self.scan_session.stop)
+        self.scan_stop_button.clicked.connect(self._stop_scan_session)
         self.scan_apply_button.clicked.connect(lambda: self._apply_scan_offset(False))
         self.scan_save_button.clicked.connect(lambda: self._apply_scan_offset(True))
         self._populate_scan_center_from_tracking()
@@ -204,35 +217,158 @@ class ScanUiMixin:
 
     def _scan_current_theoretical_center(self) -> tuple[float, float]:
         tracked_object = getattr(self, "tracked_object", None)
-        az = getattr(tracked_object, "az_set", self.scan_center_az_spin.value())
-        el = getattr(tracked_object, "el_set", self.scan_center_el_spin.value())
+        az = getattr(tracked_object, "az_theoretical_deg", None)
+        el = getattr(tracked_object, "el_theoretical_deg", None)
+        if not isinstance(az, (int, float)):
+            az = getattr(tracked_object, "az_set", self.scan_center_az_spin.value())
+        if not isinstance(el, (int, float)):
+            el = getattr(tracked_object, "el_set", self.scan_center_el_spin.value())
         return float(az), float(el)
 
     def start_scan_session(self) -> None:
+        config = self._build_scan_config()
+        if not self._prepare_scan_session(config):
+            return
         self._scan_samples = []
         self._scan_current_result = None
         self.scan_heatmap_widget.clear()
         self.scan_cross_az_curve.clear()
         self.scan_cross_el_curve.clear()
         self._update_scan_error_plot([])
-        self.scan_session.start(self._build_scan_config())
+        self._scan_active_center_mode = str(config.get("center_mode", "fixed")).strip().lower()
+        self.scan_session.start(config)
 
-    def _scan_move_to(self, az_deg: float, el_deg: float) -> None:
-        if hasattr(self, "start_fixed_positioning") and self.has_connection():
-            self.start_fixed_positioning(az_deg, el_deg, label="Scan")
-        else:
-            if hasattr(self, "tracked_object"):
-                self.tracked_object.az_set = float(az_deg)
-                self.tracked_object.el_set = float(el_deg)
+    @staticmethod
+    def _scan_uses_tracking_relative(config: dict | None) -> bool:
+        if not isinstance(config, dict):
+            return False
+        mode = str(config.get("center_mode", "fixed")).strip().lower()
+        return mode in {"dynamic", "follow", "orbit", "theoretical", "tracking", "tracking_relative"}
 
-    def _scan_wait_for_settle(self, az_deg: float, el_deg: float, settle_s: float) -> None:
-        timeout_t = time.monotonic() + max(1.0, float(settle_s) + 15.0)
-        time.sleep(float(settle_s))
-        while time.monotonic() < timeout_t:
-            positioner = getattr(self, "positioner", None)
-            if positioner is None or not positioner.is_running():
+    def _prepare_scan_session(self, config: dict) -> bool:
+        if not self.has_connection():
+            QMessageBox.warning(self, "Scan", "Le positionneur doit etre connecte pour lancer un scan.")
+            return False
+        if self._scan_uses_tracking_relative(config):
+            tracker = getattr(self, "tracker", None)
+            if tracker is None or not tracker.is_running():
+                QMessageBox.warning(self, "Scan", "Le mode tracking_relative exige un tracking deja actif.")
+                return False
+            if hasattr(self, "clear_scan_probe_offset"):
+                self.clear_scan_probe_offset()
+            self._manual_setpoint_mode = False
+            return True
+
+        if getattr(self, "tracker", None) and self.tracker.is_running():
+            self._stop_tracking_loop_from_ui()
+        if getattr(self, "positioner", None) and self.positioner.is_running():
+            self._stop_positioning_loop_from_ui()
+        try:
+            self.ephem.stop_object("primary")
+        except Exception:
+            pass
+        if hasattr(self, "clear_scan_probe_offset"):
+            self.clear_scan_probe_offset()
+        self._manual_setpoint_mode = True
+        try:
+            if hasattr(self, "label_tracked_object"):
+                self.label_tracked_object.setText("Scan")
+                self._apply_selected_target_header_style()
+        except Exception:
+            pass
+        self._clear_selected_target_details()
+        return True
+
+    def _stop_scan_session(self) -> None:
+        self.scan_session.stop()
+        self._reset_scan_probe_offset(stop_fixed_positioner=True)
+
+    def _reset_scan_probe_offset(self, *, stop_fixed_positioner: bool = False) -> None:
+        if hasattr(self, "clear_scan_probe_offset"):
+            self.clear_scan_probe_offset()
+        if stop_fixed_positioner and str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "fixed":
+            if getattr(self, "positioner", None) and self.positioner.is_running():
+                self._stop_positioning_loop_from_ui()
+
+    def _scan_move_to(self, point: dict, config: dict | None = None) -> None:
+        request = {
+            "point": dict(point or {}),
+            "config": dict(config or {}),
+            "done": threading.Event(),
+            "error": None,
+        }
+        self._scan_move_bridge.move_requested.emit(request)
+        if not request["done"].wait(timeout=10.0):
+            raise TimeoutError("Timed out while dispatching scan motion command.")
+        if request["error"] is not None:
+            raise RuntimeError(str(request["error"]))
+
+    def _scan_apply_move_request(self, request: dict) -> None:
+        try:
+            point = dict(request.get("point") or {})
+            config = dict(request.get("config") or {})
+            az_deg = float(point.get("az", 0.0))
+            el_deg = float(point.get("el", 0.0))
+            if self._scan_uses_tracking_relative(config):
+                tracker = getattr(self, "tracker", None)
+                if tracker is None or not tracker.is_running():
+                    raise RuntimeError("tracking_relative requires an active tracking loop.")
+                rel_az = float(point.get("relative_az_deg", az_deg - float(point.get("theoretical_az", az_deg))))
+                rel_el = float(point.get("relative_el_deg", el_deg - float(point.get("theoretical_el", el_deg))))
+                if hasattr(self, "set_scan_probe_offset"):
+                    self.set_scan_probe_offset(rel_az, rel_el)
                 return
+
+            if not hasattr(self, "tracked_object"):
+                raise RuntimeError("Tracked object state is unavailable.")
+            self._manual_setpoint_mode = True
+            self._apply_manual_setpoints(az_deg, el_deg)
+            if not self._ensure_positioner():
+                raise RuntimeError("Positioner initialization failed.")
+            if not self.positioner.is_running():
+                self.positioner.start()
+                self.start_tracking_ui_timer()
+        except Exception as exc:
+            request["error"] = exc
+        finally:
+            request["done"].set()
+
+    def _scan_wait_for_settle(self, point: dict, config: dict | None = None, settle_s: float = 0.2) -> None:
+        config = dict(config or {})
+        antenna = self.settings.get("ANTENNA", self.settings.get("antenna", {})) if isinstance(self.settings, dict) else {}
+        az_err_th = float(antenna.get("positioning_az_error_threshold", antenna.get("az_error_threshold", 0.05)))
+        el_err_th = float(antenna.get("positioning_el_error_threshold", antenna.get("el_error_threshold", 0.05)))
+        stable_cycles_required = max(2, int(antenna.get("positioning_stable_cycles", 3)))
+        az_forbidden = parse_forbidden_ranges(antenna.get("az_forbidden_ranges"), default=[(45.0, 90.0), (270.0, 300.0)])
+        el_forbidden = parse_forbidden_ranges(antenna.get("el_forbidden_ranges"), default=[(-10.0, 0.0), (95.0, 100.0)])
+        stable_cycles = 0
+        timeout_t = time.monotonic() + max(5.0, float(settle_s) + 20.0)
+        while time.monotonic() < timeout_t:
+            antenna_state = getattr(getattr(self, "axis_client", None), "antenna", None)
+            az_cur = getattr(antenna_state, "az", None)
+            el_cur = getattr(antenna_state, "el", None)
+            target = getattr(self, "tracked_object", None)
+            az_set = getattr(target, "az_set", point.get("az"))
+            el_set = getattr(target, "el_set", point.get("el"))
+            if not all(isinstance(value, (int, float)) for value in (az_cur, el_cur, az_set, el_set)):
+                time.sleep(0.05)
+                continue
+            az_error = constrained_azimuth_error(float(az_cur), float(az_set), az_forbidden)
+            el_error = constrained_elevation_error(float(el_cur), float(el_set), el_forbidden)
+            if az_error is None or el_error is None:
+                stable_cycles = 0
+                time.sleep(0.05)
+                continue
+            if abs(float(az_error)) <= az_err_th and abs(float(el_error)) <= el_err_th:
+                stable_cycles += 1
+                if stable_cycles >= stable_cycles_required:
+                    if float(settle_s) > 0.0:
+                        time.sleep(float(settle_s))
+                    return
+            else:
+                stable_cycles = 0
             time.sleep(0.05)
+        raise TimeoutError("Scan move did not settle before timeout.")
 
     def _scan_measure(self, config: dict) -> float:
         metric = str(config.get("metric", "band_power")).strip().lower()
@@ -272,6 +408,7 @@ class ScanUiMixin:
 
     def _on_scan_completed(self, result: dict) -> None:
         self._scan_current_result = result
+        self._reset_scan_probe_offset()
         best = result.get("best_point", {})
         self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
         self.scan_offset_label.setText(f"dAZ={result.get('az_offset_deg', 0.0):.3f} dEL={result.get('el_offset_deg', 0.0):.3f}")
@@ -297,6 +434,8 @@ class ScanUiMixin:
         self.scan_error_total_curve.setData(series["x"], series["angular_error_deg"])
 
     def _on_scan_state_changed(self, state: str) -> None:
+        if state in {"stopped", "error"}:
+            self._reset_scan_probe_offset(stop_fixed_positioner=True)
         self.status_bar.showMessage(f"Scan state: {state}", 3000)
 
     def _apply_scan_offset(self, persist: bool) -> None:

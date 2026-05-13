@@ -211,7 +211,7 @@ def test_scan_session_can_materialize_points_around_dynamic_center():
     session._run(
         {
             "strategy": "grid",
-            "center_mode": "dynamic",
+            "center_mode": "tracking_relative",
             "center_az_deg": 0.0,
             "center_el_deg": 0.0,
             "span_deg": 2.0,
@@ -228,3 +228,31 @@ def test_scan_session_can_materialize_points_around_dynamic_center():
     assert result["samples"][0]["theoretical_el"] == 30.0
     assert result["samples"][0]["offset_az"] == -1.0
     assert result["samples"][1]["theoretical_az"] == 100.5
+
+
+def test_scan_session_prefers_enriched_move_callback_signature():
+    calls = []
+
+    def move_to(*, point: dict, config: dict) -> None:
+        calls.append((point["az"], point["el"], config["center_mode"]))
+
+    session = ScanSession(
+        thread_manager=None,
+        move_to=move_to,
+        measure=lambda _config: 1.0,
+    )
+    session._run(
+        {
+            "strategy": "grid",
+            "center_mode": "tracking_relative",
+            "center_az_deg": 10.0,
+            "center_el_deg": 20.0,
+            "span_deg": 0.0,
+            "step_deg": 1.0,
+            "settle_s": 0.0,
+            "integration_s": 0.01,
+        }
+    )
+
+    assert calls
+    assert all(call == (10.0, 20.0, "tracking_relative") for call in calls)

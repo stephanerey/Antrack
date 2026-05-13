@@ -64,12 +64,16 @@ class TrackedObject:
     def __init__(self):
         self.az_set: float = 0.0
         self.el_set: float = 0.0
+        self.az_theoretical_deg: float = 0.0
+        self.el_theoretical_deg: float = 0.0
         self.az_error: float = 0.0
         self.el_error: float = 0.0
         self.snr_db: float = float("nan")
         self.snr_mode: str = "relative"
         self.scan_offset_az_deg: float = 0.0
         self.scan_offset_el_deg: float = 0.0
+        self.scan_probe_offset_az_deg: float = 0.0
+        self.scan_probe_offset_el_deg: float = 0.0
         self.distance_km: float = 0.0
         self.ra_set: Ra = Ra()
         self.dec_set: Dec = Dec()

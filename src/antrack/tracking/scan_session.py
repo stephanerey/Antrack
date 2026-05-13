@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import logging
 import threading
 import time
@@ -136,6 +137,7 @@ class ScanSession(QObject):
             "orbit",
             "theoretical",
             "tracking",
+            "tracking_relative",
         }
 
     @staticmethod
@@ -182,10 +184,28 @@ class ScanSession(QObject):
         az = float(point["az"])
         el = float(point["el"])
         if self.move_to is not None:
-            self.move_to(az, el)
+            try:
+                self.move_to(point=point, config=config)
+            except TypeError as exc:
+                try:
+                    signature = inspect.signature(self.move_to)
+                    signature.bind_partial(point=point, config=config)
+                except Exception:
+                    self.move_to(az, el)
+                else:
+                    raise exc
         settle_s = float(config.get("settle_s", 0.2))
         if self.wait_for_settle is not None:
-            self.wait_for_settle(az, el, settle_s)
+            try:
+                self.wait_for_settle(point=point, config=config, settle_s=settle_s)
+            except TypeError as exc:
+                try:
+                    signature = inspect.signature(self.wait_for_settle)
+                    signature.bind_partial(point=point, config=config, settle_s=settle_s)
+                except Exception:
+                    self.wait_for_settle(az, el, settle_s)
+                else:
+                    raise exc
         else:
             time.sleep(settle_s)
         if self.measure is None:
