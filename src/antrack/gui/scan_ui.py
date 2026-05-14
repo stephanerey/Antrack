@@ -34,7 +34,6 @@ from antrack.tracking.motion_constraints import (
 )
 from antrack.tracking.scan_cross import generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points, generate_two_pass_grid_points
-from antrack.tracking.scan_results import scan_error_series
 from antrack.tracking.scan_session import ScanSession
 from antrack.tracking.scan_spiral import generate_spiral_points
 
@@ -211,16 +210,37 @@ class ScanUiMixin:
         visual_layout.setRowStretch(0, 1)
         self._sync_scan_profile_margins()
 
-        self.scan_error_plot = pg.PlotWidget(splitter)
-        self.scan_error_plot.addLegend()
-        self.scan_error_plot.setLabel("bottom", "Estimate", units="#")
-        self.scan_error_plot.setLabel("left", "Error", units="deg")
-        self.scan_error_az_curve = self.scan_error_plot.plot(name="AZ error", pen=pg.mkPen("y"))
-        self.scan_error_el_curve = self.scan_error_plot.plot(name="EL error", pen=pg.mkPen("c"))
-        self.scan_error_total_curve = self.scan_error_plot.plot(name="Angular error", pen=pg.mkPen("m"))
+        history_panel = QWidget(splitter)
+        history_layout = QVBoxLayout(history_panel)
+        history_layout.setContentsMargins(0, 0, 0, 0)
+        history_layout.setSpacing(6)
+        self.scan_az_history_plot = pg.PlotWidget(history_panel)
+        self.scan_az_history_plot.addLegend()
+        self.scan_az_history_plot.showGrid(x=True, y=True)
+        self.scan_az_history_plot.setLabel("bottom", "Elapsed", units="min")
+        self.scan_az_history_plot.setLabel("left", "Azimuth", units="deg")
+        self.scan_az_history_plot.setYRange(0.0, 360.0, padding=0.0)
+        self.scan_az_theoretical_curve = self.scan_az_history_plot.plot(
+            name="AZ theoretical",
+            pen=pg.mkPen((220, 220, 220), width=1, style=Qt.DashLine),
+        )
+        self.scan_az_measured_curve = self.scan_az_history_plot.plot(name="AZ measured peak", pen=pg.mkPen("y", width=2))
+        self.scan_el_history_plot = pg.PlotWidget(history_panel)
+        self.scan_el_history_plot.addLegend()
+        self.scan_el_history_plot.showGrid(x=True, y=True)
+        self.scan_el_history_plot.setLabel("bottom", "Elapsed", units="min")
+        self.scan_el_history_plot.setLabel("left", "Elevation", units="deg")
+        self.scan_el_history_plot.setYRange(0.0, 90.0, padding=0.0)
+        self.scan_el_theoretical_curve = self.scan_el_history_plot.plot(
+            name="EL theoretical",
+            pen=pg.mkPen((220, 220, 220), width=1, style=Qt.DashLine),
+        )
+        self.scan_el_measured_curve = self.scan_el_history_plot.plot(name="EL measured peak", pen=pg.mkPen("c", width=2))
+        history_layout.addWidget(self.scan_az_history_plot)
+        history_layout.addWidget(self.scan_el_history_plot)
         splitter.addWidget(visual_panel)
-        splitter.addWidget(self.scan_error_plot)
-        splitter.setSizes([700, 220])
+        splitter.addWidget(history_panel)
+        splitter.setSizes([700, 260])
 
         root_layout.addWidget(config_group)
         root_layout.addWidget(control_group)
@@ -871,21 +891,55 @@ class ScanUiMixin:
         self._append_scan_error_history(peak)
         self._update_scan_error_plot(self._scan_error_history)
         self._update_profile_markers(peak)
-        if self._scan_repeat_active and getattr(self, "tracker", None) and self.tracker.is_running():
-            interval_ms = int(max(1000.0, float(self.scan_repeat_interval_spin.value()) * 1000.0))
-            self._scan_repeat_pending = True
-            self.status_bar.showMessage(f"Next scan sequence in {self.scan_repeat_interval_spin.value():.0f}s", 3000)
-            pg.QtCore.QTimer.singleShot(interval_ms, lambda: self._start_scan_sequence(repeating=True) if self._scan_repeat_pending else None)
+        self._schedule_next_scan_sequence()
 
     def _update_scan_error_plot(self, error_trace: list[dict]) -> None:
-        series = scan_error_series(error_trace)
-        self.scan_error_az_curve.setData(series["x"], series["az_error_deg"])
-        self.scan_error_el_curve.setData(series["x"], series["el_error_deg"])
-        self.scan_error_total_curve.setData(series["x"], series["angular_error_deg"])
+        points = [point for point in error_trace if isinstance(point, dict)]
+        if not points:
+            self.scan_az_theoretical_curve.clear()
+            self.scan_az_measured_curve.clear()
+            self.scan_el_theoretical_curve.clear()
+            self.scan_el_measured_curve.clear()
+            return
+        first_timestamp = min(float(point.get("timestamp", time.time())) for point in points)
+        x_values = [
+            max(0.0, (float(point.get("timestamp", first_timestamp)) - first_timestamp) / 60.0)
+            for point in points
+        ]
+        if len(points) == 1:
+            self.scan_az_history_plot.setXRange(0.0, 1.0, padding=0.0)
+            self.scan_el_history_plot.setXRange(0.0, 1.0, padding=0.0)
+        else:
+            x_max = max(1.0, max(x_values))
+            self.scan_az_history_plot.setXRange(0.0, x_max, padding=0.02)
+            self.scan_el_history_plot.setXRange(0.0, x_max, padding=0.02)
+        self.scan_az_history_plot.setYRange(0.0, 360.0, padding=0.0)
+        self.scan_el_history_plot.setYRange(0.0, 90.0, padding=0.0)
+        self.scan_az_theoretical_curve.setData(x_values, [float(point.get("theoretical_az", 0.0)) % 360.0 for point in points])
+        self.scan_az_measured_curve.setData(x_values, [float(point.get("az", 0.0)) % 360.0 for point in points])
+        self.scan_el_theoretical_curve.setData(x_values, [float(point.get("theoretical_el", 0.0)) for point in points])
+        self.scan_el_measured_curve.setData(x_values, [float(point.get("el", 0.0)) for point in points])
 
     def _append_scan_error_history(self, peak: dict) -> None:
         if isinstance(peak, dict) and peak:
-            self._scan_error_history.append(dict(peak))
+            point = dict(peak)
+            point.setdefault("timestamp", time.time())
+            self._scan_error_history.append(point)
+
+    def _schedule_next_scan_sequence(self) -> bool:
+        if not (self._scan_repeat_active and getattr(self, "tracker", None) and self.tracker.is_running()):
+            return False
+        if self._scan_repeat_pending:
+            return True
+        interval_s = max(1.0, float(self.scan_repeat_interval_spin.value()))
+        interval_ms = int(interval_s * 1000.0)
+        self._scan_repeat_pending = True
+        self.status_bar.showMessage(f"Next scan sequence in {interval_s:.0f}s", 3000)
+        pg.QtCore.QTimer.singleShot(
+            interval_ms,
+            lambda: self._start_scan_sequence(repeating=True) if self._scan_repeat_pending else None,
+        )
+        return True
 
     def _update_profile_markers(self, peak: dict) -> None:
         relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
@@ -917,6 +971,13 @@ class ScanUiMixin:
         self.scan_vertical_real_marker.setData(vertical_real_points)
 
     def _on_scan_state_changed(self, state: str) -> None:
+        if state == "error" and self._scan_repeat_active and getattr(self, "tracker", None) and self.tracker.is_running():
+            self._reset_scan_probe_offset(stop_fixed_positioner=True)
+            self._scan_current_point = None
+            self._refresh_scan_path_visuals()
+            self._schedule_next_scan_sequence()
+            self.status_bar.showMessage("Scan error: next repeated sequence scheduled", 5000)
+            return
         if state in {"stopped", "error"}:
             self._scan_repeat_active = False
             self._scan_repeat_pending = False
