@@ -217,25 +217,33 @@ class ScanUiMixin:
         self.scan_az_history_plot = pg.PlotWidget(history_panel)
         self.scan_az_history_plot.addLegend()
         self.scan_az_history_plot.showGrid(x=True, y=True)
-        self.scan_az_history_plot.setLabel("bottom", "Elapsed", units="min")
-        self.scan_az_history_plot.setLabel("left", "Azimuth", units="deg")
-        self.scan_az_history_plot.setYRange(0.0, 360.0, padding=0.0)
-        self.scan_az_theoretical_curve = self.scan_az_history_plot.plot(
-            name="AZ theoretical",
-            pen=pg.mkPen((220, 220, 220), width=1, style=Qt.DashLine),
+        self.scan_az_history_plot.setLabel("bottom", "Theoretical Azimuth", units="deg")
+        self.scan_az_history_plot.setLabel("left", "AZ Error", units="deg")
+        self.scan_az_history_plot.setXRange(0.0, 360.0, padding=0.0)
+        self.scan_az_zero_line = pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen((160, 160, 160), style=Qt.DashLine))
+        self.scan_az_history_plot.addItem(self.scan_az_zero_line)
+        self.scan_az_error_curve = self.scan_az_history_plot.plot(
+            name="AZ error",
+            pen=pg.mkPen("y", width=2),
+            symbol="o",
+            symbolSize=6,
+            symbolBrush=pg.mkBrush("y"),
         )
-        self.scan_az_measured_curve = self.scan_az_history_plot.plot(name="AZ measured peak", pen=pg.mkPen("y", width=2))
         self.scan_el_history_plot = pg.PlotWidget(history_panel)
         self.scan_el_history_plot.addLegend()
         self.scan_el_history_plot.showGrid(x=True, y=True)
-        self.scan_el_history_plot.setLabel("bottom", "Elapsed", units="min")
-        self.scan_el_history_plot.setLabel("left", "Elevation", units="deg")
-        self.scan_el_history_plot.setYRange(0.0, 90.0, padding=0.0)
-        self.scan_el_theoretical_curve = self.scan_el_history_plot.plot(
-            name="EL theoretical",
-            pen=pg.mkPen((220, 220, 220), width=1, style=Qt.DashLine),
+        self.scan_el_history_plot.setLabel("bottom", "Theoretical Elevation", units="deg")
+        self.scan_el_history_plot.setLabel("left", "EL Error", units="deg")
+        self.scan_el_history_plot.setXRange(0.0, 90.0, padding=0.0)
+        self.scan_el_zero_line = pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen((160, 160, 160), style=Qt.DashLine))
+        self.scan_el_history_plot.addItem(self.scan_el_zero_line)
+        self.scan_el_error_curve = self.scan_el_history_plot.plot(
+            name="EL error",
+            pen=pg.mkPen("c", width=2),
+            symbol="o",
+            symbolSize=6,
+            symbolBrush=pg.mkBrush("c"),
         )
-        self.scan_el_measured_curve = self.scan_el_history_plot.plot(name="EL measured peak", pen=pg.mkPen("c", width=2))
         history_layout.addWidget(self.scan_az_history_plot)
         history_layout.addWidget(self.scan_el_history_plot)
         splitter.addWidget(visual_panel)
@@ -896,29 +904,17 @@ class ScanUiMixin:
     def _update_scan_error_plot(self, error_trace: list[dict]) -> None:
         points = [point for point in error_trace if isinstance(point, dict)]
         if not points:
-            self.scan_az_theoretical_curve.clear()
-            self.scan_az_measured_curve.clear()
-            self.scan_el_theoretical_curve.clear()
-            self.scan_el_measured_curve.clear()
+            self.scan_az_error_curve.clear()
+            self.scan_el_error_curve.clear()
             return
-        first_timestamp = min(float(point.get("timestamp", time.time())) for point in points)
-        x_values = [
-            max(0.0, (float(point.get("timestamp", first_timestamp)) - first_timestamp) / 60.0)
-            for point in points
-        ]
-        if len(points) == 1:
-            self.scan_az_history_plot.setXRange(0.0, 1.0, padding=0.0)
-            self.scan_el_history_plot.setXRange(0.0, 1.0, padding=0.0)
-        else:
-            x_max = max(1.0, max(x_values))
-            self.scan_az_history_plot.setXRange(0.0, x_max, padding=0.02)
-            self.scan_el_history_plot.setXRange(0.0, x_max, padding=0.02)
-        self.scan_az_history_plot.setYRange(0.0, 360.0, padding=0.0)
-        self.scan_el_history_plot.setYRange(0.0, 90.0, padding=0.0)
-        self.scan_az_theoretical_curve.setData(x_values, [float(point.get("theoretical_az", 0.0)) % 360.0 for point in points])
-        self.scan_az_measured_curve.setData(x_values, [float(point.get("az", 0.0)) % 360.0 for point in points])
-        self.scan_el_theoretical_curve.setData(x_values, [float(point.get("theoretical_el", 0.0)) for point in points])
-        self.scan_el_measured_curve.setData(x_values, [float(point.get("el", 0.0)) for point in points])
+        az_x = [float(point.get("theoretical_az", 0.0)) % 360.0 for point in points]
+        az_y = [float(point.get("az_error_deg", 0.0)) for point in points]
+        el_x = [float(point.get("theoretical_el", 0.0)) for point in points]
+        el_y = [float(point.get("el_error_deg", 0.0)) for point in points]
+        self.scan_az_history_plot.setXRange(0.0, 360.0, padding=0.0)
+        self.scan_el_history_plot.setXRange(0.0, 90.0, padding=0.0)
+        self.scan_az_error_curve.setData(az_x, az_y)
+        self.scan_el_error_curve.setData(el_x, el_y)
 
     def _append_scan_error_history(self, peak: dict) -> None:
         if isinstance(peak, dict) and peak:
