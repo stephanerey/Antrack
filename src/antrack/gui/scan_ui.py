@@ -13,7 +13,6 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -61,92 +60,74 @@ class ScanUiMixin:
         config_layout = QGridLayout(config_group)
         self.scan_strategy_combo = QComboBox(config_group)
         self.scan_strategy_combo.addItems(["grid", "cross", "spiral", "adaptive"])
-        self.scan_center_az_spin = QDoubleSpinBox(config_group)
-        self.scan_center_az_spin.setRange(-720.0, 720.0)
-        self.scan_center_el_spin = QDoubleSpinBox(config_group)
-        self.scan_center_el_spin.setRange(-90.0, 180.0)
         self.scan_span_spin = QDoubleSpinBox(config_group)
         self.scan_span_spin.setRange(0.1, 20.0)
         self.scan_span_spin.setValue(2.0)
+        self.scan_span_spin.setSuffix(" deg")
         self.scan_step_spin = QDoubleSpinBox(config_group)
         self.scan_step_spin.setRange(0.01, 5.0)
         self.scan_step_spin.setValue(0.5)
+        self.scan_step_spin.setSuffix(" deg")
         self.scan_settle_spin = QDoubleSpinBox(config_group)
         self.scan_settle_spin.setRange(0.0, 10.0)
         self.scan_settle_spin.setValue(0.2)
-        self.scan_integration_spin = QDoubleSpinBox(config_group)
-        self.scan_integration_spin.setRange(0.01, 10.0)
-        self.scan_integration_spin.setValue(0.25)
-        self.scan_bandwidth_spin = QDoubleSpinBox(config_group)
-        self.scan_bandwidth_spin.setRange(100.0, 5_000_000.0)
-        self.scan_bandwidth_spin.setValue(25_000.0)
-        self.scan_bandwidth_spin.setSuffix(" Hz")
-        self.scan_offset_hz_spin = QDoubleSpinBox(config_group)
-        self.scan_offset_hz_spin.setRange(-5_000_000.0, 5_000_000.0)
-        self.scan_offset_hz_spin.setValue(0.0)
-        self.scan_offset_hz_spin.setSuffix(" Hz")
+        self.scan_settle_spin.setSuffix(" s")
         self.scan_metric_combo = QComboBox(config_group)
         self.scan_metric_combo.addItems(["band_power", "snr_relative", "snr_absolute"])
         self.scan_center_mode_combo = QComboBox(config_group)
-        self.scan_center_mode_combo.addItems(["fixed", "tracking_relative"])
+        self.scan_center_mode_combo.addItems(["tracking_relative", "current_position"])
         self.scan_peak_estimator_combo = QComboBox(config_group)
         self.scan_peak_estimator_combo.addItems(["best_sample", "four_point_divergence"])
 
-        config_layout.addWidget(QLabel("Strategy"), 0, 0)
-        config_layout.addWidget(self.scan_strategy_combo, 0, 1)
-        config_layout.addWidget(QLabel("Center AZ"), 0, 2)
-        config_layout.addWidget(self.scan_center_az_spin, 0, 3)
-        config_layout.addWidget(QLabel("Center EL"), 0, 4)
-        config_layout.addWidget(self.scan_center_el_spin, 0, 5)
-        config_layout.addWidget(QLabel("Span"), 1, 0)
-        config_layout.addWidget(self.scan_span_spin, 1, 1)
-        config_layout.addWidget(QLabel("Step"), 1, 2)
-        config_layout.addWidget(self.scan_step_spin, 1, 3)
-        config_layout.addWidget(QLabel("Settle"), 1, 4)
-        config_layout.addWidget(self.scan_settle_spin, 1, 5)
-        config_layout.addWidget(QLabel("Integration"), 2, 0)
-        config_layout.addWidget(self.scan_integration_spin, 2, 1)
-        config_layout.addWidget(QLabel("Bandwidth"), 2, 2)
-        config_layout.addWidget(self.scan_bandwidth_spin, 2, 3)
-        config_layout.addWidget(QLabel("Band Offset"), 2, 4)
-        config_layout.addWidget(self.scan_offset_hz_spin, 2, 5)
-        config_layout.addWidget(QLabel("Metric"), 3, 0)
-        config_layout.addWidget(self.scan_metric_combo, 3, 1)
-        config_layout.addWidget(QLabel("Center Mode"), 3, 2)
-        config_layout.addWidget(self.scan_center_mode_combo, 3, 3)
-        config_layout.addWidget(QLabel("Peak Estimator"), 3, 4)
-        config_layout.addWidget(self.scan_peak_estimator_combo, 3, 5)
-
-        control_group = QGroupBox("Scan Control", container)
-        control_form = QFormLayout(control_group)
-        self.scan_start_button = QPushButton("Start", control_group)
-        self.scan_pause_button = QPushButton("Pause", control_group)
-        self.scan_resume_button = QPushButton("Resume", control_group)
-        self.scan_stop_button = QPushButton("Stop", control_group)
-        self.scan_apply_button = QPushButton("Apply Offset", control_group)
-        self.scan_save_button = QPushButton("Save Offset", control_group)
-        self.scan_repeat_checkbox = QCheckBox("Repeat While Tracking", control_group)
-        self.scan_repeat_interval_spin = QDoubleSpinBox(control_group)
+        self.scan_start_button = QPushButton("Start", config_group)
+        self.scan_pause_button = QPushButton("Pause", config_group)
+        self.scan_resume_button = QPushButton("Resume", config_group)
+        self.scan_stop_button = QPushButton("Stop", config_group)
+        self.scan_apply_button = QPushButton("Apply Offset", config_group)
+        self.scan_save_button = QPushButton("Save Offset", config_group)
+        self.scan_repeat_checkbox = QCheckBox("Repeat While Tracking", config_group)
+        self.scan_repeat_interval_spin = QDoubleSpinBox(config_group)
         self.scan_repeat_interval_spin.setRange(1.0, 3600.0)
         self.scan_repeat_interval_spin.setValue(60.0)
         self.scan_repeat_interval_spin.setSuffix(" s")
-        self.scan_progress_label = QLabel("-", control_group)
-        self.scan_best_label = QLabel("-", control_group)
-        self.scan_offset_label = QLabel("-", control_group)
+        self.scan_progress_label = QLabel("-", config_group)
+        self.scan_best_label = QLabel("-", config_group)
+        self.scan_offset_label = QLabel("-", config_group)
         repeat_row = QHBoxLayout()
         repeat_row.setContentsMargins(0, 0, 0, 0)
         repeat_row.addWidget(self.scan_repeat_checkbox)
         repeat_row.addWidget(self.scan_repeat_interval_spin)
-        control_form.addRow(self.scan_start_button)
-        control_form.addRow(self.scan_pause_button)
-        control_form.addRow(self.scan_resume_button)
-        control_form.addRow(self.scan_stop_button)
-        control_form.addRow("Repeat", repeat_row)
-        control_form.addRow("Progress", self.scan_progress_label)
-        control_form.addRow("Best", self.scan_best_label)
-        control_form.addRow("Offset", self.scan_offset_label)
-        control_form.addRow(self.scan_apply_button)
-        control_form.addRow(self.scan_save_button)
+
+        config_layout.addWidget(QLabel("Strategy"), 0, 0)
+        config_layout.addWidget(self.scan_strategy_combo, 0, 1)
+        config_layout.addWidget(QLabel("Center Mode"), 0, 2)
+        config_layout.addWidget(self.scan_center_mode_combo, 0, 3)
+        config_layout.addWidget(self.scan_start_button, 0, 4)
+        config_layout.addWidget(self.scan_stop_button, 0, 5)
+        config_layout.addWidget(QLabel("Span (deg)"), 1, 0)
+        config_layout.addWidget(self.scan_span_spin, 1, 1)
+        config_layout.addWidget(QLabel("Step (deg)"), 1, 2)
+        config_layout.addWidget(self.scan_step_spin, 1, 3)
+        config_layout.addWidget(self.scan_pause_button, 1, 4)
+        config_layout.addWidget(self.scan_resume_button, 1, 5)
+        config_layout.addWidget(QLabel("Settle (s)"), 2, 0)
+        config_layout.addWidget(self.scan_settle_spin, 2, 1)
+        config_layout.addWidget(QLabel("Repeat"), 2, 2)
+        config_layout.addLayout(repeat_row, 2, 3)
+        config_layout.addWidget(self.scan_apply_button, 2, 4)
+        config_layout.addWidget(self.scan_save_button, 2, 5)
+        config_layout.addWidget(QLabel("Metric"), 3, 0)
+        config_layout.addWidget(self.scan_metric_combo, 3, 1)
+        config_layout.addWidget(QLabel("Peak Estimator"), 3, 2)
+        config_layout.addWidget(self.scan_peak_estimator_combo, 3, 3)
+        config_layout.addWidget(QLabel("Progress"), 4, 0)
+        config_layout.addWidget(self.scan_progress_label, 4, 1)
+        config_layout.addWidget(QLabel("Best"), 4, 2)
+        config_layout.addWidget(self.scan_best_label, 4, 3)
+        config_layout.addWidget(QLabel("Offset"), 4, 4)
+        config_layout.addWidget(self.scan_offset_label, 4, 5)
+        config_layout.setColumnStretch(1, 1)
+        config_layout.setColumnStretch(3, 1)
 
         splitter = QSplitter(Qt.Vertical, container)
         visual_panel = QWidget(splitter)
@@ -251,7 +232,6 @@ class ScanUiMixin:
         splitter.setSizes([700, 260])
 
         root_layout.addWidget(config_group)
-        root_layout.addWidget(control_group)
         root_layout.addWidget(splitter, 1)
 
         self.scan_session = ScanSession(
@@ -287,31 +267,25 @@ class ScanUiMixin:
         self.scan_stop_button.clicked.connect(self._stop_scan_session)
         self.scan_apply_button.clicked.connect(lambda: self._apply_scan_offset(False))
         self.scan_save_button.clicked.connect(lambda: self._apply_scan_offset(True))
-        self._populate_scan_center_from_tracking()
-
-    def _populate_scan_center_from_tracking(self) -> None:
-        az = getattr(getattr(self, "tracked_object", None), "az_set", 0.0)
-        el = getattr(getattr(self, "tracked_object", None), "el_set", 0.0)
-        if isinstance(az, (int, float)):
-            self.scan_center_az_spin.setValue(float(az))
-        if isinstance(el, (int, float)):
-            self.scan_center_el_spin.setValue(float(el))
 
     def _build_scan_config(self) -> dict:
+        center_mode = self.scan_center_mode_combo.currentText()
+        center_az, center_el = (0.0, 0.0) if center_mode == "tracking_relative" else self._scan_current_antenna_center()
+        sdr_settings = self._scan_current_sdr_measure_settings()
         return {
             "strategy": self.scan_strategy_combo.currentText(),
-            "center_mode": self.scan_center_mode_combo.currentText(),
-            "center_az_deg": self.scan_center_az_spin.value(),
-            "center_el_deg": self.scan_center_el_spin.value(),
+            "center_mode": center_mode,
+            "center_az_deg": center_az,
+            "center_el_deg": center_el,
             "span_deg": self.scan_span_spin.value(),
             "span_az_deg": self.scan_span_spin.value(),
             "span_el_deg": self.scan_span_spin.value(),
             "step_deg": self.scan_step_spin.value(),
             "radial_step_deg": self.scan_step_spin.value(),
             "settle_s": self.scan_settle_spin.value(),
-            "integration_s": self.scan_integration_spin.value(),
-            "bandwidth_hz": self.scan_bandwidth_spin.value(),
-            "band_offset_hz": self.scan_offset_hz_spin.value(),
+            "integration_s": sdr_settings["integration_s"],
+            "bandwidth_hz": sdr_settings["bandwidth_hz"],
+            "band_offset_hz": sdr_settings["band_offset_hz"],
             "metric": self.scan_metric_combo.currentText(),
             "peak_estimator": self.scan_peak_estimator_combo.currentText(),
             "coarse_span_deg": self.scan_span_spin.value(),
@@ -321,14 +295,37 @@ class ScanUiMixin:
             "grid_step_deg": max(0.05, self.scan_step_spin.value()),
         }
 
+    def _scan_current_antenna_center(self) -> tuple[float, float]:
+        antenna_state = getattr(getattr(self, "axis_client", None), "antenna", None)
+        az = getattr(antenna_state, "az", None)
+        el = getattr(antenna_state, "el", None)
+        if isinstance(az, (int, float)) and isinstance(el, (int, float)):
+            return float(az), float(el)
+        tracked_object = getattr(self, "tracked_object", None)
+        az = getattr(tracked_object, "az_set", 0.0)
+        el = getattr(tracked_object, "el_set", 0.0)
+        return float(az) if isinstance(az, (int, float)) else 0.0, float(el) if isinstance(el, (int, float)) else 0.0
+
+    def _scan_current_sdr_measure_settings(self) -> dict[str, float]:
+        sdr_client = getattr(self, "sdr_client", None)
+        center_freq_hz = float(getattr(sdr_client, "center_freq", 0.0)) if sdr_client is not None else 0.0
+        receiver_freq_hz = float(getattr(sdr_client, "receiver_freq_hz", center_freq_hz)) if sdr_client is not None else center_freq_hz
+        bandwidth_hz = float(max(100.0, getattr(sdr_client, "bandwidth_hz", 25_000.0))) if sdr_client is not None else 25_000.0
+        integration_s = float(max(0.01, getattr(self, "_sdr_snr_integration_s", 0.25)))
+        return {
+            "band_offset_hz": receiver_freq_hz - center_freq_hz,
+            "bandwidth_hz": bandwidth_hz,
+            "integration_s": integration_s,
+        }
+
     def _scan_current_theoretical_center(self) -> tuple[float, float]:
         tracked_object = getattr(self, "tracked_object", None)
         az = getattr(tracked_object, "az_theoretical_deg", None)
         el = getattr(tracked_object, "el_theoretical_deg", None)
         if not isinstance(az, (int, float)):
-            az = getattr(tracked_object, "az_set", self.scan_center_az_spin.value())
+            az = getattr(tracked_object, "az_set", self._scan_current_antenna_center()[0])
         if not isinstance(el, (int, float)):
-            el = getattr(tracked_object, "el_set", self.scan_center_el_spin.value())
+            el = getattr(tracked_object, "el_set", self._scan_current_antenna_center()[1])
         return float(az), float(el)
 
     def start_scan_session(self) -> None:
@@ -439,7 +436,7 @@ class ScanUiMixin:
     def _reset_scan_probe_offset(self, *, stop_fixed_positioner: bool = False) -> None:
         if hasattr(self, "clear_scan_probe_offset"):
             self.clear_scan_probe_offset()
-        if stop_fixed_positioner and str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "fixed":
+        if stop_fixed_positioner and str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() in {"fixed", "current_position"}:
             if getattr(self, "positioner", None) and self.positioner.is_running():
                 self._stop_positioning_loop_from_ui()
 
@@ -812,18 +809,22 @@ class ScanUiMixin:
         metric = str(config.get("metric", "band_power")).strip().lower()
         if not hasattr(self, "sdr_client") or self.sdr_client is None:
             raise RuntimeError("SDR backend is required for scans.")
+        sdr_settings = self._scan_current_sdr_measure_settings()
+        band_offset_hz = float(sdr_settings.get("band_offset_hz", config.get("band_offset_hz", 0.0)))
+        bandwidth_hz = float(sdr_settings.get("bandwidth_hz", config.get("bandwidth_hz", 25_000.0)))
+        integration_s = float(sdr_settings.get("integration_s", config.get("integration_s", 0.25)))
         if metric == "band_power":
             return self.sdr_client.measure_band_power(
-                float(config.get("band_offset_hz", 0.0)),
-                float(config.get("bandwidth_hz", 25_000.0)),
-                float(config.get("integration_s", 0.25)),
+                band_offset_hz,
+                bandwidth_hz,
+                integration_s,
             )
         spectrum = getattr(self.sdr_client, "_latest_spectrum_db", None)
         if spectrum is None:
             return self.sdr_client.measure_band_power(
-                float(config.get("band_offset_hz", 0.0)),
-                float(config.get("bandwidth_hz", 25_000.0)),
-                float(config.get("integration_s", 0.25)),
+                band_offset_hz,
+                bandwidth_hz,
+                integration_s,
             )
         if metric == "snr_absolute":
             return float(compute_snr(spectrum, "absolute", self.sdr_client.noise_floor_ref_db))
