@@ -940,6 +940,10 @@ EL +1  o--o--o--o--o
         self._scan_samples.append(sample)
         self._refresh_scan_path_visuals()
         best = max(self._scan_samples, key=lambda point: float(point.get("value", float("-inf"))))
+        best_coords = self._scan_plot_coordinates(best)
+        if best_coords is not None:
+            cell_width, cell_height = self._scan_grid_cell_size()
+            self.scan_heatmap_widget.set_best_point(best_coords[0], best_coords[1], cell_width=cell_width, cell_height=cell_height)
         self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
         self.scan_offset_label.setText(f"dAZ={best.get('offset_az', 0.0):+.3f} dEL={best.get('offset_el', 0.0):+.3f}")
         relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
