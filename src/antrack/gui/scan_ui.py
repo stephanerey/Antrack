@@ -173,7 +173,6 @@ class ScanUiMixin:
         visual_layout.setHorizontalSpacing(6)
         visual_layout.setVerticalSpacing(6)
         self.scan_vertical_plot = pg.PlotWidget(visual_panel)
-        self.scan_vertical_plot.addLegend()
         self.scan_vertical_plot.showGrid(x=True, y=True)
         self.scan_vertical_plot.setMaximumWidth(220)
         self.scan_vertical_plot.setLabel("bottom", "Metric")
@@ -199,7 +198,6 @@ class ScanUiMixin:
         self.scan_heatmap_widget = HeatmapWidget(visual_panel)
 
         self.scan_horizontal_plot = pg.PlotWidget(visual_panel)
-        self.scan_horizontal_plot.addLegend()
         self.scan_horizontal_plot.showGrid(x=True, y=True)
         self.scan_horizontal_plot.setLabel("bottom", "Azimuth", units="deg")
         self.scan_horizontal_plot.setLabel("left", "Metric")
