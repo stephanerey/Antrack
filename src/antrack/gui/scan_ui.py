@@ -62,7 +62,10 @@ class ScanUiMixin:
         config_group = QGroupBox("Scan Configuration", container)
         config_layout = QGridLayout(config_group)
         self.scan_strategy_combo = QComboBox(config_group)
-        self.scan_strategy_combo.addItems(["grid", "cross", "spiral", "adaptive"])
+        self.scan_strategy_combo.addItem("grid", "grid")
+        self.scan_strategy_combo.addItem("cross (experimental)", "cross")
+        self.scan_strategy_combo.addItem("spiral (experimental)", "spiral")
+        self.scan_strategy_combo.addItem("adaptive (experimental)", "adaptive")
         self.scan_span_spin = QDoubleSpinBox(config_group)
         self.scan_span_spin.setRange(0.1, 20.0)
         self.scan_span_spin.setValue(2.0)
@@ -76,11 +79,15 @@ class ScanUiMixin:
         self.scan_settle_spin.setValue(0.2)
         self.scan_settle_spin.setSuffix(" s")
         self.scan_metric_combo = QComboBox(config_group)
-        self.scan_metric_combo.addItems(["band_power", "snr_relative", "snr_absolute"])
+        self.scan_metric_combo.addItem("band_power", "band_power")
+        self.scan_metric_combo.addItem("snr_relative (experimental)", "snr_relative")
+        self.scan_metric_combo.addItem("snr_absolute (experimental)", "snr_absolute")
         self.scan_center_mode_combo = QComboBox(config_group)
-        self.scan_center_mode_combo.addItems(["tracking_relative", "current_position"])
+        self.scan_center_mode_combo.addItem("tracking_relative", "tracking_relative")
+        self.scan_center_mode_combo.addItem("current_position", "current_position")
         self.scan_peak_estimator_combo = QComboBox(config_group)
-        self.scan_peak_estimator_combo.addItems(["best_sample", "four_point_divergence"])
+        self.scan_peak_estimator_combo.addItem("best_sample", "best_sample")
+        self.scan_peak_estimator_combo.addItem("four_point_divergence (experimental)", "four_point_divergence")
 
         self.scan_start_button = QPushButton("Start", config_group)
         self.scan_pause_button = QPushButton("Pause", config_group)
@@ -293,11 +300,11 @@ class ScanUiMixin:
         self.scan_span_spin.valueChanged.connect(lambda *_args: self._update_scan_error_plot(self._scan_error_history))
 
     def _build_scan_config(self) -> dict:
-        center_mode = self.scan_center_mode_combo.currentText()
+        center_mode = self._scan_combo_value(self.scan_center_mode_combo, "tracking_relative")
         center_az, center_el = (0.0, 0.0) if center_mode == "tracking_relative" else self._scan_current_antenna_center()
         sdr_settings = self._scan_current_sdr_measure_settings()
         return {
-            "strategy": self.scan_strategy_combo.currentText(),
+            "strategy": self._scan_combo_value(self.scan_strategy_combo, "grid"),
             "center_mode": center_mode,
             "center_az_deg": center_az,
             "center_el_deg": center_el,
@@ -310,14 +317,24 @@ class ScanUiMixin:
             "integration_s": sdr_settings["integration_s"],
             "bandwidth_hz": sdr_settings["bandwidth_hz"],
             "band_offset_hz": sdr_settings["band_offset_hz"],
-            "metric": self.scan_metric_combo.currentText(),
-            "peak_estimator": self.scan_peak_estimator_combo.currentText(),
+            "metric": self._scan_combo_value(self.scan_metric_combo, "band_power"),
+            "peak_estimator": self._scan_combo_value(self.scan_peak_estimator_combo, "best_sample"),
             "coarse_span_deg": self.scan_span_spin.value(),
             "coarse_step_deg": self.scan_step_spin.value(),
             "fine_span_deg": max(0.2, self.scan_span_spin.value() / 4.0),
             "fine_step_deg": max(0.05, self.scan_step_spin.value() / 4.0),
             "grid_step_deg": max(0.05, self.scan_step_spin.value()),
         }
+
+    @staticmethod
+    def _scan_combo_value(combo: QComboBox, default: str) -> str:
+        value = combo.currentData()
+        if isinstance(value, str) and value:
+            return value
+        text = combo.currentText().strip()
+        if not text:
+            return default
+        return text.split(" ", 1)[0].strip() or default
 
     def _scan_current_antenna_center(self) -> tuple[float, float]:
         antenna_state = getattr(getattr(self, "axis_client", None), "antenna", None)
@@ -706,7 +723,12 @@ class ScanUiMixin:
         else:
             self.scan_heatmap_widget.clear_scan_bounds()
         current_result = getattr(self, "_scan_current_result", None) or {}
-        strategy = str(current_result.get("strategy", self.scan_strategy_combo.currentText() if hasattr(self, "scan_strategy_combo") else "grid")).strip().lower()
+        strategy = str(
+            current_result.get(
+                "strategy",
+                self._scan_combo_value(self.scan_strategy_combo, "grid") if hasattr(self, "scan_strategy_combo") else "grid",
+            )
+        ).strip().lower()
         if strategy in {"grid", "adaptive"} and self._scan_plan_points:
             cell_width, cell_height = self._scan_grid_cell_size()
             values = [float(point.get("value", 0.0)) for point in self._scan_samples]
