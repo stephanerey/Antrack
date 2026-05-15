@@ -101,6 +101,7 @@ class ScanUiMixin:
         self.scan_repeat_interval_spin.setRange(1.0, 3600.0)
         self.scan_repeat_interval_spin.setValue(60.0)
         self.scan_repeat_interval_spin.setSuffix(" s")
+        self.scan_repeat_checkbox.setChecked(True)
         self.scan_progress_label = QLabel("-", config_group)
         self.scan_best_label = QLabel("-", config_group)
         self.scan_offset_label = QLabel("-", config_group)
