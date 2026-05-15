@@ -409,7 +409,7 @@ class Tracker:
                         az_rate = getattr(getattr(self.axis_client_qt, 'antenna', None), 'az_rate', None)
                         el_rate = getattr(getattr(self.axis_client_qt, 'antenna', None), 'el_rate', None)
                         server_st = getattr(getattr(self.axis_client_qt, 'axisClient', None), 'server_status', None)
-                        log.info(
+                        log.debug(
                             "DECIDE tel_ok=%s set_ok=%s | az_cur=%.3f el_cur=%.3f | az_set=%.3f el_set=%.3f | "
                             "err=(%.2f, %.2f) blocked=(%s,%s) thr=(%.2f, %.2f) need=(%s,%s) desired=(%s,%s) | "
                             "endstop=(%s,%s) setrate=(%s,%s) rate=(%s,%s) server=%s",
@@ -471,11 +471,11 @@ class Tracker:
     def _stop_motors(self):
         """Arrête AZ et EL proprement via le core."""
         try:
-            logging.getLogger("Tracker").info("FORCE STOP motors (Tracker._stop_motors)")
+            logging.getLogger("Tracker").debug("FORCE STOP motors (Tracker._stop_motors)")
             self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.stop_az)
             self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.stop_el)
             self.axis_client_qt.axisClient.axis_status['azimuth'] = AxisStatus.MOTION_AZ_STOP
             self.axis_client_qt.axisClient.axis_status['elevation'] = AxisStatus.MOTION_EL_STOP
         except Exception as e:
-            logging.getLogger("Tracker").info(f"FORCE STOP motors error: {e}")
+            logging.getLogger("Tracker").debug(f"FORCE STOP motors error: {e}")
             pass

@@ -205,7 +205,7 @@ class ScanSession(QObject):
         current = int(config.get("_progress_current", 0))
         total = int(config.get("_progress_total", 0))
         self.progress_updated.emit({"current": current, "total": total, "point": progress_snapshot, "stage": "move"})
-        self.logger.info(
+        self.logger.debug(
             "[ScanPoint] idx=%d/%d target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f phase=move",
             current,
             total,
@@ -262,7 +262,7 @@ class ScanSession(QObject):
         if all(isinstance(value, (int, float)) for value in (actual_el, theoretical_el_live)):
             actual_offset_el = float(actual_el) - float(theoretical_el_live)
             offset_error_el = float(actual_offset_el) - requested_offset_el
-        self.logger.info(
+        self.logger.debug(
             "[ScanPoint] idx=%d/%d target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f actual_az=%s actual_el=%s set_az=%s set_el=%s actual_offset_az=%s actual_offset_el=%s offset_error_az=%s offset_error_el=%s phase=measure",
             current,
             total,
@@ -296,7 +296,7 @@ class ScanSession(QObject):
         sample["offset_error_az"] = offset_error_az
         sample["offset_error_el"] = offset_error_el
         self.point_measured.emit(sample)
-        self.logger.info(
+        self.logger.debug(
             "[ScanPoint] idx=%d/%d value=%.3f target_az=%.3f target_el=%.3f theo_az=%.3f theo_el=%.3f offset_az=%.3f offset_el=%.3f actual_az=%s actual_el=%s actual_offset_az=%s actual_offset_el=%s offset_error_az=%s offset_error_el=%s",
             current,
             total,

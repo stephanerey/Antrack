@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -88,6 +89,12 @@ class ScanUiMixin:
         self.scan_peak_estimator_combo = QComboBox(config_group)
         self.scan_peak_estimator_combo.addItem("best_sample", "best_sample")
         self.scan_peak_estimator_combo.addItem("four_point_divergence (experimental)", "four_point_divergence")
+        self.scan_strategy_info_button = QToolButton(config_group)
+        self.scan_strategy_info_button.setText("i")
+        self.scan_strategy_info_button.setFixedSize(18, 18)
+        self.scan_strategy_info_button.setAutoRaise(True)
+        self.scan_strategy_info_button.setToolTip(self._scan_strategy_info_tooltip())
+        self.scan_strategy_info_button.setToolTipDuration(30000)
 
         self.scan_start_button = QPushButton("Start", config_group)
         self.scan_pause_button = QPushButton("Pause", config_group)
@@ -115,8 +122,14 @@ class ScanUiMixin:
         repeat_row.setContentsMargins(0, 0, 0, 0)
         repeat_row.addWidget(self.scan_repeat_checkbox)
         repeat_row.addWidget(self.scan_repeat_interval_spin)
+        strategy_label_row = QHBoxLayout()
+        strategy_label_row.setContentsMargins(0, 0, 0, 0)
+        strategy_label_row.setSpacing(4)
+        strategy_label_row.addWidget(QLabel("Strategy"))
+        strategy_label_row.addWidget(self.scan_strategy_info_button)
+        strategy_label_row.addStretch(1)
 
-        config_layout.addWidget(QLabel("Strategy"), 0, 0)
+        config_layout.addLayout(strategy_label_row, 0, 0)
         config_layout.addWidget(self.scan_strategy_combo, 0, 1)
         config_layout.addWidget(QLabel("Center Mode"), 0, 2)
         config_layout.addWidget(self.scan_center_mode_combo, 0, 3)
@@ -336,6 +349,50 @@ class ScanUiMixin:
         if not text:
             return default
         return text.split(" ", 1)[0].strip() or default
+
+    @staticmethod
+    def _scan_strategy_info_tooltip() -> str:
+        return """
+        <div style="min-width: 520px;">
+          <b>Scan strategies</b>
+          <p><b>grid</b> - Stable/recommended. Measures every point on a regular AZ/EL offset grid.</p>
+          <pre style="font-family: Consolas, monospace;">
+EL +1  o--o--o--o--o
+   +0.5 o--o--o--o--o
+    0   o--o--o--o--o
+   -0.5 o--o--o--o--o
+   -1   o--o--o--o--o
+        -1 -.5 0 +.5 +1 AZ
+          </pre>
+          <p><b>cross (experimental)</b> - Measures one horizontal and one vertical cut through the center.
+          Faster, but can miss a peak that is off the two axes.</p>
+          <pre style="font-family: Consolas, monospace;">
+          o
+          o
+    o--o--X--o--o
+          o
+          o
+          </pre>
+          <p><b>spiral (experimental)</b> - Starts near the center and expands outward.
+          Useful for quick searches, but the heatmap projection is less direct.</p>
+          <pre style="font-family: Consolas, monospace;">
+        o-o-o
+        |   |
+        o X-o
+        |
+        o-o-o
+          </pre>
+          <p><b>adaptive (experimental)</b> - Coarse grid first, then a finer grid around the best coarse point.
+          Intended to reduce scan time, still under validation.</p>
+          <pre style="font-family: Consolas, monospace;">
+    coarse:  o-----o-----o
+             |     |     |
+             o-----*-----o
+             |   fine    |
+             o--o--o--o--o
+          </pre>
+        </div>
+        """
 
     def _scan_current_antenna_center(self) -> tuple[float, float]:
         antenna_state = getattr(getattr(self, "axis_client", None), "antenna", None)
@@ -603,7 +660,7 @@ class ScanUiMixin:
             if settled:
                 stable_cycles += 1
                 if stable_cycles >= stable_cycles_required:
-                    self.logger.info(
+                    self.logger.debug(
                         "[ScanSettle] ok target_az=%.3f target_el=%.3f req_offset_az=%.3f req_offset_el=%.3f actual_offset_az=%s actual_offset_el=%s offset_error_az=%s offset_error_el=%s",
                         float(point.get("az", 0.0)),
                         float(point.get("el", 0.0)),
@@ -627,7 +684,7 @@ class ScanUiMixin:
             offset_el_text = f"{float(actual_offset_el):+.2f}" if isinstance(actual_offset_el, (int, float)) else "?"
             off_err_az_text = f"{float(offset_error_az):+.2f}" if isinstance(offset_error_az, (int, float)) else "?"
             off_err_el_text = f"{float(offset_error_el):+.2f}" if isinstance(offset_error_el, (int, float)) else "?"
-            self.logger.info(
+            self.logger.debug(
                 "[ScanSettle] timeout target_az=%.3f target_el=%.3f req_offset_az=%.3f req_offset_el=%.3f actual_offset_az=%s actual_offset_el=%s offset_error_az=%s offset_error_el=%s actual_az=%s actual_el=%s set_az=%s set_el=%s",
                 float(point.get("az", 0.0)),
                 float(point.get("el", 0.0)),
