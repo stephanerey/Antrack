@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import csv
 import math
 import threading
 import time
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QObject, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -16,8 +17,10 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QFileDialog,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -85,6 +88,7 @@ class ScanUiMixin:
         self.scan_stop_button = QPushButton("Stop", config_group)
         self.scan_apply_button = QPushButton("Apply Offset", config_group)
         self.scan_save_button = QPushButton("Save Offset", config_group)
+        self.scan_export_error_csv_button = QPushButton("Export Error CSV", config_group)
         self.scan_repeat_checkbox = QCheckBox("Repeat While Tracking", config_group)
         self.scan_repeat_interval_spin = QDoubleSpinBox(config_group)
         self.scan_repeat_interval_spin.setRange(1.0, 3600.0)
@@ -93,6 +97,12 @@ class ScanUiMixin:
         self.scan_progress_label = QLabel("-", config_group)
         self.scan_best_label = QLabel("-", config_group)
         self.scan_offset_label = QLabel("-", config_group)
+        self.scan_orbit_scan_label = QLabel("-", config_group)
+        self.scan_next_wait_label = QLabel("-", config_group)
+        self.scan_next_wait_bar = QProgressBar(config_group)
+        self.scan_next_wait_bar.setRange(0, 100)
+        self.scan_next_wait_bar.setValue(0)
+        self.scan_next_wait_bar.setTextVisible(False)
         repeat_row = QHBoxLayout()
         repeat_row.setContentsMargins(0, 0, 0, 0)
         repeat_row.addWidget(self.scan_repeat_checkbox)
@@ -120,12 +130,18 @@ class ScanUiMixin:
         config_layout.addWidget(self.scan_metric_combo, 3, 1)
         config_layout.addWidget(QLabel("Peak Estimator"), 3, 2)
         config_layout.addWidget(self.scan_peak_estimator_combo, 3, 3)
+        config_layout.addWidget(self.scan_export_error_csv_button, 3, 4, 1, 2)
         config_layout.addWidget(QLabel("Progress"), 4, 0)
         config_layout.addWidget(self.scan_progress_label, 4, 1)
-        config_layout.addWidget(QLabel("Best"), 4, 2)
-        config_layout.addWidget(self.scan_best_label, 4, 3)
-        config_layout.addWidget(QLabel("Offset"), 4, 4)
-        config_layout.addWidget(self.scan_offset_label, 4, 5)
+        config_layout.addWidget(QLabel("Orbit Scan"), 4, 2)
+        config_layout.addWidget(self.scan_orbit_scan_label, 4, 3)
+        config_layout.addWidget(QLabel("Next"), 4, 4)
+        config_layout.addWidget(self.scan_next_wait_label, 4, 5)
+        config_layout.addWidget(QLabel("Best"), 5, 0)
+        config_layout.addWidget(self.scan_best_label, 5, 1)
+        config_layout.addWidget(QLabel("Offset"), 5, 2)
+        config_layout.addWidget(self.scan_offset_label, 5, 3)
+        config_layout.addWidget(self.scan_next_wait_bar, 5, 4, 1, 2)
         config_layout.setColumnStretch(1, 1)
         config_layout.setColumnStretch(3, 1)
 
@@ -261,12 +277,20 @@ class ScanUiMixin:
         self._scan_error_history = []
         self._scan_repeat_active = False
         self._scan_repeat_pending = False
+        self._scan_orbit_scan_count = 0
+        self._scan_repeat_interval_s = 0.0
+        self._scan_repeat_due_monotonic = 0.0
+        self._scan_repeat_countdown_timer = QTimer(container)
+        self._scan_repeat_countdown_timer.setInterval(500)
+        self._scan_repeat_countdown_timer.timeout.connect(self._update_scan_repeat_countdown)
         self.scan_start_button.clicked.connect(self.start_scan_session)
         self.scan_pause_button.clicked.connect(self.scan_session.pause)
         self.scan_resume_button.clicked.connect(self.scan_session.resume)
         self.scan_stop_button.clicked.connect(self._stop_scan_session)
         self.scan_apply_button.clicked.connect(lambda: self._apply_scan_offset(False))
         self.scan_save_button.clicked.connect(lambda: self._apply_scan_offset(True))
+        self.scan_export_error_csv_button.clicked.connect(self._export_scan_error_csv)
+        self.scan_span_spin.valueChanged.connect(lambda *_args: self._update_scan_error_plot(self._scan_error_history))
 
     def _build_scan_config(self) -> dict:
         center_mode = self.scan_center_mode_combo.currentText()
@@ -334,10 +358,16 @@ class ScanUiMixin:
     def _start_scan_sequence(self, *, repeating: bool) -> None:
         config = self._build_scan_config()
         if not self._prepare_scan_session(config):
+            self._scan_repeat_pending = False
+            self._cancel_scan_repeat_countdown()
             return
         if not repeating:
             self._scan_error_history = []
             self._scan_repeat_active = bool(self.scan_repeat_checkbox.isChecked())
+            self._scan_orbit_scan_count = 0
+        self._cancel_scan_repeat_countdown()
+        self._scan_orbit_scan_count += 1
+        self.scan_orbit_scan_label.setText(f"{self._scan_orbit_scan_count}")
         self._scan_repeat_pending = False
         self._scan_samples = []
         self._scan_current_result = None
@@ -430,6 +460,7 @@ class ScanUiMixin:
     def _stop_scan_session(self) -> None:
         self._scan_repeat_active = False
         self._scan_repeat_pending = False
+        self._cancel_scan_repeat_countdown()
         self.scan_session.stop()
         self._reset_scan_probe_offset(stop_fixed_positioner=True)
 
@@ -904,6 +935,9 @@ class ScanUiMixin:
 
     def _update_scan_error_plot(self, error_trace: list[dict]) -> None:
         points = [point for point in error_trace if isinstance(point, dict)]
+        y_extent = max(0.1, float(self.scan_span_spin.value()) / 2.0)
+        self.scan_az_history_plot.setYRange(-y_extent, y_extent, padding=0.0)
+        self.scan_el_history_plot.setYRange(-y_extent, y_extent, padding=0.0)
         if not points:
             self.scan_az_error_curve.clear()
             self.scan_el_error_curve.clear()
@@ -925,18 +959,48 @@ class ScanUiMixin:
 
     def _schedule_next_scan_sequence(self) -> bool:
         if not (self._scan_repeat_active and getattr(self, "tracker", None) and self.tracker.is_running()):
+            self._cancel_scan_repeat_countdown()
             return False
         if self._scan_repeat_pending:
             return True
         interval_s = max(1.0, float(self.scan_repeat_interval_spin.value()))
         interval_ms = int(interval_s * 1000.0)
         self._scan_repeat_pending = True
+        self._scan_repeat_interval_s = interval_s
+        self._scan_repeat_due_monotonic = time.monotonic() + interval_s
+        self._update_scan_repeat_countdown()
+        self._scan_repeat_countdown_timer.start()
         self.status_bar.showMessage(f"Next scan sequence in {interval_s:.0f}s", 3000)
         pg.QtCore.QTimer.singleShot(
             interval_ms,
             lambda: self._start_scan_sequence(repeating=True) if self._scan_repeat_pending else None,
         )
         return True
+
+    def _cancel_scan_repeat_countdown(self) -> None:
+        timer = getattr(self, "_scan_repeat_countdown_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._scan_repeat_due_monotonic = 0.0
+        self._scan_repeat_interval_s = 0.0
+        if hasattr(self, "scan_next_wait_bar"):
+            self.scan_next_wait_bar.setValue(0)
+        if hasattr(self, "scan_next_wait_label"):
+            self.scan_next_wait_label.setText("-")
+
+    def _update_scan_repeat_countdown(self) -> None:
+        if not self._scan_repeat_pending or self._scan_repeat_due_monotonic <= 0.0:
+            self._cancel_scan_repeat_countdown()
+            return
+        remaining_s = max(0.0, self._scan_repeat_due_monotonic - time.monotonic())
+        interval_s = max(1.0, float(self._scan_repeat_interval_s))
+        percent = int(round((remaining_s / interval_s) * 100.0))
+        self.scan_next_wait_bar.setValue(max(0, min(100, percent)))
+        self.scan_next_wait_label.setText(f"{remaining_s:.0f}s -> scan {self._scan_orbit_scan_count + 1}")
+        if remaining_s <= 0.0:
+            self.scan_next_wait_bar.setValue(0)
+            self.scan_next_wait_label.setText(f"starting scan {self._scan_orbit_scan_count + 1}")
+            self._scan_repeat_countdown_timer.stop()
 
     def _update_profile_markers(self, peak: dict) -> None:
         relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
@@ -978,6 +1042,7 @@ class ScanUiMixin:
         if state in {"stopped", "error"}:
             self._scan_repeat_active = False
             self._scan_repeat_pending = False
+            self._cancel_scan_repeat_countdown()
             self._reset_scan_probe_offset(stop_fixed_positioner=True)
             self._scan_current_point = None
             self._refresh_scan_path_visuals()
@@ -992,6 +1057,60 @@ class ScanUiMixin:
         el_offset = float(self._scan_current_result.get("el_offset_deg", 0.0))
         self.apply_scan_offset(az_offset, el_offset, persist=persist)
 
+    def _export_scan_error_csv(self) -> None:
+        points = [point for point in getattr(self, "_scan_error_history", []) if isinstance(point, dict)]
+        if not points:
+            QMessageBox.information(self, "Scan", "Aucune courbe d'erreur a exporter.")
+            return
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Exporter les erreurs de scan",
+            "scan_error_curve.csv",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        fieldnames = [
+            "index",
+            "timestamp",
+            "theoretical_az_deg",
+            "measured_az_deg",
+            "az_error_deg",
+            "theoretical_el_deg",
+            "measured_el_deg",
+            "el_error_deg",
+            "angular_error_deg",
+            "value",
+            "method",
+            "confidence",
+        ]
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                writer.writeheader()
+                for index, point in enumerate(points, start=1):
+                    writer.writerow(
+                        {
+                            "index": index,
+                            "timestamp": point.get("timestamp", ""),
+                            "theoretical_az_deg": point.get("theoretical_az", ""),
+                            "measured_az_deg": point.get("az", ""),
+                            "az_error_deg": point.get("az_error_deg", ""),
+                            "theoretical_el_deg": point.get("theoretical_el", ""),
+                            "measured_el_deg": point.get("el", ""),
+                            "el_error_deg": point.get("el_error_deg", ""),
+                            "angular_error_deg": point.get("angular_error_deg", ""),
+                            "value": point.get("value", ""),
+                            "method": point.get("method", ""),
+                            "confidence": point.get("confidence", ""),
+                        }
+                    )
+        except OSError as exc:
+            QMessageBox.warning(self, "Scan", f"Export CSV impossible: {exc}")
+            return
+        self.status_bar.showMessage(f"Scan error CSV exported: {path}", 5000)
+
     def close_scan_ui(self) -> None:
         if getattr(self, "scan_session", None) is not None:
             self.scan_session.stop()
+        self._cancel_scan_repeat_countdown()
