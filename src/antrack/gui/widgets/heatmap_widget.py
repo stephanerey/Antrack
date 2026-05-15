@@ -26,14 +26,16 @@ class HeatmapWidget(QWidget):
         self.plot.addItem(self.image)
         self.sample_cells = pg.ScatterPlotItem(symbol="s", size=18, pen=pg.mkPen(220, 220, 220, 100))
         self.planned_marker = pg.ScatterPlotItem(size=8, brush=pg.mkBrush(180, 180, 180, 90), pen=pg.mkPen(120, 120, 120, 120))
-        self.measured_marker = pg.ScatterPlotItem(size=9, brush=pg.mkBrush(80, 220, 120, 180), pen=pg.mkPen(20, 60, 20, 160))
         self.current_marker = pg.ScatterPlotItem(size=13, brush=pg.mkBrush(255, 170, 40, 220), pen=pg.mkPen("k"))
-        self.best_marker = pg.ScatterPlotItem(size=12, brush=pg.mkBrush(255, 255, 255, 220), pen=pg.mkPen("k"))
+        self.best_outline = QGraphicsRectItem()
+        self.best_outline.setBrush(pg.mkBrush(0, 0, 0, 0))
+        self.best_outline.setPen(pg.mkPen(255, 40, 40, width=3))
+        self.best_outline.setZValue(20)
+        self.best_outline.setVisible(False)
         self.plot.addItem(self.sample_cells)
         self.plot.addItem(self.planned_marker)
-        self.plot.addItem(self.measured_marker)
         self.plot.addItem(self.current_marker)
-        self.plot.addItem(self.best_marker)
+        self.plot.addItem(self.best_outline)
         self._grid_cell_items: list[QGraphicsRectItem] = []
 
     def set_heatmap(self, az_values, el_values, grid_values) -> None:
@@ -88,8 +90,11 @@ class HeatmapWidget(QWidget):
             self.plot.addItem(item)
             self._grid_cell_items.append(item)
 
-    def set_best_point(self, az_deg: float, el_deg: float) -> None:
-        self.best_marker.setData([az_deg], [el_deg])
+    def set_best_point(self, az_deg: float, el_deg: float, *, cell_width: float = 0.1, cell_height: float = 0.1) -> None:
+        width = max(1e-6, float(cell_width))
+        height = max(1e-6, float(cell_height))
+        self.best_outline.setRect(float(az_deg) - width / 2.0, float(el_deg) - height / 2.0, width, height)
+        self.best_outline.setVisible(True)
 
     def set_scan_bounds(self, x_min: float, x_max: float, y_min: float, y_max: float) -> None:
         x_range = (float(x_min), float(x_max))
@@ -136,10 +141,6 @@ class HeatmapWidget(QWidget):
             self.planned_marker.setData([point[0] for point in planned], [point[1] for point in planned])
         else:
             self.planned_marker.clear()
-        if measured:
-            self.measured_marker.setData([point[0] for point in measured], [point[1] for point in measured])
-        else:
-            self.measured_marker.clear()
         if current_point is not None:
             self.current_marker.setData([current_point[0]], [current_point[1]])
         else:
@@ -173,9 +174,8 @@ class HeatmapWidget(QWidget):
         self._clear_grid_cells()
         self.sample_cells.clear()
         self.planned_marker.clear()
-        self.measured_marker.clear()
         self.current_marker.clear()
-        self.best_marker.clear()
+        self.best_outline.setVisible(False)
         self.clear_scan_bounds()
 
     def _clear_grid_cells(self) -> None:

@@ -399,10 +399,7 @@ class ScanUiMixin:
         self._update_scan_profile_axes(self._scan_uses_tracking_relative(config))
         self.scan_horizontal_curve.clear()
         self.scan_vertical_curve.clear()
-        self.scan_horizontal_theoretical_marker.clear()
-        self.scan_horizontal_real_marker.clear()
-        self.scan_vertical_theoretical_marker.clear()
-        self.scan_vertical_real_marker.clear()
+        self._clear_scan_profile_markers()
         self._update_scan_error_plot(self._scan_error_history)
         self._scan_active_center_mode = str(config.get("center_mode", "fixed")).strip().lower()
         self._refresh_scan_path_visuals()
@@ -936,7 +933,8 @@ class ScanUiMixin:
         self.scan_offset_label.setText(f"dAZ={result.get('az_offset_deg', 0.0):.3f} dEL={result.get('el_offset_deg', 0.0):.3f}")
         best_coords = self._scan_plot_coordinates(best)
         if best_coords is not None:
-            self.scan_heatmap_widget.set_best_point(best_coords[0], best_coords[1])
+            cell_width, cell_height = self._scan_grid_cell_size()
+            self.scan_heatmap_widget.set_best_point(best_coords[0], best_coords[1], cell_width=cell_width, cell_height=cell_height)
         if result.get("strategy") == "spiral" and "heatmap" in result:
             heatmap = result["heatmap"]
             self.scan_heatmap_widget.set_heatmap(heatmap["az_values"], heatmap["el_values"], heatmap["grid"])
@@ -1053,6 +1051,12 @@ class ScanUiMixin:
         self.scan_horizontal_real_marker.setData(horizontal_real_points)
         self.scan_vertical_theoretical_marker.setData(vertical_theoretical_points)
         self.scan_vertical_real_marker.setData(vertical_real_points)
+
+    def _clear_scan_profile_markers(self) -> None:
+        self.scan_horizontal_theoretical_marker.setData([])
+        self.scan_horizontal_real_marker.setData([])
+        self.scan_vertical_theoretical_marker.setData([])
+        self.scan_vertical_real_marker.setData([])
 
     def _on_scan_state_changed(self, state: str) -> None:
         if state == "error" and self._scan_repeat_active and getattr(self, "tracker", None) and self.tracker.is_running():
