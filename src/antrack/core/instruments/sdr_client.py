@@ -76,9 +76,7 @@ class SdrClient(QObject):
         self.thread_manager = thread_manager
         self.logger = logger or logging.getLogger("SdrClient")
         self._thread_name = "SdrStream"
-        self._spectrum_thread_name = "SdrSpectrum"
         self._thread = None
-        self._spectrum_thread = None
         self._thread_stop = threading.Event()
         self._stream_reconfigure_requested = threading.Event()
         self._spectrum_wakeup = threading.Event()
@@ -107,6 +105,7 @@ class SdrClient(QObject):
         self._stream = None
         self._sdr = None
         self._read_buffer: np.ndarray | None = None
+        self._spectrum_future = None
         self._timeout_code = int(getattr(SoapySDR, "SOAPY_SDR_TIMEOUT", -1)) if SoapySDR else -1
         self._overflow_code = int(getattr(SoapySDR, "SOAPY_SDR_OVERFLOW", -4)) if SoapySDR else -4
         self._last_overflow_log_t = 0.0
@@ -117,6 +116,8 @@ class SdrClient(QObject):
         self.hwinfo: dict[str, Any] = {}
 
         cfg = self._sdr_settings()
+        perf = self._performance_settings()
+        self.cpu_optimized = bool(self._to_bool(perf.get("cpu_optimized", False)))
         self.sample_rate = float(cfg.get("sample_rate_hz", 2_000_000.0))
         self.center_freq = float(cfg.get("center_freq_hz", 137_000_000.0))
         self.receiver_freq_hz = float(cfg.get("receiver_freq_hz", self.center_freq))
@@ -146,6 +147,7 @@ class SdrClient(QObject):
             self.if_mode = "auto"
         self.source_index = int(cfg.get("source_index", 0))
         self.source_key = str(cfg.get("source_key", "")).strip()
+        self._apply_cpu_optimized_profile()
         self._heal_frequency_state()
         self._plot_interval_s = 1.0 / max(1.0, self.fft_fps)
         self._fft_ema_alpha = float(SMOOTHING_PRESETS[self.smoothing])
@@ -217,6 +219,8 @@ class SdrClient(QObject):
 
     def _clamp_fft_size(self, fft_size: int) -> int:
         max_fft = int(max(1024, fft_max_for_sample_rate(self.sample_rate, self.buff_size)))
+        if self.cpu_optimized:
+            max_fft = min(max_fft, self._cpu_optimized_max_fft_size())
         if fft_size >= max_fft:
             return max_fft
         exponent = int(np.floor(np.log2(max(1024, int(fft_size)))))
@@ -269,6 +273,8 @@ class SdrClient(QObject):
 
     def available_fft_sizes(self) -> list[int]:
         max_fft = int(max(1024, fft_max_for_sample_rate(self.sample_rate, self.buff_size)))
+        if self.cpu_optimized:
+            max_fft = min(max_fft, self._cpu_optimized_max_fft_size())
         preferred = [
             1024,
             2048,
@@ -304,6 +310,28 @@ class SdrClient(QObject):
         if not isinstance(self.settings, dict):
             return {}
         return self.settings.get("SDR", self.settings.get("sdr", {})) or {}
+
+    def _performance_settings(self) -> dict:
+        if not isinstance(self.settings, dict):
+            return {}
+        return self.settings.get("PERFORMANCE", self.settings.get("performance", {})) or {}
+
+    def _cpu_optimized_max_fft_size(self) -> int:
+        perf = self._performance_settings()
+        return int(max(1024, perf.get("max_fft_size", 2048)))
+
+    def _apply_cpu_optimized_profile(self) -> None:
+        if not self.cpu_optimized:
+            return
+        perf = self._performance_settings()
+        self.fft_fps = float(max(1.0, min(self.fft_fps, float(perf.get("fft_fps", self.fft_fps)))))
+        plot_cap = self._normalize_plot_refresh_fps(perf.get("plot_refresh_fps", self.plot_refresh_fps))
+        if plot_cap is not None:
+            if self.plot_refresh_fps is None:
+                self.plot_refresh_fps = plot_cap
+            else:
+                self.plot_refresh_fps = float(max(1.0, min(self.plot_refresh_fps, plot_cap)))
+        self.fft_size = int(self._clamp_fft_size(self.fft_size))
 
     def _emit_status(self, message: str) -> None:
         self.logger.info(message)
@@ -583,13 +611,10 @@ class SdrClient(QObject):
     def _wait_for_stream_thread_stopped(self, timeout_s: float = 1.5) -> bool:
         return self._wait_for_named_thread_stopped(self._thread_name, self._thread, timeout_s)
 
-    def _wait_for_spectrum_thread_stopped(self, timeout_s: float = 1.5) -> bool:
-        return self._wait_for_named_thread_stopped(self._spectrum_thread_name, self._spectrum_thread, timeout_s)
-
     def start(self) -> None:
         if self.running:
             return
-        if not self._wait_for_stream_thread_stopped(timeout_s=1.5) or not self._wait_for_spectrum_thread_stopped(timeout_s=1.5):
+        if not self._wait_for_stream_thread_stopped(timeout_s=1.5):
             self._emit_error("SDR stream restart blocked: previous worker thread is still running.")
             return
         if self.mode == "hardware":
@@ -613,14 +638,12 @@ class SdrClient(QObject):
         self._perf_emit_s = 0.0
         self._last_perf_emit = time.monotonic()
         self._started_emitted = False
+        self._spectrum_future = None
         if self.thread_manager is not None:
             self.thread_manager.start_thread(self._thread_name, self._stream_loop)
-            self.thread_manager.start_thread(self._spectrum_thread_name, self._spectrum_loop)
         else:
             self._thread = threading.Thread(target=self._stream_loop, name="SdrStream", daemon=True)
-            self._spectrum_thread = threading.Thread(target=self._spectrum_loop, name="SdrSpectrum", daemon=True)
             self._thread.start()
-            self._spectrum_thread.start()
 
     def stop(self) -> None:
         self._thread_stop.set()
@@ -631,17 +654,10 @@ class SdrClient(QObject):
                 self.thread_manager.stop_thread(self._thread_name)
             except Exception:
                 pass
-            try:
-                self.thread_manager.stop_thread(self._spectrum_thread_name)
-            except Exception:
-                pass
         else:
             if self._thread and self._thread.is_alive():
                 self._thread.join(timeout=1.0)
-            if self._spectrum_thread and self._spectrum_thread.is_alive():
-                self._spectrum_thread.join(timeout=1.0)
         self._wait_for_stream_thread_stopped(timeout_s=1.5)
-        self._wait_for_spectrum_thread_stopped(timeout_s=1.5)
         if not self.running:
             self._close_stream()
         if getattr(self, "_started_emitted", False):
@@ -657,6 +673,7 @@ class SdrClient(QObject):
 
     def _stream_loop(self) -> None:
         worker = self.thread_manager.get_worker(self._thread_name) if self.thread_manager is not None else None
+        last_plot_push = 0.0
         try:
             if self.mode == "hardware":
                 self._open_stream_with_recovery()
@@ -673,33 +690,24 @@ class SdrClient(QObject):
                     time.sleep(0.05)
                     continue
                 self._cache_iq_block(iq)
+                self._drain_spectrum_future()
+                now = time.monotonic()
+                interval_s = float(max(0.01, self._plot_interval_s))
+                wake_requested = self._spectrum_wakeup.is_set()
+                if wake_requested:
+                    self._spectrum_wakeup.clear()
+                if wake_requested or (now - last_plot_push) >= interval_s:
+                    if not self._schedule_spectrum_publish(timestamp=now):
+                        self._publish_spectrum(timestamp=now)
+                    last_plot_push = now
+                if now - self._last_perf_emit >= self._perf_emit_interval_s:
+                    self._emit_perf_snapshot(now)
         except Exception as exc:
             self.logger.exception("SDR runtime error: %s", exc)
             self._emit_error(f"SDR runtime error: {exc}")
         finally:
+            self._drain_spectrum_future(block=True)
             self._close_stream()
-
-    def _spectrum_loop(self) -> None:
-        worker = self.thread_manager.get_worker(self._spectrum_thread_name) if self.thread_manager is not None else None
-        last_plot_push = 0.0
-        while not self._thread_stop.is_set():
-            if worker is not None and getattr(worker, "abort", False):
-                break
-            interval_s = float(max(0.01, self._plot_interval_s))
-            now = time.monotonic()
-            remaining = max(0.0, interval_s - (now - last_plot_push))
-            wait_s = min(0.1, remaining) if remaining > 0.0 else 0.0
-            self._spectrum_wakeup.wait(timeout=wait_s)
-            self._spectrum_wakeup.clear()
-            if self._thread_stop.is_set():
-                break
-            now = time.monotonic()
-            if now - last_plot_push < interval_s:
-                continue
-            self._publish_spectrum(timestamp=now)
-            if now - self._last_perf_emit >= self._perf_emit_interval_s:
-                self._emit_perf_snapshot(now)
-            last_plot_push = now
 
     def _apply_pending_stream_reconfigure(self) -> None:
         if not self._stream_reconfigure_requested.is_set():
@@ -943,24 +951,93 @@ class SdrClient(QObject):
         """Compute the display spectrum in dB with the selected smoothing preset."""
         return self._compute_spectrum_snapshot(iq_data, smooth_trace=self.smoothing != "off")
 
-    def _publish_spectrum(self, *, timestamp: float) -> None:
+    def _schedule_spectrum_publish(self, *, timestamp: float) -> bool:
+        if self.thread_manager is None or not hasattr(self.thread_manager, "submit_task"):
+            return False
+        future = self._spectrum_future
+        if future is not None and not future.done():
+            return True
         fft_iq = self._latest_iq_for_fft()
         if fft_iq is None or fft_iq.size == 0:
-            return
+            return True
+        self._ensure_fft_window()
+        win = None if self._fft_win is None else self._fft_win.copy()
+        self._spectrum_future = self.thread_manager.submit_task(
+            self._compute_spectrum_payload,
+            fft_iq,
+            int(self.fft_size),
+            win,
+            float(self._fft_win_power),
+            float(self.sample_rate),
+            float(self.center_freq),
+            float(timestamp),
+        )
+        return True
+
+    @staticmethod
+    def _compute_spectrum_payload(
+        iq_data: np.ndarray,
+        fft_size: int,
+        fft_window: np.ndarray | None,
+        fft_window_power: float,
+        sample_rate: float,
+        center_freq: float,
+        timestamp: float,
+    ) -> dict[str, Any]:
         start_t = time.perf_counter()
-        raw_spectrum_db = self._compute_raw_spectrum_snapshot(fft_iq)
+        raw_spectrum_db = compute_power_spectrum_db(
+            iq_data,
+            int(fft_size),
+            window=fft_window,
+            window_power=float(fft_window_power),
+        )
         after_fft_t = time.perf_counter()
+        freqs = frequency_axis(len(raw_spectrum_db), float(sample_rate), float(center_freq))
+        return {
+            "timestamp": float(timestamp),
+            "raw_spectrum_db": raw_spectrum_db,
+            "freqs": freqs,
+            "fft_s": max(0.0, after_fft_t - start_t),
+        }
+
+    def _drain_spectrum_future(self, *, block: bool = False) -> None:
+        future = self._spectrum_future
+        if future is None:
+            return
+        if not block and not future.done():
+            return
+        try:
+            payload = future.result()
+        except Exception as exc:
+            self.logger.warning("Asynchronous SDR spectrum computation failed: %s", exc)
+            payload = None
+        self._spectrum_future = None
+        if payload:
+            self._apply_spectrum_payload(payload)
+
+    def _apply_spectrum_payload(self, payload: dict[str, Any]) -> None:
+        raw_spectrum_db = payload.get("raw_spectrum_db")
+        freqs = payload.get("freqs")
+        if raw_spectrum_db is None or freqs is None:
+            return
+        start_storage_t = time.perf_counter()
         if self.smoothing != "off" and self._fft_ema_alpha < 0.9999:
             self._fft_db_ema = apply_ema(raw_spectrum_db, self._fft_db_ema, alpha=self._fft_ema_alpha)
             spectrum_db = self._fft_db_ema.astype(np.float32, copy=False)
         else:
             self._fft_db_ema = raw_spectrum_db.astype(np.float32, copy=False)
             spectrum_db = self._fft_db_ema
-        freqs = self._get_freq_axis(len(raw_spectrum_db))
         with self._state_lock:
             self._latest_spectrum_db = spectrum_db.copy()
             self._latest_freqs = freqs.copy()
-        self.data_storage.update({"timestamp": timestamp, "x": freqs, "y": spectrum_db, "history_y": raw_spectrum_db})
+        self.data_storage.update(
+            {
+                "timestamp": float(payload.get("timestamp", time.monotonic())),
+                "x": freqs,
+                "y": spectrum_db,
+                "history_y": raw_spectrum_db,
+            }
+        )
         after_storage_t = time.perf_counter()
         snr_db = compute_snr(spectrum_db, self.snr_mode, self.noise_floor_ref_db)
         try:
@@ -970,9 +1047,25 @@ class SdrClient(QObject):
             pass
         after_emit_t = time.perf_counter()
         self._display_frame_counter += 1
-        self._perf_fft_s += max(0.0, after_fft_t - start_t)
-        self._perf_storage_s += max(0.0, after_storage_t - after_fft_t)
+        self._perf_fft_s += float(payload.get("fft_s", 0.0))
+        self._perf_storage_s += max(0.0, after_storage_t - start_storage_t)
         self._perf_emit_s += max(0.0, after_emit_t - after_storage_t)
+
+    def _publish_spectrum(self, *, timestamp: float) -> None:
+        fft_iq = self._latest_iq_for_fft()
+        if fft_iq is None or fft_iq.size == 0:
+            return
+        start_t = time.perf_counter()
+        raw_spectrum_db = self._compute_raw_spectrum_snapshot(fft_iq)
+        after_fft_t = time.perf_counter()
+        freqs = self._get_freq_axis(len(raw_spectrum_db))
+        payload = {
+            "timestamp": float(timestamp),
+            "raw_spectrum_db": raw_spectrum_db,
+            "freqs": freqs,
+            "fft_s": max(0.0, after_fft_t - start_t),
+        }
+        self._apply_spectrum_payload(payload)
 
     def _emit_perf_snapshot(self, now: float) -> None:
         elapsed = max(1e-6, now - self._last_perf_emit)
@@ -1012,10 +1105,10 @@ class SdrClient(QObject):
         fs = float(max(1.0, self.sample_rate))
         span = float(max(1.0, min(abs(visible_span_hz), fs)))
         width_px = int(max(128, pixel_width))
-        base_fft = select_fft_size(fs, self.buff_size)
-        max_fft = fft_max_for_sample_rate(fs, self.buff_size)
+        base_fft = self._clamp_fft_size(select_fft_size(fs, self.buff_size))
+        max_fft = self._clamp_fft_size(fft_max_for_sample_rate(fs, self.buff_size))
         zoom_target = fs * float(width_px) * 6.0 / span
-        zoom_fft = int(2 ** np.ceil(np.log2(max(1024.0, zoom_target))))
+        zoom_fft = self._clamp_fft_size(int(2 ** np.ceil(np.log2(max(1024.0, zoom_target)))))
         desired = int(min(max_fft, max(base_fft, zoom_fft)))
         if desired == int(self.fft_size):
             return
@@ -1079,7 +1172,7 @@ class SdrClient(QObject):
         self.sample_rate = self._coerce_sample_rate(requested_rate, supported_rates)
         self.bandwidth_hz = float(min(self._max_bandwidth_hz(), max(100.0, float(self.bandwidth_hz))))
         if self.fft_size_mode == "auto":
-            self.fft_size = select_fft_size(self.sample_rate, self.buff_size)
+            self.fft_size = self._clamp_fft_size(select_fft_size(self.sample_rate, self.buff_size))
         else:
             self.fft_size = self._clamp_fft_size(self.fft_size)
         self._refresh_plot_interval()
@@ -1146,7 +1239,7 @@ class SdrClient(QObject):
     def set_fft_size(self, fft_size: int | None) -> None:
         if fft_size is None:
             mode = "auto"
-            next_size = int(select_fft_size(self.sample_rate, self.buff_size))
+            next_size = int(self._clamp_fft_size(select_fft_size(self.sample_rate, self.buff_size)))
         else:
             mode = "manual"
             next_size = int(self._clamp_fft_size(int(fft_size)))
@@ -1166,6 +1259,11 @@ class SdrClient(QObject):
 
     def set_plot_refresh_fps(self, fps: float | None) -> None:
         normalized = None if fps is None else float(max(1.0, fps))
+        if normalized is not None and self.cpu_optimized:
+            perf = self._performance_settings()
+            cap = self._normalize_plot_refresh_fps(perf.get("plot_refresh_fps", normalized))
+            if cap is not None:
+                normalized = float(max(1.0, min(normalized, cap)))
         if normalized == self.plot_refresh_fps:
             return
         self.plot_refresh_fps = normalized

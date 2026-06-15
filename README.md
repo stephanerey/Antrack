@@ -79,6 +79,12 @@ antrack
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
+Manual validation is still recommended after GUI or threading changes:
+- connect to the Axis controller
+- start target tracking
+- run an SDR session
+- confirm the UI remains responsive while tracking and spectrum updates continue
+
 ## Configuration
 
 The application uses `settings.txt` from the repository root by default.
@@ -95,6 +101,20 @@ Typical configuration areas include:
 - antenna limits and motion speeds
 - network settings for the Axis controller
 - scan offsets and tracking thresholds
+- optional CPU-saving limits for tracking and SDR refresh
+
+### CPU-Optimized Mode
+
+The optional `[PERFORMANCE]` section can reduce runtime load on low-power PCs.
+
+Key settings:
+- `CPU_OPTIMIZED = true` enables the low-CPU profile
+- `MIN_MOVE_DURATION` increases the minimum tracking cadence
+- `FFT_FPS` caps SDR FFT refresh work
+- `PLOT_REFRESH_FPS` caps spectrum display updates
+- `MAX_FFT_SIZE` limits the effective FFT size (default cap: `2048`)
+
+See [docs/cpu_optimized.md](/E:/PLDesign/Antrack/docs/cpu_optimized.md) for the full tuning guide and manual validation steps.
 
 ## Data Files
 
