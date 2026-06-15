@@ -40,6 +40,28 @@ class RecordingThreadManager:
         return None
 
 
+class FakeFuture:
+    def __init__(self, done: bool):
+        self._done = done
+        self._callbacks = []
+
+    def done(self):
+        return self._done
+
+    def add_done_callback(self, callback):
+        self._callbacks.append(callback)
+
+
+class RecordingExecutorThreadManager(RecordingThreadManager):
+    def __init__(self):
+        super().__init__()
+        self.submissions = []
+
+    def submit_task(self, func, *args, **kwargs):
+        self.submissions.append((func, args, kwargs))
+        return FakeFuture(done=False)
+
+
 def test_compute_snr_relative_and_absolute():
     spectrum = np.array([-110.0, -100.0, -87.0, -99.0, -101.0], dtype=np.float32)
     assert compute_snr(spectrum, "relative") == 13.0
@@ -69,6 +91,32 @@ def test_measure_band_power_is_reasonably_stable_in_dummy_mode():
     first = client.measure_band_power(120_000.0, 40_000.0, 0.05)
     second = client.measure_band_power(120_000.0, 40_000.0, 0.05)
     assert abs(first - second) < 6.0
+
+
+def test_cache_iq_block_wakes_scheduler_without_rendering_immediately():
+    client = _dummy_client()
+    client._spectrum_wakeup.clear()
+
+    client._cache_iq_block(client._generate_dummy_iq_block())
+
+    assert client._spectrum_wakeup.is_set() is True
+
+
+def test_schedule_spectrum_publish_reports_pending_when_future_in_flight():
+    thread_manager = RecordingExecutorThreadManager()
+    client = SdrClient(
+        settings={"SDR": {"sample_rate_hz": 2_000_000, "buffer_size": 8192, "fft_size": 2048}},
+        thread_manager=thread_manager,
+    )
+    client.mode = "dummy"
+    client._cache_iq_block(client._generate_dummy_iq_block())
+
+    first = client._schedule_spectrum_publish(timestamp=1.0)
+    second = client._schedule_spectrum_publish(timestamp=2.0)
+
+    assert first == "submitted"
+    assert second == "pending"
+    assert len(thread_manager.submissions) == 1
 
 
 def test_sdr_client_cpu_optimized_caps_fft_runtime_settings():

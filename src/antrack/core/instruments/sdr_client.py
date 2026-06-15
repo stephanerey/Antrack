@@ -9,7 +9,7 @@ import time
 from typing import Any, Optional
 
 import numpy as np
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, QTimer, Qt, pyqtSignal
 
 from antrack.core.data_storage import DataStorage
 from antrack.core.dsp import (
@@ -80,6 +80,10 @@ class SdrClient(QObject):
         self._thread_stop = threading.Event()
         self._stream_reconfigure_requested = threading.Event()
         self._spectrum_wakeup = threading.Event()
+        self._spectrum_future_lock = threading.RLock()
+        self._display_schedule_lock = threading.RLock()
+        self._last_display_submit_t = 0.0
+        self._next_display_due_t = 0.0
         self._read_timeout_us = 100_000
         self._state_lock = threading.RLock()
         self._latest_iq: np.ndarray | None = None
@@ -114,6 +118,9 @@ class SdrClient(QObject):
         self._available_source_records: list[dict[str, Any]] = []
         self.mode = "dummy"
         self.hwinfo: dict[str, Any] = {}
+        self._display_timer = QTimer(self)
+        self._display_timer.setTimerType(Qt.PreciseTimer)
+        self._display_timer.timeout.connect(self._maybe_publish_inline)
 
         cfg = self._sdr_settings()
         perf = self._performance_settings()
@@ -215,6 +222,9 @@ class SdrClient(QObject):
 
     def _refresh_plot_interval(self) -> None:
         self._plot_interval_s = 1.0 / self._effective_fft_fps()
+        scheduler_interval_ms = int(max(1, min(5, round(self._plot_interval_s * 1000.0))))
+        self._display_timer.setInterval(scheduler_interval_ms)
+        self._next_display_due_t = 0.0
         self._spectrum_wakeup.set()
 
     def _clamp_fft_size(self, fft_size: int) -> int:
@@ -639,6 +649,8 @@ class SdrClient(QObject):
         self._last_perf_emit = time.monotonic()
         self._started_emitted = False
         self._spectrum_future = None
+        self._last_display_submit_t = 0.0
+        self._display_timer.start()
         if self.thread_manager is not None:
             self.thread_manager.start_thread(self._thread_name, self._stream_loop)
         else:
@@ -646,6 +658,7 @@ class SdrClient(QObject):
             self._thread.start()
 
     def stop(self) -> None:
+        self._display_timer.stop()
         self._thread_stop.set()
         self._stream_reconfigure_requested.clear()
         self._spectrum_wakeup.set()
@@ -673,7 +686,6 @@ class SdrClient(QObject):
 
     def _stream_loop(self) -> None:
         worker = self.thread_manager.get_worker(self._thread_name) if self.thread_manager is not None else None
-        last_plot_push = 0.0
         try:
             if self.mode == "hardware":
                 self._open_stream_with_recovery()
@@ -690,24 +702,38 @@ class SdrClient(QObject):
                     time.sleep(0.05)
                     continue
                 self._cache_iq_block(iq)
-                self._drain_spectrum_future()
+                self._maybe_publish_inline()
                 now = time.monotonic()
-                interval_s = float(max(0.01, self._plot_interval_s))
-                wake_requested = self._spectrum_wakeup.is_set()
-                if wake_requested:
-                    self._spectrum_wakeup.clear()
-                if wake_requested or (now - last_plot_push) >= interval_s:
-                    if not self._schedule_spectrum_publish(timestamp=now):
-                        self._publish_spectrum(timestamp=now)
-                    last_plot_push = now
                 if now - self._last_perf_emit >= self._perf_emit_interval_s:
                     self._emit_perf_snapshot(now)
         except Exception as exc:
             self.logger.exception("SDR runtime error: %s", exc)
             self._emit_error(f"SDR runtime error: {exc}")
         finally:
+            self._spectrum_wakeup.set()
             self._drain_spectrum_future(block=True)
             self._close_stream()
+
+    def _maybe_publish_inline(self) -> None:
+        with self._display_schedule_lock:
+            now = time.monotonic()
+            interval_s = float(max(0.01, self._plot_interval_s))
+            due_t = float(self._next_display_due_t)
+            if due_t <= 0.0:
+                due_t = now
+                self._next_display_due_t = due_t
+            if now < due_t:
+                return
+            schedule_state = self._schedule_spectrum_publish(timestamp=now)
+            if schedule_state == "disabled":
+                self._publish_spectrum(timestamp=now)
+                self._last_display_submit_t = now
+                missed_intervals = int(max(1, math.floor((now - due_t) / interval_s) + 1))
+                self._next_display_due_t = due_t + (missed_intervals * interval_s)
+            elif schedule_state == "submitted":
+                self._last_display_submit_t = now
+                missed_intervals = int(max(1, math.floor((now - due_t) / interval_s) + 1))
+                self._next_display_due_t = due_t + (missed_intervals * interval_s)
 
     def _apply_pending_stream_reconfigure(self) -> None:
         if not self._stream_reconfigure_requested.is_set():
@@ -951,28 +977,32 @@ class SdrClient(QObject):
         """Compute the display spectrum in dB with the selected smoothing preset."""
         return self._compute_spectrum_snapshot(iq_data, smooth_trace=self.smoothing != "off")
 
-    def _schedule_spectrum_publish(self, *, timestamp: float) -> bool:
+    def _schedule_spectrum_publish(self, *, timestamp: float) -> str:
         if self.thread_manager is None or not hasattr(self.thread_manager, "submit_task"):
-            return False
-        future = self._spectrum_future
+            return "disabled"
+        with self._spectrum_future_lock:
+            future = self._spectrum_future
         if future is not None and not future.done():
-            return True
+            return "pending"
         fft_iq = self._latest_iq_for_fft()
         if fft_iq is None or fft_iq.size == 0:
-            return True
+            return "pending"
         self._ensure_fft_window()
         win = None if self._fft_win is None else self._fft_win.copy()
-        self._spectrum_future = self.thread_manager.submit_task(
+        freqs = self._get_freq_axis(int(self.fft_size)).copy()
+        future = self.thread_manager.submit_task(
             self._compute_spectrum_payload,
             fft_iq,
             int(self.fft_size),
             win,
             float(self._fft_win_power),
-            float(self.sample_rate),
-            float(self.center_freq),
+            freqs,
             float(timestamp),
         )
-        return True
+        with self._spectrum_future_lock:
+            self._spectrum_future = future
+        future.add_done_callback(self._on_spectrum_future_done)
+        return "submitted"
 
     @staticmethod
     def _compute_spectrum_payload(
@@ -980,8 +1010,7 @@ class SdrClient(QObject):
         fft_size: int,
         fft_window: np.ndarray | None,
         fft_window_power: float,
-        sample_rate: float,
-        center_freq: float,
+        freqs: np.ndarray,
         timestamp: float,
     ) -> dict[str, Any]:
         start_t = time.perf_counter()
@@ -992,7 +1021,6 @@ class SdrClient(QObject):
             window_power=float(fft_window_power),
         )
         after_fft_t = time.perf_counter()
-        freqs = frequency_axis(len(raw_spectrum_db), float(sample_rate), float(center_freq))
         return {
             "timestamp": float(timestamp),
             "raw_spectrum_db": raw_spectrum_db,
@@ -1001,7 +1029,8 @@ class SdrClient(QObject):
         }
 
     def _drain_spectrum_future(self, *, block: bool = False) -> None:
-        future = self._spectrum_future
+        with self._spectrum_future_lock:
+            future = self._spectrum_future
         if future is None:
             return
         if not block and not future.done():
@@ -1011,8 +1040,24 @@ class SdrClient(QObject):
         except Exception as exc:
             self.logger.warning("Asynchronous SDR spectrum computation failed: %s", exc)
             payload = None
-        self._spectrum_future = None
-        if payload:
+        should_apply = False
+        with self._spectrum_future_lock:
+            if self._spectrum_future is future:
+                self._spectrum_future = None
+                should_apply = True
+        if payload and should_apply:
+            self._apply_spectrum_payload(payload)
+
+    def _on_spectrum_future_done(self, future) -> None:
+        try:
+            payload = future.result()
+        except Exception as exc:
+            self.logger.warning("Asynchronous SDR spectrum computation failed: %s", exc)
+            payload = None
+        with self._spectrum_future_lock:
+            if self._spectrum_future is future:
+                self._spectrum_future = None
+        if payload and not self._thread_stop.is_set():
             self._apply_spectrum_payload(payload)
 
     def _apply_spectrum_payload(self, payload: dict[str, Any]) -> None:
