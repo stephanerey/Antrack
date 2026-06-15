@@ -94,8 +94,12 @@ class EphemerisService:
 
         self.pose_updated = SimpleSignal()
 
+        self._thread_name = "EphemerisLoop"
+        self._state_lock = threading.RLock()
+        self._wakeup = threading.Event()
         self._workers: Dict[str, bool] = {}
         self._targets: Dict[str, Dict] = {}
+        self._next_run_at: Dict[str, float] = {}
 
         self._hip_df = None
         self._hip_lock = threading.Lock()
@@ -145,40 +149,45 @@ class EphemerisService:
     # ---------- API publique ----------
 
     def start_object(self, key: str, obj_type: str, name: str, interval: float = 0.1):
-        previous = self._targets.get(key) or {}
+        with self._state_lock:
+            previous = self._targets.get(key) or {}
         target_changed = (
             previous.get("obj_type") != obj_type
             or previous.get("name") != name
         )
-        self._targets[key] = {'obj_type': obj_type, 'name': name, 'interval': float(interval)}
+        with self._state_lock:
+            self._targets[key] = {'obj_type': obj_type, 'name': name, 'interval': float(interval)}
+            self._workers[key] = True
+            self._next_run_at[key] = 0.0
         if target_changed:
             self._pass_cache[key] = {'last_tt': 0.0, 'payload': self._empty_pass_info()}
-        if self._workers.get(key, False):
+        if previous and previous.get("obj_type") == obj_type and previous.get("name") == name and self._workers.get(key, False):
             if self.logger:
                 self.logger.info(f"[Ephemeris] target updated key='{key}' type='{obj_type}' name='{name}'")
+            self._wakeup.set()
             return
-        self._workers[key] = True
-
-        def loop():
-            self._object_loop(key)
-
-        self.thread_manager.start_thread(f"Ephemeris:{key}", loop)
+        self.thread_manager.start_thread(self._thread_name, self._loop)
+        self._wakeup.set()
         if self.logger:
             self.logger.info(f"[Ephemeris] started key='{key}' type='{obj_type}' name='{name}' interval={interval}s")
 
     def stop_object(self, key: str):
-        try:
-            self._workers[key] = False
-        except Exception:
-            pass
-        try:
-            self.thread_manager.stop_thread(f"Ephemeris:{key}")
-        except Exception:
-            pass
+        with self._state_lock:
+            self._workers.pop(key, None)
+            self._targets.pop(key, None)
+            self._next_run_at.pop(key, None)
+        self._wakeup.set()
 
     def stop_all(self):
-        for key in list(self._workers.keys()):
-            self.stop_object(key)
+        with self._state_lock:
+            self._workers.clear()
+            self._targets.clear()
+            self._next_run_at.clear()
+        self._wakeup.set()
+        try:
+            self.thread_manager.stop_thread(self._thread_name)
+        except Exception:
+            pass
 
     # ---------- API TLE ----------
     def tle_refresh(self, force: bool = False):
@@ -264,65 +273,93 @@ class EphemerisService:
                     self.logger.error(f"[Ephemeris] Hipparcos load failed: {exc}")
                 self._hip_df = None
 
-    def _object_loop(self, key: str):
-        last_type = None
-        while self._workers.get(key, False):
-            try:
-                sel = self._targets.get(key)
-                if not sel or not self.observer or not self.planets:
-                    time.sleep(0.1)
+    def _snapshot_active_targets(self) -> Dict[str, Dict]:
+        with self._state_lock:
+            return {
+                key: dict(value)
+                for key, value in self._targets.items()
+                if self._workers.get(key, False)
+            }
+
+    def _loop(self):
+        while True:
+            scheduled = self._snapshot_active_targets()
+            if not scheduled:
+                self._wakeup.wait(timeout=0.05)
+                self._wakeup.clear()
+                if not self._snapshot_active_targets():
+                    break
+                continue
+
+            now_mono = time.monotonic()
+            next_due = None
+            for key, sel in scheduled.items():
+                interval = float(max(0.1, sel.get("interval") or 0.1))
+                with self._state_lock:
+                    due_at = float(self._next_run_at.get(key, 0.0))
+                if now_mono + 1e-6 < due_at:
+                    next_due = due_at if next_due is None else min(next_due, due_at)
                     continue
+                self._step_object(key, sel)
+                next_run = time.monotonic() + interval
+                with self._state_lock:
+                    if self._workers.get(key, False):
+                        self._next_run_at[key] = next_run
+                next_due = next_run if next_due is None else min(next_due, next_run)
 
-                obj_type = sel.get('obj_type') or ""
-                name = sel.get('name') or ""
-                interval = float(sel.get('interval') or 0.1)
+            timeout_s = 0.05
+            if next_due is not None:
+                timeout_s = min(0.05, max(0.0, next_due - time.monotonic()))
+            self._wakeup.wait(timeout=timeout_s)
+            self._wakeup.clear()
 
-                if obj_type != last_type:
-                    if obj_type == "Star" and self._hip_df is None:
-                        self._ensure_hipparcos_loaded()
-                    last_type = obj_type
+    def _step_object(self, key: str, sel: Dict):
+        try:
+            if not sel or not self.observer or not self.planets:
+                return
 
-                t_now = self.observer.timescale.now()
+            obj_type = sel.get('obj_type') or ""
+            name = sel.get('name') or ""
 
-                payload = self._compute_payload(obj_type, name, t_now)
-                payload['name'] = name
+            if obj_type == "Star" and self._hip_df is None:
+                self._ensure_hipparcos_loaded()
 
-                cache = self._pass_cache.setdefault(key, {'last_tt': 0.0, 'payload': self._empty_pass_info()})
-                now_tt = float(t_now.tt)
+            t_now = self.observer.timescale.now()
 
-                # Emit the fast payload immediately so target info updates without
-                # waiting for the heavier pass/AOS-LOS computation.
-                fast_payload = dict(payload)
-                if float(cache.get('last_tt') or 0.0) > 0.0:
-                    fast_payload.update(cache.get('payload') or {})
+            payload = self._compute_payload(obj_type, name, t_now)
+            payload['name'] = name
+
+            cache = self._pass_cache.setdefault(key, {'last_tt': 0.0, 'payload': self._empty_pass_info()})
+            now_tt = float(t_now.tt)
+
+            fast_payload = dict(payload)
+            if float(cache.get('last_tt') or 0.0) > 0.0:
+                fast_payload.update(cache.get('payload') or {})
+            try:
+                self.pose_updated.emit(key, fast_payload)
+            except Exception:
+                pass
+
+            if obj_type == "Artificial Satellite":
+                min_period_s = 1.0
+            elif obj_type == "Spacecraft":
+                min_period_s = 3.0
+            else:
+                min_period_s = 3.0
+
+            if (now_tt - float(cache['last_tt'])) * 86400.0 >= min_period_s:
+                cache['payload'] = self._compute_pass_info(obj_type, name, t_now)
+                cache['last_tt'] = now_tt
+                detailed_payload = dict(payload)
+                detailed_payload.update(cache['payload'])
                 try:
-                    self.pose_updated.emit(key, fast_payload)
+                    self.pose_updated.emit(key, detailed_payload)
                 except Exception:
                     pass
 
-                # --- throttling du calcul de passes ---
-                if obj_type == "Artificial Satellite":
-                    min_period_s = 1.0
-                elif obj_type == "Spacecraft":
-                    min_period_s = 3.0
-                else:
-                    min_period_s = 3.0
-
-                if (now_tt - float(cache['last_tt'])) * 86400.0 >= min_period_s:
-                    cache['payload'] = self._compute_pass_info(obj_type, name, t_now)
-                    cache['last_tt'] = now_tt
-                    detailed_payload = dict(payload)
-                    detailed_payload.update(cache['payload'])
-                    try:
-                        self.pose_updated.emit(key, detailed_payload)
-                    except Exception:
-                        pass
-
-            except Exception as e:
-                if self.logger:
-                    self.logger.error(f"[Ephemeris] loop error (key={key}): {e}")
-
-            time.sleep(sel.get('interval', 0.1) if sel else 0.1)
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[Ephemeris] loop error (key={key}): {e}")
 
     # ---------- Résolutions ----------
     def _resolve_ss_body(self, raw_name: str):

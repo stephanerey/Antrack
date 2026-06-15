@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import QTimer
 
 from antrack.threading_utils.thread_manager import ThreadManager
+from antrack.tracking.tracking_manager import TrackingManager
 from antrack.utils.paths import get_log_file, get_logs_dir
 from antrack.utils.settings_loader import load_settings, resolve_settings_path
 from antrack.gui.main_ui import MainUi
@@ -75,6 +76,8 @@ def main() -> int:
 
         ip = settings["AXIS_SERVER"]["ip_address"]
         port = settings["AXIS_SERVER"]["port"]
+        perf_settings = settings.get("PERFORMANCE", settings.get("performance", {})) if isinstance(settings, dict) else {}
+        max_workers = int(perf_settings.get("max_workers", 4))
         logger.info(f"Configuration serveur: {ip}:{port}")
 
         # Qt app
@@ -82,7 +85,8 @@ def main() -> int:
         app.setApplicationName("Antenna Noise Tracker")
 
         # Thread manager
-        thread_manager = ThreadManager()
+        thread_manager = ThreadManager(max_workers=max_workers)
+        thread_manager.tracking_manager = TrackingManager(thread_manager=thread_manager, settings=settings)
         logger.info("Gestionnaire de threads initialisé")
 
         # UI

@@ -6,6 +6,7 @@ import logging
 import time
 import traceback
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Deque, Dict, List, Optional
@@ -95,7 +96,7 @@ class Worker(QObject):
 class ThreadManager:
     """Background task manager with diagnostics and clean shutdown."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_workers: int = 4) -> None:
         self.threads: Dict[str, QThread] = {}
         self.workers: Dict[str, Worker] = {}
         self.logger = logging.getLogger("ThreadManager")
@@ -103,6 +104,8 @@ class ThreadManager:
         self._tasks: Dict[str, TaskRecord] = {}
         self._history: Deque[str] = deque(maxlen=200)
         self._shutdown_started = False
+        self.max_workers = int(max(1, max_workers))
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="AntrackPool")
 
     def start_thread(self, thread_name: str, func: Callable, *args, **kwargs) -> Worker:
         """Start a function in a dedicated QThread.
@@ -224,6 +227,12 @@ class ThreadManager:
         """Request cancellation of all threads (legacy API)."""
         self.shutdown(graceful=True, timeout_s=0.5)
 
+    def submit_task(self, func: Callable, *args, **kwargs):
+        """Run punctual background work on the shared executor."""
+        if self._shutdown_started:
+            raise RuntimeError("ThreadManager is shutting down; pooled tasks are rejected")
+        return self.executor.submit(func, *args, **kwargs)
+
     def shutdown(self, graceful: bool = True, timeout_s: float = 5.0) -> None:
         """Shutdown all tasks with a bounded timeout.
 
@@ -263,6 +272,10 @@ class ThreadManager:
                 if record:
                     record.last_status = "shutdown timeout"
                 self.logger.warning("Thread '%s' still running after shutdown timeout", thread_name)
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=False)
+        except Exception:
+            pass
 
     def _request_cancel(self, thread_name: str) -> None:
         record = self._tasks.get(thread_name)
