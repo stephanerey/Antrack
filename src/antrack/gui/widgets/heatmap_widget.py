@@ -4,24 +4,27 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtWidgets import QGraphicsRectItem, QVBoxLayout, QWidget
+from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtWidgets import QGraphicsRectItem, QWidget
 
 
 class HeatmapWidget(QWidget):
     """2D heatmap with optional best-point marker."""
 
+    plot_area_changed = pyqtSignal(int)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._last_plot_side = 0
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
         self.plot = pg.PlotWidget(self)
         self.plot.setLabel("bottom", "Azimuth", units="deg")
         self.plot.setLabel("left", "Elevation", units="deg")
         self.plot.showGrid(x=True, y=True)
-        layout.addWidget(self.plot)
+        self.plot.getViewBox().setAspectLocked(True, ratio=1.0)
+        self.plot.setGeometry(0, 0, 1, 1)
         self.image = pg.ImageItem()
         self.plot.addItem(self.image)
         self.sample_cells = pg.ScatterPlotItem(symbol="s", size=18, pen=pg.mkPen(220, 220, 220, 100))
@@ -37,6 +40,16 @@ class HeatmapWidget(QWidget):
         self.plot.addItem(self.current_marker)
         self.plot.addItem(self.best_outline)
         self._grid_cell_items: list[QGraphicsRectItem] = []
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        side = max(1, min(self.width(), self.height()))
+        x = max(0, (self.width() - side) // 2)
+        y = max(0, (self.height() - side) // 2)
+        self.plot.setGeometry(x, y, side, side)
+        if side != self._last_plot_side:
+            self._last_plot_side = side
+            self.plot_area_changed.emit(side)
 
     def set_heatmap(self, az_values, el_values, grid_values) -> None:
         az = np.asarray(az_values, dtype=np.float64)
@@ -114,12 +127,19 @@ class HeatmapWidget(QWidget):
             padding=0.0,
             disableAutoRange=True,
         )
+        view_box.setAspectLocked(True, ratio=1.0)
 
     def clear_scan_bounds(self) -> None:
+        view_box = self.plot.getViewBox()
         try:
             self.plot.enableAutoRange(x=True, y=True)
         except Exception:
             pass
+        try:
+            view_box.enableAutoRange(x=True, y=True)
+        except Exception:
+            pass
+        view_box.setAspectLocked(True, ratio=1.0)
 
     def set_axis_mode(self, *, relative: bool) -> None:
         if relative:
@@ -137,8 +157,21 @@ class HeatmapWidget(QWidget):
     ) -> None:
         planned = list(planned_points or [])
         measured = list(measured_points or [])
-        if planned:
-            self.planned_marker.setData([point[0] for point in planned], [point[1] for point in planned])
+        measured_keys = {
+            (round(float(point[0]), 6), round(float(point[1]), 6))
+            for point in measured
+        }
+        current_key = None
+        if current_point is not None:
+            current_key = (round(float(current_point[0]), 6), round(float(current_point[1]), 6))
+        remaining_planned = [
+            point
+            for point in planned
+            if (round(float(point[0]), 6), round(float(point[1]), 6)) not in measured_keys
+            and (current_key is None or (round(float(point[0]), 6), round(float(point[1]), 6)) != current_key)
+        ]
+        if remaining_planned:
+            self.planned_marker.setData([point[0] for point in remaining_planned], [point[1] for point in remaining_planned])
         else:
             self.planned_marker.clear()
         if current_point is not None:

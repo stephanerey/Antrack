@@ -622,8 +622,6 @@ class TrackingUiMixin:
         add_row(11, "LOS", "target_los_label")
         add_row(12, "Max EL", "target_max_el_label")
         add_row(13, "Max EL @", "target_max_el_time_label")
-        add_row(14, "SNR", "target_snr_label")
-        add_row(15, "Scan Offset", "target_scan_offset_label")
 
         self.target_max_el_time_label.setWordWrap(True)
         self._update_selected_target_scan_offset_display()

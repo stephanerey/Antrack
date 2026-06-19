@@ -8,6 +8,7 @@ from pathlib import Path
 from PyQt5.uic import loadUi
 from PyQt5.QtWidgets import QMainWindow, QMessageBox, QStatusBar
 
+from antrack.app_info import display_version
 from antrack.gui.calibration_ui import CalibrationUiMixin
 from antrack.gui.connection_ui import ConnectionUiMixin
 from antrack.gui.diagnostics_ui import DiagnosticsUiMixin
@@ -41,7 +42,7 @@ class MainUi(
         super().__init__(parent)
         ui_path = Path(__file__).with_name("main_3.ui")
         loadUi(str(ui_path), self)
-        self.setWindowTitle("Antenna Tracker")
+        self.setWindowTitle(f"Antenna Tracker {display_version()}")
 
         self.settings = settings
         self.thread_manager = thread_manager
@@ -71,6 +72,18 @@ class MainUi(
         el_forbidden = parse_forbidden_ranges(
             antenna_settings.get("el_forbidden_ranges"),
             default=[(-10.0, 0.0), (95.0, 100.0)],
+        )
+        az_error_threshold = float(
+            antenna_settings.get(
+                "az_error_threshold",
+                antenna_settings.get("AZ_ERROR_THRESHOLD", 0.05),
+            )
+        )
+        el_error_threshold = float(
+            antenna_settings.get(
+                "el_error_threshold",
+                antenna_settings.get("EL_ERROR_THRESHOLD", 0.05),
+            )
         )
 
         self.g1 = AngleGauge(
@@ -108,6 +121,8 @@ class MainUi(
             actual_label_y_ratio=-0.25,
             error_label_y_ratio=0.30,
         )
+        self.g1.set_error_threshold(az_error_threshold)
+        self.g2.set_error_threshold(el_error_threshold)
         self.verticalLayout_gauges.layout().addWidget(self.g1)
         self.verticalLayout_gauges.layout().addWidget(self.g2)
 

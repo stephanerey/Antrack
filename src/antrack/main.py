@@ -9,7 +9,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from antrack.app_info import version
+from antrack.app_info import display_version
 
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -57,12 +57,14 @@ logger = logging.getLogger("main")
 
 
 def main() -> int:
+    app_version = display_version()
     logger.info(
         "\n"
         "================================================\n"
-        "Démarrage de l'application Antenna Noise Tracker\n"
+        f"Démarrage de l'application Antenna Noise Tracker {app_version}\n"
         "================================================"
     )
+    logger.info(f"Version application: {app_version}")
 
     app = None
     thread_manager = None

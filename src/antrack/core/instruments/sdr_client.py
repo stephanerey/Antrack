@@ -22,6 +22,7 @@ from antrack.core.dsp import (
     make_window,
     select_fft_size,
 )
+from antrack.core.dsp.snr import compute_band_power_metrics
 
 try:
     import SoapySDR  # type: ignore
@@ -1475,12 +1476,11 @@ class SdrClient(QObject):
         bandwidth_hz: float,
         integration_s: float,
     ) -> float:
-        """Measure mean in-band power in dB over the requested integration duration."""
+        """Measure integrated in-band power in dBm over the requested integration duration."""
         integration_s = float(max(0.01, integration_s))
         bandwidth_hz = float(max(1.0, abs(bandwidth_hz)))
         deadline = time.monotonic() + integration_s
         accum_linear = 0.0
-        accum_bins = 0
         frames = 0
         while time.monotonic() < deadline or frames == 0:
             iq = self._latest_iq_copy()
@@ -1496,12 +1496,21 @@ class SdrClient(QObject):
                 mask = np.zeros_like(freqs, dtype=bool)
                 mask[nearest] = True
             band_db = spectrum_db[mask]
-            band_linear = np.power(10.0, band_db / 10.0, dtype=np.float64)
-            accum_linear += float(np.sum(band_linear))
-            accum_bins += int(band_linear.size)
-            frames += 1
+            bin_width_hz = float(max(1.0, abs(float(self.sample_rate)) / max(1, len(spectrum_db))))
+            effective_bandwidth_hz = float(max(bin_width_hz, int(np.count_nonzero(mask)) * bin_width_hz))
+            metrics = compute_band_power_metrics(
+                band_db,
+                bin_width_hz=bin_width_hz,
+                bandwidth_hz=effective_bandwidth_hz,
+            )
+            integrated_db = float(metrics.get("integrated_db", float("nan")))
+            if math.isfinite(integrated_db):
+                accum_linear += float(np.power(10.0, integrated_db / 10.0))
+                frames += 1
+            else:
+                self.logger.debug("Band-power frame ignored because integrated dBm was not finite.")
             if integration_s > 0.02:
                 time.sleep(min(0.01, integration_s / 10.0))
-        if accum_bins <= 0:
+        if frames <= 0:
             raise RuntimeError("No FFT bins were available for band-power measurement.")
-        return float(10.0 * np.log10((accum_linear / accum_bins) + 1e-12))
+        return float(10.0 * np.log10((accum_linear / frames) + 1e-12))

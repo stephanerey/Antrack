@@ -6,10 +6,11 @@ import csv
 import math
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,6 +24,7 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -39,6 +41,7 @@ from antrack.tracking.scan_cross import generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points, generate_two_pass_grid_points
 from antrack.tracking.scan_session import ScanSession
 from antrack.tracking.scan_spiral import generate_spiral_points
+from antrack.utils.paths import get_logs_dir
 
 
 class _ScanMoveBridge(QObject):
@@ -102,7 +105,7 @@ class ScanUiMixin:
         self.scan_stop_button = QPushButton("Stop", config_group)
         self.scan_apply_button = QPushButton("Apply Offset", config_group)
         self.scan_save_button = QPushButton("Save Offset", config_group)
-        self.scan_export_error_csv_button = QPushButton("Export Error CSV", config_group)
+        self.scan_auto_export_checkbox = QCheckBox("Auto export CSV", config_group)
         self.scan_repeat_checkbox = QCheckBox("Repeat While Tracking", config_group)
         self.scan_repeat_interval_spin = QDoubleSpinBox(config_group)
         self.scan_repeat_interval_spin.setRange(1.0, 3600.0)
@@ -110,18 +113,22 @@ class ScanUiMixin:
         self.scan_repeat_interval_spin.setSuffix(" s")
         self.scan_repeat_checkbox.setChecked(True)
         self.scan_progress_label = QLabel("-", config_group)
-        self.scan_best_label = QLabel("-", config_group)
-        self.scan_offset_label = QLabel("-", config_group)
         self.scan_orbit_scan_label = QLabel("-", config_group)
         self.scan_next_wait_label = QLabel("-", config_group)
         self.scan_next_wait_bar = QProgressBar(config_group)
         self.scan_next_wait_bar.setRange(0, 100)
         self.scan_next_wait_bar.setValue(0)
         self.scan_next_wait_bar.setTextVisible(False)
+        self.scan_next_wait_bar.setMinimumWidth(150)
         repeat_row = QHBoxLayout()
         repeat_row.setContentsMargins(0, 0, 0, 0)
         repeat_row.addWidget(self.scan_repeat_checkbox)
         repeat_row.addWidget(self.scan_repeat_interval_spin)
+        next_wait_row = QHBoxLayout()
+        next_wait_row.setContentsMargins(0, 0, 0, 0)
+        next_wait_row.setSpacing(6)
+        next_wait_row.addWidget(self.scan_next_wait_label)
+        next_wait_row.addWidget(self.scan_next_wait_bar, 1)
         strategy_label_row = QHBoxLayout()
         strategy_label_row.setContentsMargins(0, 0, 0, 0)
         strategy_label_row.setSpacing(4)
@@ -151,30 +158,26 @@ class ScanUiMixin:
         config_layout.addWidget(self.scan_metric_combo, 3, 1)
         config_layout.addWidget(QLabel("Peak Estimator"), 3, 2)
         config_layout.addWidget(self.scan_peak_estimator_combo, 3, 3)
-        config_layout.addWidget(self.scan_export_error_csv_button, 3, 4, 1, 2)
+        config_layout.addWidget(self.scan_auto_export_checkbox, 3, 4, 1, 2)
         config_layout.addWidget(QLabel("Progress"), 4, 0)
         config_layout.addWidget(self.scan_progress_label, 4, 1)
         config_layout.addWidget(QLabel("Orbit Scan"), 4, 2)
         config_layout.addWidget(self.scan_orbit_scan_label, 4, 3)
         config_layout.addWidget(QLabel("Next"), 4, 4)
-        config_layout.addWidget(self.scan_next_wait_label, 4, 5)
-        config_layout.addWidget(QLabel("Best"), 5, 0)
-        config_layout.addWidget(self.scan_best_label, 5, 1)
-        config_layout.addWidget(QLabel("Offset"), 5, 2)
-        config_layout.addWidget(self.scan_offset_label, 5, 3)
-        config_layout.addWidget(self.scan_next_wait_bar, 5, 4, 1, 2)
+        config_layout.addLayout(next_wait_row, 4, 5)
         config_layout.setColumnStretch(1, 1)
         config_layout.setColumnStretch(3, 1)
 
-        splitter = QSplitter(Qt.Vertical, container)
+        splitter = QSplitter(Qt.Horizontal, container)
+        profile_thickness = 160
+        profile_spacing = 6
         visual_panel = QWidget(splitter)
-        visual_layout = QGridLayout(visual_panel)
-        visual_layout.setContentsMargins(0, 0, 0, 0)
-        visual_layout.setHorizontalSpacing(6)
-        visual_layout.setVerticalSpacing(6)
+        self._scan_profile_thickness = profile_thickness
+        self._scan_profile_spacing = profile_spacing
+        self._scan_visual_panel = visual_panel
+        visual_panel.installEventFilter(self)
         self.scan_vertical_plot = pg.PlotWidget(visual_panel)
         self.scan_vertical_plot.showGrid(x=True, y=True)
-        self.scan_vertical_plot.setMaximumWidth(220)
         self.scan_vertical_plot.setLabel("bottom", "Metric")
         self.scan_vertical_plot.setLabel("left", "Elevation", units="deg")
         self.scan_vertical_curve = self.scan_vertical_plot.plot(name="Elevation", pen=pg.mkPen("c"))
@@ -196,12 +199,14 @@ class ScanUiMixin:
         self.scan_vertical_plot.addItem(self.scan_vertical_real_marker)
 
         self.scan_heatmap_widget = HeatmapWidget(visual_panel)
+        self.scan_heatmap_widget.setMinimumSize(1, 1)
+        self.scan_heatmap_widget.plot_area_changed.connect(lambda *_args: self._sync_scan_profile_margins())
 
         self.scan_horizontal_plot = pg.PlotWidget(visual_panel)
         self.scan_horizontal_plot.showGrid(x=True, y=True)
         self.scan_horizontal_plot.setLabel("bottom", "Azimuth", units="deg")
         self.scan_horizontal_plot.setLabel("left", "Metric")
-        self.scan_horizontal_curve = self.scan_horizontal_plot.plot(name="Azimuth", pen=pg.mkPen("y"))
+        self.scan_horizontal_curve = self.scan_horizontal_plot.plot(name="Azimuth", pen=pg.mkPen("c"))
         self.scan_horizontal_theoretical_marker = pg.ScatterPlotItem(
             name="Theoretical",
             symbol="t",
@@ -218,21 +223,79 @@ class ScanUiMixin:
         )
         self.scan_horizontal_plot.addItem(self.scan_horizontal_theoretical_marker)
         self.scan_horizontal_plot.addItem(self.scan_horizontal_real_marker)
-
-        visual_layout.addWidget(self.scan_vertical_plot, 0, 0)
-        visual_layout.addWidget(self.scan_heatmap_widget, 0, 1)
-        visual_layout.addWidget(self.scan_horizontal_plot, 1, 1)
-        visual_layout.setColumnStretch(1, 1)
-        visual_layout.setRowStretch(0, 1)
         self._sync_scan_profile_margins()
 
-        history_panel = QWidget(splitter)
+        self.scan_detail_tabs = QTabWidget(splitter)
+        self.scan_detail_tabs.setMinimumWidth(360)
+
+        post_process_panel = QWidget(self.scan_detail_tabs)
+        post_process_layout = QGridLayout(post_process_panel)
+        post_process_layout.setContentsMargins(12, 12, 12, 12)
+        post_process_layout.setHorizontalSpacing(10)
+        post_process_layout.setVerticalSpacing(8)
+        self.scan_post_strategy_value = QLabel("-", post_process_panel)
+        self.scan_post_unit_value = QLabel("-", post_process_panel)
+        self.scan_post_samples_value = QLabel("-", post_process_panel)
+        self.scan_post_grid_value = QLabel("-", post_process_panel)
+        self.scan_post_peak_detected_value = QLabel("-", post_process_panel)
+        self.scan_post_peak_value_value = QLabel("-", post_process_panel)
+        self.scan_post_angular_value = QLabel("-", post_process_panel)
+        self.scan_post_min_value = QLabel("-", post_process_panel)
+        self.scan_post_max_value = QLabel("-", post_process_panel)
+        self.scan_post_dynamic_range_value = QLabel("-", post_process_panel)
+        self.scan_post_az_width_value = QLabel("-", post_process_panel)
+        self.scan_post_el_width_value = QLabel("-", post_process_panel)
+        for label in (
+            self.scan_post_strategy_value,
+            self.scan_post_unit_value,
+            self.scan_post_samples_value,
+            self.scan_post_grid_value,
+            self.scan_post_peak_detected_value,
+            self.scan_post_peak_value_value,
+            self.scan_post_angular_value,
+            self.scan_post_min_value,
+            self.scan_post_max_value,
+            self.scan_post_dynamic_range_value,
+            self.scan_post_az_width_value,
+            self.scan_post_el_width_value,
+        ):
+            label.setWordWrap(True)
+        post_process_layout.addWidget(QLabel("Strategy"), 0, 0)
+        post_process_layout.addWidget(self.scan_post_strategy_value, 0, 1)
+        post_process_layout.addWidget(QLabel("Unit"), 1, 0)
+        post_process_layout.addWidget(self.scan_post_unit_value, 1, 1)
+        post_process_layout.addWidget(QLabel("Samples"), 2, 0)
+        post_process_layout.addWidget(self.scan_post_samples_value, 2, 1)
+        post_process_layout.addWidget(QLabel("Grid"), 3, 0)
+        post_process_layout.addWidget(self.scan_post_grid_value, 3, 1)
+        post_process_layout.addWidget(QLabel("Peak Detected"), 4, 0)
+        post_process_layout.addWidget(self.scan_post_peak_detected_value, 4, 1)
+        post_process_layout.addWidget(QLabel("Peak Value"), 5, 0)
+        post_process_layout.addWidget(self.scan_post_peak_value_value, 5, 1)
+        post_process_layout.addWidget(QLabel("Angular Error"), 6, 0)
+        post_process_layout.addWidget(self.scan_post_angular_value, 6, 1)
+        post_process_layout.addWidget(QLabel("Min Value"), 7, 0)
+        post_process_layout.addWidget(self.scan_post_min_value, 7, 1)
+        post_process_layout.addWidget(QLabel("Max Value"), 8, 0)
+        post_process_layout.addWidget(self.scan_post_max_value, 8, 1)
+        post_process_layout.addWidget(QLabel("Dynamic Range"), 9, 0)
+        post_process_layout.addWidget(self.scan_post_dynamic_range_value, 9, 1)
+        post_process_layout.addWidget(QLabel("Az Width (-3 dB)"), 10, 0)
+        post_process_layout.addWidget(self.scan_post_az_width_value, 10, 1)
+        post_process_layout.addWidget(QLabel("El Width (-3 dB)"), 11, 0)
+        post_process_layout.addWidget(self.scan_post_el_width_value, 11, 1)
+        post_process_layout.setColumnStretch(1, 1)
+        post_process_layout.setRowStretch(12, 1)
+        self.scan_detail_tabs.addTab(post_process_panel, "Post Process")
+
+        history_panel = QWidget(self.scan_detail_tabs)
         history_layout = QVBoxLayout(history_panel)
         history_layout.setContentsMargins(0, 0, 0, 0)
         history_layout.setSpacing(6)
         self.scan_az_history_plot = pg.PlotWidget(history_panel)
         self.scan_az_history_plot.addLegend()
         self.scan_az_history_plot.showGrid(x=True, y=True)
+        self.scan_az_history_plot.setMinimumHeight(210)
         self.scan_az_history_plot.setLabel("bottom", "Theoretical Azimuth", units="deg")
         self.scan_az_history_plot.setLabel("left", "AZ Error", units="deg")
         self.scan_az_history_plot.setXRange(0.0, 360.0, padding=0.0)
@@ -248,6 +311,7 @@ class ScanUiMixin:
         self.scan_el_history_plot = pg.PlotWidget(history_panel)
         self.scan_el_history_plot.addLegend()
         self.scan_el_history_plot.showGrid(x=True, y=True)
+        self.scan_el_history_plot.setMinimumHeight(210)
         self.scan_el_history_plot.setLabel("bottom", "Theoretical Elevation", units="deg")
         self.scan_el_history_plot.setLabel("left", "EL Error", units="deg")
         self.scan_el_history_plot.setXRange(0.0, 90.0, padding=0.0)
@@ -262,9 +326,12 @@ class ScanUiMixin:
         )
         history_layout.addWidget(self.scan_az_history_plot)
         history_layout.addWidget(self.scan_el_history_plot)
+        self.scan_detail_tabs.addTab(history_panel, "Theoretical Error")
         splitter.addWidget(visual_panel)
-        splitter.addWidget(history_panel)
-        splitter.setSizes([700, 260])
+        splitter.addWidget(self.scan_detail_tabs)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([960, 480])
 
         root_layout.addWidget(config_group)
         root_layout.addWidget(splitter, 1)
@@ -299,17 +366,29 @@ class ScanUiMixin:
         self._scan_orbit_scan_count = 0
         self._scan_repeat_interval_s = 0.0
         self._scan_repeat_due_monotonic = 0.0
+        self._scan_auto_export_session_dir: Path | None = None
+        self._scan_auto_export_samples_path: Path | None = None
+        self._scan_auto_export_summary_path: Path | None = None
+        self._scan_auto_export_session_id: str | None = None
         self._scan_repeat_countdown_timer = QTimer(container)
         self._scan_repeat_countdown_timer.setInterval(500)
         self._scan_repeat_countdown_timer.timeout.connect(self._update_scan_repeat_countdown)
+        self._scan_active_center_mode = str(self._scan_combo_value(self.scan_center_mode_combo, "tracking_relative")).strip().lower()
+        self._scan_active_config = None
+        self._update_scan_profile_axes(self._scan_active_center_mode == "tracking_relative")
+        self._refresh_scan_path_visuals()
+        QTimer.singleShot(0, self._update_scan_visual_geometry)
         self.scan_start_button.clicked.connect(self.start_scan_session)
         self.scan_pause_button.clicked.connect(self.scan_session.pause)
         self.scan_resume_button.clicked.connect(self.scan_session.resume)
         self.scan_stop_button.clicked.connect(self._stop_scan_session)
         self.scan_apply_button.clicked.connect(lambda: self._apply_scan_offset(False))
         self.scan_save_button.clicked.connect(lambda: self._apply_scan_offset(True))
-        self.scan_export_error_csv_button.clicked.connect(self._export_scan_error_csv)
         self.scan_span_spin.valueChanged.connect(lambda *_args: self._update_scan_error_plot(self._scan_error_history))
+        self.scan_span_spin.valueChanged.connect(lambda *_args: self._refresh_scan_path_visuals())
+        self.scan_center_mode_combo.currentIndexChanged.connect(self._on_scan_preview_controls_changed)
+        self.scan_metric_combo.currentIndexChanged.connect(self._on_scan_preview_controls_changed)
+        self.scan_auto_export_checkbox.toggled.connect(self._on_scan_auto_export_toggled)
 
     def _build_scan_config(self) -> dict:
         center_mode = self._scan_combo_value(self.scan_center_mode_combo, "tracking_relative")
@@ -435,6 +514,10 @@ EL +1  o--o--o--o--o
             self._cancel_scan_repeat_countdown()
             return
         if not repeating:
+            self._reset_scan_auto_export_session()
+            if self.scan_auto_export_checkbox.isChecked():
+                self._begin_scan_auto_export_session()
+        if not repeating:
             self._scan_error_history = []
             self._scan_repeat_active = bool(self.scan_repeat_checkbox.isChecked())
             self._scan_orbit_scan_count = 0
@@ -455,9 +538,12 @@ EL +1  o--o--o--o--o
         self.scan_horizontal_curve.clear()
         self.scan_vertical_curve.clear()
         self._clear_scan_profile_markers()
+        self._reset_scan_profile_metric_ranges()
+        self._reset_scan_postprocess_summary()
         self._update_scan_error_plot(self._scan_error_history)
         self._scan_active_center_mode = str(config.get("center_mode", "fixed")).strip().lower()
         self._refresh_scan_path_visuals()
+        self._update_scan_postprocess_summary()
         self.scan_progress_label.setText(f"0/{len(self._scan_plan_points) or 0} | queued")
         self.scan_session.start(config)
 
@@ -469,20 +555,79 @@ EL +1  o--o--o--o--o
         return mode in {"dynamic", "follow", "orbit", "theoretical", "tracking", "tracking_relative"}
 
     def _update_scan_profile_axes(self, relative: bool) -> None:
+        metric_name, metric_unit = self._scan_metric_axis_metadata()
         self.scan_heatmap_widget.set_axis_mode(relative=relative)
         self.scan_horizontal_plot.setLabel(
             "bottom",
             "Offset Azimuth" if relative else "Azimuth",
             units="deg",
         )
-        self.scan_horizontal_plot.setLabel("left", "Metric")
-        self.scan_vertical_plot.setLabel("bottom", "Metric")
+        self.scan_horizontal_plot.setLabel("left", metric_name, units=metric_unit)
+        self.scan_vertical_plot.setLabel("bottom", metric_name, units=metric_unit)
         self.scan_vertical_plot.setLabel(
             "left",
             "Offset Elevation" if relative else "Elevation",
             units="deg",
         )
         self._sync_scan_profile_margins()
+
+    def _scan_metric_axis_metadata(self) -> tuple[str, str]:
+        metric = str(self._scan_combo_value(self.scan_metric_combo, "band_power")) if hasattr(self, "scan_metric_combo") else "band_power"
+        if metric == "band_power":
+            return "Power", "dBm"
+        return "SNR", "dB"
+
+    def _format_scan_metric_value(self, value: float | int | None) -> str:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return "-"
+        _metric_name, metric_unit = self._scan_metric_axis_metadata()
+        return f"{float(value):.2f} {metric_unit}"
+
+    @staticmethod
+    def _format_scan_width_value(value: float | None) -> str:
+        if value is None or not math.isfinite(float(value)):
+            return "-"
+        return f"{float(value):.3f} deg"
+
+    @staticmethod
+    def _estimate_profile_width(xs: list[float], ys: list[float], *, drop_db: float = 3.0) -> float | None:
+        if len(xs) < 3 or len(xs) != len(ys):
+            return None
+        peak_index = max(range(len(ys)), key=lambda idx: ys[idx])
+        peak_value = float(ys[peak_index])
+        threshold = peak_value - float(drop_db)
+
+        left_cross = None
+        for idx in range(peak_index - 1, -1, -1):
+            y0 = float(ys[idx])
+            y1 = float(ys[idx + 1])
+            if y0 < threshold <= y1:
+                x0 = float(xs[idx])
+                x1 = float(xs[idx + 1])
+                if math.isclose(y1, y0, rel_tol=0.0, abs_tol=1e-12):
+                    left_cross = x0
+                else:
+                    ratio = (threshold - y0) / (y1 - y0)
+                    left_cross = x0 + ratio * (x1 - x0)
+                break
+
+        right_cross = None
+        for idx in range(peak_index, len(ys) - 1):
+            y0 = float(ys[idx])
+            y1 = float(ys[idx + 1])
+            if y0 >= threshold > y1:
+                x0 = float(xs[idx])
+                x1 = float(xs[idx + 1])
+                if math.isclose(y1, y0, rel_tol=0.0, abs_tol=1e-12):
+                    right_cross = x1
+                else:
+                    ratio = (threshold - y0) / (y1 - y0)
+                    right_cross = x0 + ratio * (x1 - x0)
+                break
+
+        if left_cross is None or right_cross is None:
+            return None
+        return max(0.0, float(right_cross - left_cross))
 
     def _sync_scan_profile_margins(self) -> None:
         try:
@@ -492,6 +637,372 @@ EL +1  o--o--o--o--o
             horizontal_left_axis.setWidth(width)
         except Exception:
             pass
+
+    def _update_scan_visual_geometry(self) -> None:
+        visual_panel = getattr(self, "_scan_visual_panel", None)
+        if visual_panel is None:
+            return
+        profile_thickness = int(getattr(self, "_scan_profile_thickness", 160))
+        profile_spacing = int(getattr(self, "_scan_profile_spacing", 6))
+        rect = visual_panel.contentsRect()
+        available_width = rect.width() - profile_thickness - profile_spacing
+        available_height = rect.height() - profile_thickness - profile_spacing
+        side = max(1, min(int(available_width), int(available_height)))
+        group_width = profile_thickness + profile_spacing + side
+        group_height = side + profile_spacing + profile_thickness
+        origin_x = rect.x() + max(0, (rect.width() - group_width) // 2)
+        origin_y = rect.y() + max(0, (rect.height() - group_height) // 2)
+        try:
+            self.scan_vertical_plot.setGeometry(origin_x, origin_y, profile_thickness, side)
+        except Exception:
+            pass
+        try:
+            self.scan_heatmap_widget.setGeometry(origin_x + profile_thickness + profile_spacing, origin_y, side, side)
+        except Exception:
+            pass
+        try:
+            self.scan_horizontal_plot.setGeometry(
+                origin_x + profile_thickness + profile_spacing,
+                origin_y + side + profile_spacing,
+                side,
+                profile_thickness,
+            )
+        except Exception:
+            pass
+        self._sync_scan_profile_margins()
+
+    def _reset_scan_profile_metric_ranges(self) -> None:
+        try:
+            self.scan_horizontal_plot.enableAutoRange(y=True)
+        except Exception:
+            pass
+        try:
+            self.scan_vertical_plot.enableAutoRange(x=True)
+        except Exception:
+            pass
+
+    def _sync_scan_profile_metric_ranges(self, az_metrics: list[float], el_metrics: list[float]) -> None:
+        values = [float(value) for value in [*az_metrics, *el_metrics] if isinstance(value, (int, float))]
+        if not values:
+            self._reset_scan_profile_metric_ranges()
+            return
+        min_value = min(values)
+        max_value = max(values)
+        if math.isclose(min_value, max_value, rel_tol=0.0, abs_tol=1e-9):
+            pad = max(0.5, abs(min_value) * 0.1, 0.1)
+            min_value -= pad
+            max_value += pad
+        else:
+            pad = max((max_value - min_value) * 0.05, 0.1)
+            min_value -= pad
+            max_value += pad
+        try:
+            self.scan_horizontal_plot.enableAutoRange(y=False)
+            self.scan_horizontal_plot.setYRange(min_value, max_value, padding=0.0)
+        except Exception:
+            pass
+        try:
+            self.scan_vertical_plot.enableAutoRange(x=False)
+            self.scan_vertical_plot.setXRange(min_value, max_value, padding=0.0)
+        except Exception:
+            pass
+
+    def _on_scan_preview_controls_changed(self, *_args) -> None:
+        self._scan_active_center_mode = str(self._scan_combo_value(self.scan_center_mode_combo, "tracking_relative")).strip().lower()
+        self._update_scan_profile_axes(self._scan_active_center_mode == "tracking_relative")
+        if not self._scan_plan_points and self._scan_current_stage in {"idle", "queued", "completed", "stopped", "error"}:
+            self._refresh_scan_path_visuals()
+        QTimer.singleShot(0, self._update_scan_visual_geometry)
+
+    def _on_scan_auto_export_toggled(self, checked: bool) -> None:
+        if not checked:
+            self.status_bar.showMessage("Scan auto export disabled", 3000)
+            return
+        if self._scan_auto_export_session_dir is None and self._scan_current_stage in {"running", "paused", "queued", "measure", "move", "settle"}:
+            self._begin_scan_auto_export_session()
+        target = self._scan_auto_export_session_dir or (get_logs_dir() / "scan_exports")
+        self.status_bar.showMessage(f"Scan auto export enabled: {target}", 5000)
+
+    def _reset_scan_auto_export_session(self) -> None:
+        self._scan_auto_export_session_dir = None
+        self._scan_auto_export_samples_path = None
+        self._scan_auto_export_summary_path = None
+        self._scan_auto_export_session_id = None
+
+    def _begin_scan_auto_export_session(self) -> None:
+        session_id = time.strftime("%Y%m%d_%H%M%S")
+        export_root = get_logs_dir() / "scan_exports"
+        session_dir = export_root / f"scan_{session_id}"
+        suffix = 1
+        while session_dir.exists():
+            suffix += 1
+            session_dir = export_root / f"scan_{session_id}_{suffix}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        self._scan_auto_export_session_dir = session_dir
+        self._scan_auto_export_samples_path = session_dir / "scan_samples.csv"
+        self._scan_auto_export_summary_path = session_dir / "scan_summary.csv"
+        self._scan_auto_export_session_id = session_id
+        self.status_bar.showMessage(f"Scan auto export started: {session_dir}", 5000)
+
+    @staticmethod
+    def _append_csv_row(path: Path, fieldnames: list[str], row: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_exists = path.exists()
+        with path.open("a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({name: row.get(name, "") for name in fieldnames})
+            handle.flush()
+
+    def _write_scan_auto_export_sample(self, sample: dict) -> None:
+        if not self.scan_auto_export_checkbox.isChecked():
+            return
+        try:
+            if self._scan_auto_export_samples_path is None:
+                self._begin_scan_auto_export_session()
+            path = self._scan_auto_export_samples_path
+            if path is None:
+                return
+            config = getattr(self, "_scan_active_config", {}) or {}
+            current_index = len(getattr(self, "_scan_samples", []))
+            fieldnames = [
+                "session_id",
+                "scan_id",
+                "sample_index",
+                "strategy",
+                "center_mode",
+                "metric",
+                "span_deg",
+                "step_deg",
+                "az",
+                "el",
+                "value",
+                "timestamp",
+                "phase",
+                "axis",
+                "theoretical_az",
+                "theoretical_el",
+                "offset_az",
+                "offset_el",
+                "relative_az_deg",
+                "relative_el_deg",
+            ]
+            row = {
+                "session_id": self._scan_auto_export_session_id or "",
+                "scan_id": self._scan_orbit_scan_count,
+                "sample_index": current_index,
+                "strategy": config.get("strategy", ""),
+                "center_mode": config.get("center_mode", ""),
+                "metric": config.get("metric", ""),
+                "span_deg": config.get("span_deg", ""),
+                "step_deg": config.get("step_deg", ""),
+                "az": sample.get("az", ""),
+                "el": sample.get("el", ""),
+                "value": sample.get("value", ""),
+                "timestamp": sample.get("timestamp", ""),
+                "phase": sample.get("phase", ""),
+                "axis": sample.get("axis", ""),
+                "theoretical_az": sample.get("theoretical_az", ""),
+                "theoretical_el": sample.get("theoretical_el", ""),
+                "offset_az": sample.get("offset_az", ""),
+                "offset_el": sample.get("offset_el", ""),
+                "relative_az_deg": sample.get("relative_az_deg", ""),
+                "relative_el_deg": sample.get("relative_el_deg", ""),
+            }
+            self._append_csv_row(path, fieldnames, row)
+        except OSError as exc:
+            self.scan_auto_export_checkbox.setChecked(False)
+            self.status_bar.showMessage(f"Scan auto export disabled: {exc}", 5000)
+
+    def _write_scan_auto_export_summary(self, result: dict) -> None:
+        if not self.scan_auto_export_checkbox.isChecked():
+            return
+        try:
+            if self._scan_auto_export_summary_path is None:
+                self._begin_scan_auto_export_session()
+            path = self._scan_auto_export_summary_path
+            if path is None:
+                return
+            peak = result.get("peak_estimate", {}) if isinstance(result, dict) else {}
+            best = result.get("best_point", {}) if isinstance(result, dict) else {}
+            config = getattr(self, "_scan_active_config", {}) or {}
+            fieldnames = [
+                "session_id",
+                "scan_id",
+                "completed_at",
+                "strategy",
+                "center_mode",
+                "metric",
+                "span_deg",
+                "step_deg",
+                "sample_count",
+                "best_az",
+                "best_el",
+                "best_value",
+                "peak_az",
+                "peak_el",
+                "peak_value",
+                "theoretical_az",
+                "theoretical_el",
+                "az_error_deg",
+                "el_error_deg",
+                "angular_error_deg",
+                "method",
+                "confidence",
+            ]
+            row = {
+                "session_id": self._scan_auto_export_session_id or "",
+                "scan_id": self._scan_orbit_scan_count,
+                "completed_at": time.time(),
+                "strategy": result.get("strategy", config.get("strategy", "")),
+                "center_mode": config.get("center_mode", ""),
+                "metric": config.get("metric", ""),
+                "span_deg": config.get("span_deg", ""),
+                "step_deg": config.get("step_deg", ""),
+                "sample_count": len(result.get("samples", []) if isinstance(result, dict) else []),
+                "best_az": best.get("az", ""),
+                "best_el": best.get("el", ""),
+                "best_value": best.get("value", ""),
+                "peak_az": peak.get("az", ""),
+                "peak_el": peak.get("el", ""),
+                "peak_value": peak.get("value", ""),
+                "theoretical_az": peak.get("theoretical_az", ""),
+                "theoretical_el": peak.get("theoretical_el", ""),
+                "az_error_deg": peak.get("az_error_deg", ""),
+                "el_error_deg": peak.get("el_error_deg", ""),
+                "angular_error_deg": peak.get("angular_error_deg", ""),
+                "method": peak.get("method", ""),
+                "confidence": peak.get("confidence", ""),
+            }
+            self._append_csv_row(path, fieldnames, row)
+        except OSError as exc:
+            self.scan_auto_export_checkbox.setChecked(False)
+            self.status_bar.showMessage(f"Scan auto export disabled: {exc}", 5000)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "_scan_visual_panel", None) and event is not None and event.type() == QEvent.Resize:
+            QTimer.singleShot(0, self._update_scan_visual_geometry)
+        return False
+
+    @staticmethod
+    def _format_scan_point_summary(point: dict | None) -> str:
+        if not isinstance(point, dict) or not point:
+            return "-"
+        az = float(point.get("az", 0.0))
+        el = float(point.get("el", 0.0))
+        value = float(point.get("value", 0.0))
+        return f"AZ={az:.3f} EL={el:.3f} V={value:.2f}"
+
+    def _scan_grid_summary_text(self, result: dict | None = None) -> str:
+        if isinstance(result, dict):
+            heatmap = result.get("heatmap")
+            if isinstance(heatmap, dict):
+                az_values = list(heatmap.get("az_values", []) or [])
+                el_values = list(heatmap.get("el_values", []) or [])
+                if az_values and el_values:
+                    return f"{len(az_values)} x {len(el_values)}"
+        coords = [coord for coord in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coord is not None]
+        if not coords:
+            return "-"
+        az_count = len({round(coord[0], 6) for coord in coords})
+        el_count = len({round(coord[1], 6) for coord in coords})
+        return f"{az_count} x {el_count}"
+
+    def _update_scan_postprocess_summary(self, result: dict | None = None) -> None:
+        result = result if isinstance(result, dict) else {}
+        samples = list(result.get("samples", self._scan_samples or []))
+        best = result.get("best_point")
+        if not best and samples:
+            best = max(samples, key=lambda point: float(point.get("value", float("-inf"))))
+        peak = result.get("peak_estimate")
+        if not peak and isinstance(best, dict):
+            theoretical_az = float(best.get("theoretical_az", best.get("az", 0.0)))
+            theoretical_el = float(best.get("theoretical_el", best.get("el", 0.0)))
+            az_error = float(best.get("az", 0.0)) - theoretical_az
+            el_error = float(best.get("el", 0.0)) - theoretical_el
+            peak = {
+                "az": float(best.get("az", 0.0)),
+                "el": float(best.get("el", 0.0)),
+                "value": float(best.get("value", 0.0)),
+                "theoretical_az": theoretical_az,
+                "theoretical_el": theoretical_el,
+                "az_error_deg": az_error,
+                "el_error_deg": el_error,
+                "angular_error_deg": math.hypot(az_error, el_error),
+                "method": "live_best_sample",
+                "confidence": 0.0,
+            }
+
+        strategy = str(
+            result.get(
+                "strategy",
+                self._scan_combo_value(self.scan_strategy_combo, "grid") if hasattr(self, "scan_strategy_combo") else "grid",
+            )
+        )
+        metric = str(
+            result.get(
+                "metric",
+                self._scan_combo_value(self.scan_metric_combo, "band_power") if hasattr(self, "scan_metric_combo") else "band_power",
+            )
+        )
+        metric_unit = "dBm" if metric == "band_power" else "dB"
+        values = [
+            float(point.get("value", 0.0))
+            for point in samples
+            if isinstance(point, dict) and math.isfinite(float(point.get("value", 0.0)))
+        ]
+        min_value = min(values) if values else None
+        max_value = max(values) if values else None
+        dynamic_range = (max_value - min_value) if min_value is not None and max_value is not None else None
+
+        peak_value = None
+        if isinstance(peak, dict) and math.isfinite(float(peak.get("value", float("nan")))):
+            peak_value = float(peak.get("value", 0.0))
+        elif isinstance(best, dict) and math.isfinite(float(best.get("value", float("nan")))):
+            peak_value = float(best.get("value", 0.0))
+
+        relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
+        az_xs, az_ys = self._project_scan_profile(samples, "az", relative=relative)
+        el_xs, el_ys = self._project_scan_profile(samples, "el", relative=relative)
+        az_width = self._estimate_profile_width(az_xs, az_ys)
+        el_width = self._estimate_profile_width(el_xs, el_ys)
+
+        self.scan_post_strategy_value.setText(strategy or "-")
+        self.scan_post_unit_value.setText(metric_unit)
+        self.scan_post_samples_value.setText(str(len(samples)))
+        self.scan_post_grid_value.setText(self._scan_grid_summary_text(result))
+        if isinstance(peak, dict) and peak:
+            self.scan_post_peak_detected_value.setText(
+                f"dAZ={float(peak.get('az_error_deg', result.get('az_offset_deg', 0.0))):+.3f} "
+                f"dEL={float(peak.get('el_error_deg', result.get('el_offset_deg', 0.0))):+.3f}"
+            )
+            self.scan_post_angular_value.setText(f"{float(peak.get('angular_error_deg', 0.0)):.3f} deg")
+        else:
+            self.scan_post_peak_detected_value.setText("-")
+            self.scan_post_angular_value.setText("-")
+        self.scan_post_peak_value_value.setText(self._format_scan_metric_value(peak_value))
+        self.scan_post_min_value.setText(self._format_scan_metric_value(min_value))
+        self.scan_post_max_value.setText(self._format_scan_metric_value(max_value))
+        self.scan_post_dynamic_range_value.setText(
+            f"{float(dynamic_range):.2f} {metric_unit}" if dynamic_range is not None and math.isfinite(float(dynamic_range)) else "-"
+        )
+        self.scan_post_az_width_value.setText(self._format_scan_width_value(az_width))
+        self.scan_post_el_width_value.setText(self._format_scan_width_value(el_width))
+
+    def _reset_scan_postprocess_summary(self) -> None:
+        self.scan_post_strategy_value.setText("-")
+        self.scan_post_unit_value.setText("-")
+        self.scan_post_samples_value.setText("-")
+        self.scan_post_grid_value.setText("-")
+        self.scan_post_peak_detected_value.setText("-")
+        self.scan_post_peak_value_value.setText("-")
+        self.scan_post_angular_value.setText("-")
+        self.scan_post_min_value.setText("-")
+        self.scan_post_max_value.setText("-")
+        self.scan_post_dynamic_range_value.setText("-")
+        self.scan_post_az_width_value.setText("-")
+        self.scan_post_el_width_value.setText("-")
 
     def _prepare_scan_session(self, config: dict) -> bool:
         if not self.has_connection():
@@ -770,11 +1281,8 @@ EL +1  o--o--o--o--o
         measured = [coords for coords in (self._scan_plot_coordinates(point) for point in self._scan_samples) if coords is not None]
         current = self._scan_plot_coordinates(self._scan_current_point)
         self.scan_heatmap_widget.set_scan_points(planned, measured, current)
-        if planned:
-            x_min, x_max, y_min, y_max = self._scan_plot_bounds()
-            self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
-        else:
-            self.scan_heatmap_widget.clear_scan_bounds()
+        x_min, x_max, y_min, y_max = self._scan_plot_bounds()
+        self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
         current_result = getattr(self, "_scan_current_result", None) or {}
         strategy = str(
             current_result.get(
@@ -800,28 +1308,17 @@ EL +1  o--o--o--o--o
         else:
             self.scan_heatmap_widget.set_grid_cells([], [], cell_width=1.0, cell_height=1.0)
             self.scan_heatmap_widget.set_sample_cells([], [])
-        if planned:
-            try:
-                self.scan_horizontal_plot.enableAutoRange(x=False)
-                self.scan_horizontal_plot.setXRange(float(x_min), float(x_max), padding=0.0)
-            except Exception:
-                pass
-            try:
-                self.scan_vertical_plot.enableAutoRange(y=False)
-                self.scan_vertical_plot.setYRange(float(y_min), float(y_max), padding=0.0)
-            except Exception:
-                pass
-            self._sync_scan_profile_margins()
-            self.scan_heatmap_widget.set_scan_bounds(x_min, x_max, y_min, y_max)
-        else:
-            try:
-                self.scan_horizontal_plot.enableAutoRange(x=True)
-            except Exception:
-                pass
-            try:
-                self.scan_vertical_plot.enableAutoRange(y=True)
-            except Exception:
-                pass
+        try:
+            self.scan_horizontal_plot.enableAutoRange(x=False)
+            self.scan_horizontal_plot.setXRange(float(x_min), float(x_max), padding=0.0)
+        except Exception:
+            pass
+        try:
+            self.scan_vertical_plot.enableAutoRange(y=False)
+            self.scan_vertical_plot.setYRange(float(y_min), float(y_max), padding=0.0)
+        except Exception:
+            pass
+        self._sync_scan_profile_margins()
 
     def _scan_live_grid_heatmap(self) -> dict | None:
         if not self._scan_samples or not self._scan_plan_points:
@@ -859,13 +1356,25 @@ EL +1  o--o--o--o--o
 
     def _scan_plot_bounds(self) -> tuple[float, float, float, float]:
         config = getattr(self, "_scan_active_config", None)
+        if (not config or not self._scan_plan_points) and hasattr(self, "scan_span_spin"):
+            try:
+                config = self._build_scan_config()
+            except Exception:
+                config = config or {}
         relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
-        if relative:
-            span_az = float((config or {}).get("span_az_deg", (config or {}).get("span_deg", self.scan_span_spin.value() if hasattr(self, "scan_span_spin") else 2.0)))
-            span_el = float((config or {}).get("span_el_deg", (config or {}).get("span_deg", self.scan_span_spin.value() if hasattr(self, "scan_span_spin") else 2.0)))
+        span_az = float((config or {}).get("span_az_deg", (config or {}).get("span_deg", self.scan_span_spin.value() if hasattr(self, "scan_span_spin") else 2.0)))
+        span_el = float((config or {}).get("span_el_deg", (config or {}).get("span_deg", self.scan_span_spin.value() if hasattr(self, "scan_span_spin") else 2.0)))
+        center_az = float((config or {}).get("center_az_deg", 0.0))
+        center_el = float((config or {}).get("center_el_deg", 0.0))
+        if self._scan_plan_points:
+            cell_width, cell_height = self._scan_grid_cell_size()
+        else:
             step = float((config or {}).get("step_deg", self.scan_step_spin.value() if hasattr(self, "scan_step_spin") else 0.5))
-            half_w = step / 2.0
-            half_h = step / 2.0
+            cell_width = step
+            cell_height = step
+        half_w = float(cell_width) / 2.0
+        half_h = float(cell_height) / 2.0
+        if relative:
             return (
                 -(span_az / 2.0) - half_w,
                 +(span_az / 2.0) + half_w,
@@ -874,17 +1383,21 @@ EL +1  o--o--o--o--o
             )
         coords = [coord for coord in (self._scan_plot_coordinates(point) for point in self._scan_plan_points) if coord is not None]
         if not coords:
-            return -1.0, 1.0, -1.0, 1.0
-        cell_width, cell_height = self._scan_grid_cell_size()
-        half_w = float(cell_width) / 2.0
-        half_h = float(cell_height) / 2.0
+            return (
+                center_az - (span_az / 2.0) - half_w,
+                center_az + (span_az / 2.0) + half_w,
+                center_el - (span_el / 2.0) - half_h,
+                center_el + (span_el / 2.0) + half_h,
+            )
         xs = [coord[0] for coord in coords]
         ys = [coord[1] for coord in coords]
+        center_x = (min(xs) + max(xs)) / 2.0
+        center_y = (min(ys) + max(ys)) / 2.0
         return (
-            min(xs) - half_w,
-            max(xs) + half_w,
-            min(ys) - half_h,
-            max(ys) + half_h,
+            center_x - (span_az / 2.0) - half_w,
+            center_x + (span_az / 2.0) + half_w,
+            center_y - (span_el / 2.0) - half_h,
+            center_y + (span_el / 2.0) + half_h,
         )
 
     @staticmethod
@@ -938,19 +1451,20 @@ EL +1  o--o--o--o--o
 
     def _on_scan_point_measured(self, sample: dict) -> None:
         self._scan_samples.append(sample)
+        self._write_scan_auto_export_sample(sample)
         self._refresh_scan_path_visuals()
         best = max(self._scan_samples, key=lambda point: float(point.get("value", float("-inf"))))
         best_coords = self._scan_plot_coordinates(best)
         if best_coords is not None:
             cell_width, cell_height = self._scan_grid_cell_size()
             self.scan_heatmap_widget.set_best_point(best_coords[0], best_coords[1], cell_width=cell_width, cell_height=cell_height)
-        self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
-        self.scan_offset_label.setText(f"dAZ={best.get('offset_az', 0.0):+.3f} dEL={best.get('offset_el', 0.0):+.3f}")
         relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
         az_xs, az_ys = self._project_scan_profile(self._scan_samples, "az", relative=relative)
         el_xs, el_ys = self._project_scan_profile(self._scan_samples, "el", relative=relative)
         self.scan_horizontal_curve.setData(az_xs, az_ys)
         self.scan_vertical_curve.setData(el_ys, el_xs)
+        self._sync_scan_profile_metric_ranges(az_ys, el_ys)
+        self._update_scan_postprocess_summary()
 
     def _on_scan_progress_updated(self, snapshot: dict) -> None:
         current = int(snapshot.get("current", 0))
@@ -980,6 +1494,7 @@ EL +1  o--o--o--o--o
 
     def _on_scan_completed(self, result: dict) -> None:
         self._scan_current_result = result
+        self._write_scan_auto_export_summary(result)
         self._reset_scan_probe_offset()
         self._scan_current_point = None
         self._scan_current_stage = "completed"
@@ -988,8 +1503,6 @@ EL +1  o--o--o--o--o
         peak = result.get("peak_estimate", {})
         best = result.get("best_point", {})
         self.scan_progress_label.setText(f"{self._scan_progress_current}/{self._scan_progress_total} | completed")
-        self.scan_best_label.setText(f"AZ={best.get('az', 0.0):.2f} EL={best.get('el', 0.0):.2f} V={best.get('value', 0.0):.2f}")
-        self.scan_offset_label.setText(f"dAZ={result.get('az_offset_deg', 0.0):.3f} dEL={result.get('el_offset_deg', 0.0):.3f}")
         best_coords = self._scan_plot_coordinates(best)
         if best_coords is not None:
             cell_width, cell_height = self._scan_grid_cell_size()
@@ -1011,6 +1524,11 @@ EL +1  o--o--o--o--o
         self._append_scan_error_history(peak)
         self._update_scan_error_plot(self._scan_error_history)
         self._update_profile_markers(peak)
+        relative = str(getattr(self, "_scan_active_center_mode", "fixed")).strip().lower() == "tracking_relative"
+        _, az_ys = self._project_scan_profile(self._scan_samples, "az", relative=relative)
+        _, el_ys = self._project_scan_profile(self._scan_samples, "el", relative=relative)
+        self._sync_scan_profile_metric_ranges(az_ys, el_ys)
+        self._update_scan_postprocess_summary(result)
         self._schedule_next_scan_sequence()
 
     def _update_scan_error_plot(self, error_trace: list[dict]) -> None:
@@ -1076,10 +1594,10 @@ EL +1  o--o--o--o--o
         interval_s = max(1.0, float(self._scan_repeat_interval_s))
         percent = int(round((remaining_s / interval_s) * 100.0))
         self.scan_next_wait_bar.setValue(max(0, min(100, percent)))
-        self.scan_next_wait_label.setText(f"{remaining_s:.0f}s -> scan {self._scan_orbit_scan_count + 1}")
+        self.scan_next_wait_label.setText(f"{remaining_s:.0f}s")
         if remaining_s <= 0.0:
             self.scan_next_wait_bar.setValue(0)
-            self.scan_next_wait_label.setText(f"starting scan {self._scan_orbit_scan_count + 1}")
+            self.scan_next_wait_label.setText("0s")
             self._scan_repeat_countdown_timer.stop()
 
     def _update_profile_markers(self, peak: dict) -> None:
@@ -1200,3 +1718,4 @@ EL +1  o--o--o--o--o
         if getattr(self, "scan_session", None) is not None:
             self.scan_session.stop()
         self._cancel_scan_repeat_countdown()
+        self._reset_scan_auto_export_session()
