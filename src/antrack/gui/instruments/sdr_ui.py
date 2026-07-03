@@ -25,8 +25,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from antrack.core.dsp.snr import average_power_spectrum_db, bin_width_to_density_offset_db, compute_band_power_metrics
-from antrack.core.instruments.sdr_client import SAMPLE_RATE_PRESETS_HZ, SdrClient
+from antrack.core.dsp.snr import (
+    bin_width_to_density_offset_db,
+    compute_trace_band_power_metrics,
+)
 from antrack.gui.dialogs.auto_gain_table import AutoGainTableDialog
 from antrack.gui.widgets.frequency_control import FrequencyControlWidget
 from antrack.gui.widgets.level_meter import LevelMeterWidget
@@ -40,6 +42,12 @@ SMOOTHING_OPTIONS = ["Off", "Light", "Medium", "Strong"]
 SDR_HARDWARE_MAX_FREQ_HZ = 2_000_000_000.0
 
 
+def _load_sdr_runtime():
+    from antrack.core.instruments.sdr_client import SAMPLE_RATE_PRESETS_HZ, SdrClient
+
+    return list(SAMPLE_RATE_PRESETS_HZ), SdrClient
+
+
 class SdrUiMixin:
     """Populate and manage the SDR tab."""
 
@@ -51,7 +59,8 @@ class SdrUiMixin:
             return
 
         self._sdr_ui_ready = True
-        self.sdr_client = SdrClient(
+        self._sdr_sample_rate_presets_hz, sdr_client_cls = _load_sdr_runtime()
+        self.sdr_client = sdr_client_cls(
             self.settings,
             thread_manager=self.thread_manager,
             logger=self.logger.getChild("SDR"),
@@ -64,6 +73,10 @@ class SdrUiMixin:
         self._sdr_freq_timer.setSingleShot(True)
         self._sdr_freq_timer.setInterval(120)
         self._sdr_freq_timer.timeout.connect(self._apply_pending_sdr_frequency)
+        self._sdr_snr_refresh_timer = QTimer(container)
+        self._sdr_snr_refresh_timer.setSingleShot(True)
+        self._sdr_snr_refresh_timer.setInterval(120)
+        self._sdr_snr_refresh_timer.timeout.connect(self._update_sdr_snr_display)
         self._pending_sdr_freq_mhz = None
         self._sdr_snr_reference_db = None
         self._sdr_snr_reference_per_bin_db = None
@@ -357,9 +370,9 @@ class SdrUiMixin:
         root_layout.addWidget(splitter, 1)
 
         self.sdr_client.data_storage.data_updated.connect(self.sdr_spectrum_plot.update_plot)
-        self.sdr_client.data_storage.data_updated.connect(self._update_sdr_snr_display)
+        self.sdr_client.data_storage.data_updated.connect(self._schedule_sdr_snr_display_update)
         self.sdr_client.data_storage.data_recalculated.connect(self.sdr_spectrum_plot.recalculate_plot)
-        self.sdr_client.data_storage.data_recalculated.connect(self._update_sdr_snr_display)
+        self.sdr_client.data_storage.data_recalculated.connect(self._schedule_sdr_snr_display_update)
         self.sdr_client.data_storage.history_updated.connect(self.sdr_waterfall_plot.update_plot)
         self.sdr_client.data_storage.history_recalculated.connect(self.sdr_waterfall_plot.recalculate_plot)
         self.sdr_spectrum_plot.visible_span_changed.connect(self.sdr_client.update_fft_for_view)
@@ -373,8 +386,8 @@ class SdrUiMixin:
         self.sdr_client.settings_changed.connect(self._refresh_sdr_controls)
         self.sdr_client.started.connect(self._refresh_sdr_run_buttons)
         self.sdr_client.stopped.connect(self._refresh_sdr_run_buttons)
-        self.sdr_client.started.connect(self._update_sdr_snr_display)
-        self.sdr_client.stopped.connect(self._update_sdr_snr_display)
+        self.sdr_client.started.connect(self._schedule_sdr_snr_display_update)
+        self.sdr_client.stopped.connect(self._schedule_sdr_snr_display_update)
         self.sdr_client.started.connect(self._on_sdr_started_refresh_level_meter)
 
         self.sdr_run_toggle_button.clicked.connect(self._on_sdr_run_toggle_clicked)
@@ -417,7 +430,7 @@ class SdrUiMixin:
             self._apply_auto_gain_profile()
         if self._sdr_snr_mode == "relative":
             self._capture_sdr_relative_reference()
-        QTimer.singleShot(0, self._update_sdr_snr_display)
+        QTimer.singleShot(0, self._schedule_sdr_snr_display_update)
 
     def _clear_layout(self, layout) -> None:
         while layout.count():
@@ -460,7 +473,7 @@ class SdrUiMixin:
             self.sdr_run_toggle_button.setChecked(running)
             self.sdr_run_toggle_button.setText("Stop" if running else "Start")
             self.sdr_run_toggle_button.setStyleSheet(
-                "QPushButton {{ color: white; font-weight: 600; border: 1px solid #606060; border-radius: 4px; "
+                "QPushButton { color: white; font-weight: 600; border: 1px solid #606060; border-radius: 4px; "
                 f"background-color: {'#2f9e44' if running else '#c92a2a'}; }}"
             )
         finally:
@@ -583,7 +596,7 @@ class SdrUiMixin:
         finally:
             self.sdr_snr_average_spin.blockSignals(False)
         self._sync_plot_scale_controls()
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
         self._refresh_sdr_run_buttons()
 
     def _populate_source_combo(self, snapshot: dict) -> None:
@@ -625,7 +638,8 @@ class SdrUiMixin:
             if rate_hz > 0.0:
                 supported_rates.append(rate_hz)
         if not supported_rates:
-            supported_rates = [float(rate_hz) for rate_hz in SAMPLE_RATE_PRESETS_HZ]
+            presets = getattr(self, "_sdr_sample_rate_presets_hz", None) or []
+            supported_rates = [float(rate_hz) for rate_hz in presets]
         supported_rates = sorted(set(supported_rates))
         try:
             self.sdr_sample_rate_combo.blockSignals(True)
@@ -894,7 +908,7 @@ class SdrUiMixin:
         self._apply_sdr_plot_scales()
         self.sdr_spectrum_plot.recalculate_plot(self.sdr_client.data_storage)
         self.sdr_waterfall_plot.recalculate_plot(self.sdr_client.data_storage)
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _on_sdr_view_mode_changed(self, index: int) -> None:
         value = self.sdr_view_mode_combo.itemData(index)
@@ -1003,7 +1017,7 @@ class SdrUiMixin:
     def _on_sdr_snr_average_changed(self, value: float) -> None:
         self._sdr_snr_integration_s = self._coerce_float(value, 2.0, minimum=0.1)
         self._persist_sdr_value("SNR_INTEGRATION_S", self._sdr_snr_integration_s)
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _on_sdr_snr_mode_button_clicked(self, checked: bool) -> None:
         target_mode = "relative" if checked else "absolute"
@@ -1012,7 +1026,7 @@ class SdrUiMixin:
     def _on_sdr_snr_zero_clicked(self) -> None:
         self._capture_sdr_relative_reference()
         self._set_sdr_snr_mode("relative", capture_reference=False)
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _on_sdr_level_unit_changed(self, unit_key: str) -> None:
         normalized = str(unit_key).strip().lower()
@@ -1023,7 +1037,7 @@ class SdrUiMixin:
         self._sdr_level_unit = normalized
         self.sdr_level_meter.set_unit(normalized)
         self._persist_sdr_value("LEVEL_UNIT", normalized)
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _on_sdr_spectrum_min_changed(self, value: int) -> None:
         self._sdr_spectrum_y_min_db = float(value)
@@ -1069,7 +1083,7 @@ class SdrUiMixin:
             return
         self.sdr_client.set_receiver_frequency(float(frequency_hz))
         self._persist_sdr_value("RECEIVER_FREQ_HZ", int(round(float(frequency_hz))))
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _on_sdr_overlay_bandwidth_changed(self, bandwidth_hz: float) -> None:
         self.sdr_client.set_bandwidth(float(bandwidth_hz))
@@ -1084,7 +1098,7 @@ class SdrUiMixin:
             bandwidth_hz,
         )
         self._persist_sdr_value("BANDWIDTH_HZ", int(round(float(bandwidth_hz))))
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _on_sdr_plot_frequency_clicked(self, frequency_hz: float) -> None:
         frequency_hz = float(frequency_hz)
@@ -1100,7 +1114,7 @@ class SdrUiMixin:
             return
         self.sdr_client.set_receiver_frequency(frequency_hz)
         self._persist_sdr_value("RECEIVER_FREQ_HZ", int(round(frequency_hz)))
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _apply_auto_gain_profile(self) -> None:
         lna_state, if_gain = self.sdr_auto_gain_dialog.widget.get_active_pair_for_frequency(self.sdr_client.center_freq)
@@ -1153,7 +1167,7 @@ class SdrUiMixin:
         self.sdr_client.set_snr_mode(normalized)
         self._persist_sdr_value("SNR_MODE", normalized)
         self._update_sdr_snr_mode_button()
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _capture_sdr_relative_reference(self) -> None:
         metrics = self._sdr_last_absolute_metrics or self._compute_sdr_band_snr_average(absolute=True)
@@ -1176,7 +1190,7 @@ class SdrUiMixin:
         self._sdr_relative_scale_mode = next_mode.get(self._sdr_relative_scale_mode, "full")
         self._persist_sdr_value("RELATIVE_SCALE_MODE", self._sdr_relative_scale_mode)
         self._update_sdr_snr_mode_button()
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _sync_plot_scale_controls(self) -> None:
         for slider, value in (
@@ -1230,26 +1244,12 @@ class SdrUiMixin:
         center = float(getattr(self.sdr_client, "receiver_freq_hz", self.sdr_client.center_freq))
         bandwidth_hz = float(max(100.0, self.sdr_client.bandwidth_hz))
         bin_width_hz = float(max(1e-12, self._current_sdr_bin_width_hz()))
-        half_bw = bandwidth_hz * 0.5
-        x = np.asarray(x, dtype=np.float64)
-        mask = (x >= center - half_bw) & (x <= center + half_bw)
-        if not mask.any():
-            nearest = int(np.argmin(np.abs(x - center)))
-            mask = np.zeros_like(x, dtype=bool)
-            mask[nearest] = True
-
-        if traces.shape[1] != x.shape[0]:
-            return None
-
-        band_traces = traces[:, mask]
-        if band_traces.size == 0:
-            return None
-        averaged_band = np.atleast_1d(average_power_spectrum_db(band_traces, axis=0))
-        effective_bandwidth_hz = float(max(bin_width_hz, int(np.count_nonzero(mask)) * bin_width_hz))
-        metrics = compute_band_power_metrics(
-            averaged_band,
+        metrics = compute_trace_band_power_metrics(
+            traces,
+            np.asarray(x, dtype=np.float64),
+            center_hz=center,
+            bandwidth_hz=bandwidth_hz,
             bin_width_hz=bin_width_hz,
-            bandwidth_hz=effective_bandwidth_hz,
         )
         if int(metrics.get("bin_count", 0.0)) <= 0:
             return None
@@ -1266,6 +1266,14 @@ class SdrUiMixin:
         over_db = max(0.0, value_dbm + 93.0)
         rounded_over = int(10 * round(over_db / 10.0))
         return f"S9+{rounded_over}"
+
+    def _schedule_sdr_snr_display_update(self, *_args) -> None:
+        timer = getattr(self, "_sdr_snr_refresh_timer", None)
+        if timer is None:
+            return
+        if timer.isActive():
+            return
+        timer.start()
 
     def _update_sdr_snr_display(self, *_args) -> None:
         absolute_metrics = self._compute_sdr_band_snr_average(absolute=True)
@@ -1338,12 +1346,12 @@ class SdrUiMixin:
         self.sdr_waterfall_plot.consume_profile_metrics()
         self.sdr_display_fps_label.setText(f"FPS: {float(snapshot.get('display_fps', 0.0)):.1f}")
         self._update_sdr_resolution_labels(snapshot)
-        self._update_sdr_snr_display()
+        self._schedule_sdr_snr_display_update()
 
     def _on_sdr_started_refresh_level_meter(self) -> None:
         self._refresh_sdr_controls(self.sdr_client.snapshot_state())
-        QTimer.singleShot(150, self._update_sdr_snr_display)
-        QTimer.singleShot(400, self._update_sdr_snr_display)
+        QTimer.singleShot(150, self._schedule_sdr_snr_display_update)
+        QTimer.singleShot(400, self._schedule_sdr_snr_display_update)
 
     def close_sdr_ui(self) -> None:
         if getattr(self, "sdr_auto_gain_dialog", None) is not None:

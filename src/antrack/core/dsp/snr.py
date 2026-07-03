@@ -83,6 +83,71 @@ def compute_band_power_metrics(
     }
 
 
+def compute_trace_band_power_metrics(
+    traces_db: np.ndarray,
+    freqs_hz: np.ndarray,
+    *,
+    center_hz: float,
+    bandwidth_hz: float,
+    bin_width_hz: float | None = None,
+) -> dict[str, float]:
+    """Return band-power metrics for one or more traces around a center frequency."""
+    freqs = np.asarray(freqs_hz, dtype=np.float64)
+    traces = np.asarray(traces_db, dtype=np.float64)
+    if freqs.ndim != 1 or freqs.size == 0:
+        return {
+            "integrated_db": float("nan"),
+            "per_bin_db": float("nan"),
+            "per_hz_db": float("nan"),
+            "bin_count": 0.0,
+        }
+
+    if traces.ndim == 1:
+        traces = traces.reshape(1, -1)
+    if traces.ndim != 2 or traces.size == 0 or traces.shape[1] != freqs.shape[0]:
+        return {
+            "integrated_db": float("nan"),
+            "per_bin_db": float("nan"),
+            "per_hz_db": float("nan"),
+            "bin_count": 0.0,
+        }
+
+    if bin_width_hz is None or not math.isfinite(float(bin_width_hz)) or float(bin_width_hz) <= 0.0:
+        if freqs.size > 1:
+            finite_diffs = np.abs(np.diff(freqs))
+            finite_diffs = finite_diffs[np.isfinite(finite_diffs) & (finite_diffs > 0.0)]
+            bin_width_hz = float(np.median(finite_diffs)) if finite_diffs.size else 1.0
+        else:
+            bin_width_hz = 1.0
+    else:
+        bin_width_hz = float(bin_width_hz)
+
+    half_bw = float(max(1.0, abs(float(bandwidth_hz)))) * 0.5
+    center_hz = float(center_hz)
+    mask = (freqs >= center_hz - half_bw) & (freqs <= center_hz + half_bw)
+    if not np.any(mask):
+        nearest = int(np.argmin(np.abs(freqs - center_hz)))
+        mask = np.zeros_like(freqs, dtype=bool)
+        mask[nearest] = True
+
+    band_traces = traces[:, mask]
+    if band_traces.size == 0:
+        return {
+            "integrated_db": float("nan"),
+            "per_bin_db": float("nan"),
+            "per_hz_db": float("nan"),
+            "bin_count": 0.0,
+        }
+
+    averaged_band = np.atleast_1d(average_power_spectrum_db(band_traces, axis=0))
+    effective_bandwidth_hz = float(max(bin_width_hz, int(np.count_nonzero(mask)) * bin_width_hz))
+    return compute_band_power_metrics(
+        averaged_band,
+        bin_width_hz=bin_width_hz,
+        bandwidth_hz=effective_bandwidth_hz,
+    )
+
+
 def compute_snr(
     spectrum_db: np.ndarray,
     mode: Literal["relative", "absolute"] = "relative",
