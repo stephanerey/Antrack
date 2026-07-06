@@ -16,6 +16,7 @@ from logging.handlers import TimedRotatingFileHandler
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import QTimer
 
+from antrack.core.antenna.config import load_antenna_connection_config
 from antrack.threading_utils.thread_manager import ThreadManager
 from antrack.tracking.tracking_manager import TrackingManager
 from antrack.utils.paths import get_log_file, get_logs_dir
@@ -76,11 +77,15 @@ def main() -> int:
         settings = load_settings(settings_path)
         logger.info("Paramètres chargés avec succès")
 
-        ip = settings["AXIS_SERVER"]["ip_address"]
-        port = settings["AXIS_SERVER"]["port"]
+        antenna_config = load_antenna_connection_config(settings)
         perf_settings = settings.get("PERFORMANCE", settings.get("performance", {})) if isinstance(settings, dict) else {}
         max_workers = int(perf_settings.get("max_workers", 4))
-        logger.info(f"Configuration serveur: {ip}:{port}")
+        logger.info(
+            "Configuration antenne: mode=%s axis_server=%s:%s",
+            antenna_config.mode.value,
+            antenna_config.axis_server.host,
+            antenna_config.axis_server.port,
+        )
 
         # Qt app
         app = QApplication(sys.argv)
@@ -92,7 +97,7 @@ def main() -> int:
         logger.info("Gestionnaire de threads initialisé")
 
         # UI
-        ui = MainUi(thread_manager=thread_manager, settings=settings, ip_address=ip, port=port)
+        ui = MainUi(thread_manager=thread_manager, settings=settings)
         ui.show()
         logger.info("Interface graphique initialisée")
 

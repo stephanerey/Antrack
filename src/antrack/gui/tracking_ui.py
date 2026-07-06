@@ -276,6 +276,13 @@ class TrackingUiMixin:
             return
         if not self.has_connection():
             return
+        if not getattr(self.axis_client, "supports_manual_jog", lambda: True)():
+            QMessageBox.information(
+                self,
+                "Manual",
+                "Manual jog is not available for the selected antenna backend.",
+            )
+            return
 
         rate = self._manual_rate_for_axis(axis)
         if rate is None:
@@ -296,22 +303,22 @@ class TrackingUiMixin:
 
         try:
             if axis == "az":
-                ack = self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client.axisClient.set_az_speed(rate), timeout=1.0)
+                ack = self.axis_client.set_az_speed(rate, timeout=1.0)
                 if ack is not None:
                     self.axis_client.antenna.az_setrate = rate
                 if direction == "CW":
-                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_cw, timeout=1.0)
+                    self.axis_client.move_cw(timeout=1.0)
                 else:
-                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_ccw, timeout=1.0)
+                    self.axis_client.move_ccw(timeout=1.0)
                 self._manual_jog_state["az"] = direction
             else:
-                ack = self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client.axisClient.set_el_speed(rate), timeout=1.0)
+                ack = self.axis_client.set_el_speed(rate, timeout=1.0)
                 if ack is not None:
                     self.axis_client.antenna.el_setrate = rate
                 if direction == "UP":
-                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_up, timeout=1.0)
+                    self.axis_client.move_up(timeout=1.0)
                 else:
-                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.move_down, timeout=1.0)
+                    self.axis_client.move_down(timeout=1.0)
                 self._manual_jog_state["el"] = direction
 
             if hasattr(self, "label_antenna_status"):
@@ -325,10 +332,10 @@ class TrackingUiMixin:
             return
         try:
             if axis == "az" and self._manual_jog_state.get("az") is not None:
-                self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.stop_az, timeout=1.0)
+                self.axis_client.stop_az(timeout=1.0)
                 self._manual_jog_state["az"] = None
             elif axis == "el" and self._manual_jog_state.get("el") is not None:
-                self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.stop_el, timeout=1.0)
+                self.axis_client.stop_el(timeout=1.0)
                 self._manual_jog_state["el"] = None
         except Exception as exc:
             self.logger.error(f"_stop_manual_jog error: {exc}")
@@ -1181,20 +1188,16 @@ class TrackingUiMixin:
             el_far = float(antenna_settings.get("el_speed_far_tracking", 500))
 
             try:
-                self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.stop_az, timeout=1.0)
+                self.axis_client.stop_az(timeout=1.0)
             except Exception:
                 pass
             try:
-                self.thread_manager.run_coro("AxisCoreLoop", self.axis_client.axisClient.stop_el, timeout=1.0)
+                self.axis_client.stop_el(timeout=1.0)
             except Exception:
                 pass
 
             try:
-                ack = self.thread_manager.run_coro(
-                    "AxisCoreLoop",
-                    lambda: self.axis_client.axisClient.set_az_speed(az_far),
-                    timeout=1.0,
-                )
+                ack = self.axis_client.set_az_speed(az_far, timeout=1.0)
                 try:
                     if ack is not None:
                         self.axis_client.antenna.az_setrate = az_far
@@ -1203,11 +1206,7 @@ class TrackingUiMixin:
             except Exception as exc:
                 self.logger.debug(f"prime_axis_motion: set_az_speed erreur: {exc}")
             try:
-                ack = self.thread_manager.run_coro(
-                    "AxisCoreLoop",
-                    lambda: self.axis_client.axisClient.set_el_speed(el_far),
-                    timeout=1.0,
-                )
+                ack = self.axis_client.set_el_speed(el_far, timeout=1.0)
                 try:
                     if ack is not None:
                         self.axis_client.antenna.el_setrate = el_far
@@ -1262,7 +1261,10 @@ class TrackingUiMixin:
         Wait until telemetry and setpoints are ready, then start the tracker.
         """
         try:
-            tel_ok = bool(self.telemetry_ready)
+            absolute_backend = bool(
+                getattr(getattr(self, "axis_client", None), "supports_absolute_targets", lambda: False)()
+            )
+            tel_ok = bool(self.telemetry_ready or absolute_backend)
             az_set = getattr(self.tracked_object, "az_set", None)
             el_set = getattr(self.tracked_object, "el_set", None)
             set_ok = isinstance(az_set, (int, float)) and isinstance(el_set, (int, float))

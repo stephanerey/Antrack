@@ -96,6 +96,7 @@ class SdrClient(QObject):
         self._latest_spectrum_db: np.ndarray | None = None
         self._latest_timestamp = 0.0
         self._dummy_phase = 0.0
+        self._dummy_rng = np.random.default_rng(12345)
         self._read_frame_counter = 0
         self._display_frame_counter = 0
         self._perf_timeouts = 0
@@ -911,7 +912,10 @@ class SdrClient(QObject):
         phase = float(self._dummy_phase)
         tone1 = np.exp(1j * (phase + 2.0 * np.pi * 120_000.0 * n / fs))
         tone2 = np.exp(1j * (0.3 * phase + 2.0 * np.pi * -260_000.0 * n / fs))
-        noise = 0.08 * (np.random.randn(self.buff_size) + 1j * np.random.randn(self.buff_size))
+        noise = 0.08 * (
+            self._dummy_rng.standard_normal(self.buff_size)
+            + 1j * self._dummy_rng.standard_normal(self.buff_size)
+        )
         iq = (0.55 * tone1 + 0.30 * tone2 + noise).astype(np.complex64)
         self._dummy_phase = float((phase + 2.0 * np.pi * self.buff_size / fs) % (2.0 * np.pi))
         time.sleep(min(0.02, self.buff_size / fs))
@@ -1486,7 +1490,8 @@ class SdrClient(QObject):
             iq = self._latest_iq_copy()
             if iq is None or iq.size == 0:
                 iq = self._read_next_block()
-            spectrum_db = self._compute_spectrum_snapshot(iq, smooth_trace=False)
+            analysis_fft_size = int(max(1024, min(int(np.asarray(iq).size), int(self.buff_size))))
+            spectrum_db = compute_power_spectrum_db(iq, analysis_fft_size)
             freqs = self._get_freq_axis(len(spectrum_db))
             band_center = float(self.center_freq + center_offset_hz)
             half_bw = bandwidth_hz / 2.0

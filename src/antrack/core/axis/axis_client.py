@@ -4,9 +4,10 @@
 
 import asyncio
 import datetime
-import struct
 import logging
 from enum import Enum
+
+from antrack.core.axis.axis_protocol import AxisCommand, pack_axis_request, parse_axis_response
 
 
 class ServerStatus(Enum):
@@ -43,38 +44,6 @@ class AxisStatus(Enum):
             AxisStatus.MOTION_EL_UP: 'UP',
         }
         return name_map.get(self, self.name)
-
-
-class AxisCommand(Enum):
-    MOVE_CW = 1
-    MOVE_CCW = 2
-    MOVE_UP = 3
-    MOVE_DOWN = 4
-    STOP_AZ = 5
-    STOP_EL = 6
-    SPEED_AZ = 7
-    SPEED_EL = 8
-
-    QUERY_AZ = 20
-    QUERY_EL = 21
-    QUERY_MVT_AZ = 22
-    QUERY_MVT_EL = 23
-    QUERY_SPEED_AZ = 24
-    QUERY_SPEED_EL = 25
-    QUERY_ENDSTOP_AZ = 26
-    QUERY_ENDSTOP_EL = 27
-    QUERY_SIGNAL = 28
-    QUERY_MODBUS_STATUS_AZ = 29
-    QUERY_MODBUS_STATUS_EL = 30
-
-    QUERY_AXIS_SERVER_VER = 50
-    QUERY_AXIS_DRIVER_VER_AZ = 51
-    QUERY_AXIS_DRIVER_VER_EL = 52
-
-    CLOCK = 200
-    END = 255
-
-
 class AntennaStatus:
     def __init__(self):
         self.az = None
@@ -352,7 +321,7 @@ class Axis:
                     val = 0
                 if val > 65535:
                     val = 65535
-                msg = struct.pack('B3xH2x', command.value, val)
+                msg = pack_axis_request(command, val)
                 self.writer.write(msg)
                 await self.writer.drain()
                 try:
@@ -431,20 +400,11 @@ class Axis:
                 break
 
     def _parse_response(self, response: bytes):
-        if not response or len(response) < 8:
-            print("Response parsing error: incomplete frame received")
-            return None, None
-        command_id = response[0]
-        command_type = next((cmd for cmd in AxisCommand if cmd.value == command_id), None)
-        if command_type is None:
-            print(f"Response parsing warning: unknown command id received: {command_id}")
-            return None, None
         try:
-            val = int(struct.unpack('<i', response[4:])[0])
-        except struct.error as e:
-            print(f"Response parsing error: invalid payload for command {command_type}: {e}")
+            return parse_axis_response(response)
+        except Exception as e:
+            print(f"Response parsing error: {e}")
             return None, None
-        return command_type, val
 
 
     # Control commands (avec logs d'ACK)

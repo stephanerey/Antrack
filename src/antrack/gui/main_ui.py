@@ -40,7 +40,7 @@ class MainUi(
     TimeUiMixin,
     ConnectionUiMixin,
 ):
-    def __init__(self, thread_manager, settings, ip_address, port, parent=None):
+    def __init__(self, thread_manager, settings, parent=None):
         super().__init__(parent)
         ui_path = Path(__file__).with_name("main_3.ui")
         loadUi(str(ui_path), self)
@@ -52,8 +52,6 @@ class MainUi(
         self.task_manager = self.thread_manager
         self.setup_menu()
 
-        self.ip_address = ip_address
-        self.port = port
         self.connection_ready = False
         self.axis_client = None
         self.axis_polling = None
@@ -138,6 +136,7 @@ class MainUi(
         self._user_requested_disconnect = False
         self._connect_toggle_in_progress = False
         self.setup_time_ui()
+        self.setup_connection_mode_selector()
 
         self.tracked_object = TrackedObject()
         self.tracker = None
