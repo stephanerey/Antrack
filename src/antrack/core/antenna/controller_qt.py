@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeoutError
 import logging
 from types import SimpleNamespace
 
@@ -158,7 +159,10 @@ class AntennaControllerQt(QObject):
         self.versions_updated.emit(self._versions_to_dict(versions))
 
     def get_position(self):
-        result = self._run_backend_call(self.backend.get_position, timeout=self._default_timeout())
+        result = self._run_backend_call(
+            self.backend.get_position,
+            timeout=self._position_timeout(),
+        )
         self._refresh_from_backend()
         az, el = result
         if az is not None and el is not None:
@@ -173,7 +177,10 @@ class AntennaControllerQt(QObject):
         return result
 
     def get_status(self):
-        result = self._run_backend_call(self.backend.get_status, timeout=self._default_timeout())
+        result = self._run_backend_call(
+            self.backend.get_status,
+            timeout=self._status_timeout(),
+        )
         self._refresh_from_backend()
         try:
             if isinstance(result, dict):
@@ -242,10 +249,32 @@ class AntennaControllerQt(QObject):
     def _run_backend_call(self, coro_factory, timeout: float | None = None):
         if not getattr(self, "thread_manager", None):
             raise RuntimeError("ThreadManager is required for antenna controller operations")
-        return self.thread_manager.run_coro(self.loop_name, coro_factory, timeout=timeout)
+        try:
+            return self.thread_manager.run_coro(self.loop_name, coro_factory, timeout=timeout)
+        except FutureTimeoutError as exc:
+            op_name = getattr(coro_factory, "__name__", None) or getattr(getattr(coro_factory, "func", None), "__name__", None) or "backend_call"
+            if timeout is None:
+                raise TimeoutError(f"{op_name} timed out") from exc
+            raise TimeoutError(f"{op_name} timed out after {float(timeout):.2f}s") from exc
 
     def _default_timeout(self) -> float:
-        return 1.0
+        command_timeout = float(getattr(getattr(self.backend, "config", None), "command_timeout_s", 0.5))
+        serial_timeout = float(getattr(getattr(self.backend, "config", None), "serial_timeout_s", 0.0))
+        return max(1.0, (2.0 * command_timeout) + serial_timeout + 0.25)
+
+    def _position_timeout(self) -> float:
+        if isinstance(self.backend, AxisDriverBackend):
+            command_timeout = float(getattr(self.backend.config, "command_timeout_s", 0.5))
+            serial_timeout = float(getattr(self.backend.config, "serial_timeout_s", 0.15))
+            return max(2.0, (4.0 * command_timeout) + (2.0 * serial_timeout) + 0.5)
+        return self._default_timeout()
+
+    def _status_timeout(self) -> float:
+        if isinstance(self.backend, AxisDriverBackend):
+            command_timeout = float(getattr(self.backend.config, "command_timeout_s", 0.5))
+            serial_timeout = float(getattr(self.backend.config, "serial_timeout_s", 0.15))
+            return max(5.0, (10.0 * command_timeout) + (8.0 * serial_timeout) + 0.5)
+        return self._default_timeout()
 
     def _on_backend_disconnected(self) -> None:
         self._refresh_from_backend()

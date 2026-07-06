@@ -1,12 +1,24 @@
 import asyncio
 
+from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.backend import BaseAntennaBackend
 from antrack.core.antenna.controller_qt import AntennaControllerQt
+from antrack.core.axis.axis_driver_backend import AxisDriverBackend
 from antrack.core.antenna.types import AntennaConnectionState
 
 
 class DummyThreadManager:
     def run_coro(self, _loop_name, coro_or_factory, timeout=None):
+        coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
+        return asyncio.run(coro)
+
+
+class RecordingThreadManager:
+    def __init__(self):
+        self.timeouts = []
+
+    def run_coro(self, _loop_name, coro_or_factory, timeout=None):
+        self.timeouts.append(timeout)
         coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
         return asyncio.run(coro)
 
@@ -119,3 +131,34 @@ def test_controller_methods_map_to_backend_calls():
     assert ("set_az_speed", 42) in backend.calls
     assert "move_cw" in backend.calls
     assert "stop_az" in backend.calls
+
+
+def test_axis_driver_controller_uses_extended_poll_timeouts():
+    backend = AxisDriverBackend(
+        AxisDriverConnectionConfig(
+            comport="COM7",
+            command_timeout_s=0.5,
+            serial_timeout_s=0.15,
+        ),
+        serial_factory=lambda **_kwargs: None,
+    )
+    backend.state = AntennaConnectionState.CONNECTED
+    backend.telemetry.az = 12.5
+    backend.telemetry.el = 34.5
+    thread_manager = RecordingThreadManager()
+    controller = AntennaControllerQt(backend, thread_manager=thread_manager)
+
+    async def fake_get_position():
+        return 12.5, 34.5
+
+    async def fake_get_status():
+        return {"endstop_az": 1, "endstop_el": 0}
+
+    backend.get_position = fake_get_position
+    backend.get_status = fake_get_status
+
+    controller.get_position()
+    controller.get_status()
+
+    assert thread_manager.timeouts[0] >= 2.0
+    assert thread_manager.timeouts[1] >= 5.0
