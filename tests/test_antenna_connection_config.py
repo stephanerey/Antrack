@@ -26,6 +26,8 @@ def test_axis_driver_settings_are_parsed():
     assert config.axis_driver.comport == "COM7"
     assert config.axis_driver.az_slave_address == 10
     assert config.axis_driver.el_slave_address == 20
+    assert config.axis_driver.position_interval_s == 0.5
+    assert config.axis_driver.status_interval_s == 2.0
 
 
 def test_pst_rotator_settings_are_parsed():

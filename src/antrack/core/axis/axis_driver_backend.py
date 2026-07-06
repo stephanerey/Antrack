@@ -44,6 +44,8 @@ except Exception:  # pragma: no cover - import is validated in real runtime
 class AxisDriverBackend(BaseAntennaBackend):
     """Axis Modbus RTU backend using a shared serial transport."""
 
+    _STATUS_BLOCK_LENGTH = 7
+
     def __init__(
         self,
         config: AxisDriverConnectionConfig,
@@ -92,7 +94,6 @@ class AxisDriverBackend(BaseAntennaBackend):
             )
             self.state = AntennaConnectionState.CONNECTED
             await self.get_versions()
-            await self.get_position()
             await self.get_status()
         except Exception as exc:
             self.state = AntennaConnectionState.ERROR
@@ -169,14 +170,22 @@ class AxisDriverBackend(BaseAntennaBackend):
     async def get_status(self) -> dict:
         await self._ensure_async_primitives()
         async with self._io_lock:
-            az_motion = self._read_register_locked(self.config.az_slave_address, MOTION_STATE_REGISTER)
-            el_motion = self._read_register_locked(self.config.el_slave_address, MOTION_STATE_REGISTER)
-            endstop_az = self._read_register_locked(self.config.az_slave_address, ENDSTOP_REGISTER)
-            endstop_el = self._read_register_locked(self.config.el_slave_address, ENDSTOP_REGISTER)
-            index_az = self._read_register_locked(self.config.az_slave_address, INDEX_REGISTER)
-            index_el = self._read_register_locked(self.config.el_slave_address, INDEX_REGISTER)
-            alarm_az = self._read_register_locked(self.config.az_slave_address, MOTOR_ALARM_REGISTER)
-            alarm_el = self._read_register_locked(self.config.el_slave_address, MOTOR_ALARM_REGISTER)
+            az_status = self._read_status_block_locked(self.config.az_slave_address)
+            el_status = self._read_status_block_locked(self.config.el_slave_address)
+
+        az_motion = az_status["motion"]
+        el_motion = el_status["motion"]
+        endstop_az = az_status["endstop"]
+        endstop_el = el_status["endstop"]
+        index_az = az_status["index"]
+        index_el = el_status["index"]
+        alarm_az = az_status["alarm"]
+        alarm_el = el_status["alarm"]
+
+        self.telemetry.az_raw = az_status["raw_position"]
+        self.telemetry.el_raw = el_status["raw_position"]
+        self.telemetry.az = raw_az_to_deg(az_status["raw_position"])
+        self.telemetry.el = raw_el_to_deg(el_status["raw_position"])
 
         self.telemetry.endstop_az = endstop_az
         self.telemetry.endstop_el = endstop_el
@@ -224,6 +233,25 @@ class AxisDriverBackend(BaseAntennaBackend):
             parser=lambda frame: parse_fc03_response(frame, slave=slave, length=1),
         )
         return values[0]
+
+    def _read_registers_locked(self, slave: int, register: int, length: int) -> list[int]:
+        self._ensure_serial_open()
+        request = build_fc03_request(slave, register, length)
+        return self._exchange_and_parse(
+            request,
+            candidate_lengths=(5 + (2 * int(length)),),
+            parser=lambda frame: parse_fc03_response(frame, slave=slave, length=length),
+        )
+
+    def _read_status_block_locked(self, slave: int) -> dict[str, int]:
+        values = self._read_registers_locked(slave, MOTION_STATE_REGISTER, self._STATUS_BLOCK_LENGTH)
+        return {
+            "motion": int(values[0]),
+            "raw_position": int(values[RAW_POSITION_REGISTER - MOTION_STATE_REGISTER]),
+            "endstop": int(values[ENDSTOP_REGISTER - MOTION_STATE_REGISTER]),
+            "index": int(values[INDEX_REGISTER - MOTION_STATE_REGISTER]),
+            "alarm": int(values[MOTOR_ALARM_REGISTER - MOTION_STATE_REGISTER]),
+        }
 
     async def _write_register(self, slave: int, register: int, value: int) -> tuple[int, int]:
         await self._ensure_async_primitives()

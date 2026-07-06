@@ -31,8 +31,8 @@ class AxisDriverConnectionConfig:
     el_slave_address: int = 20
     serial_timeout_s: float = 0.15
     command_timeout_s: float = 0.5
-    position_interval_s: float = 0.2
-    status_interval_s: float = 1.0
+    position_interval_s: float = 0.5
+    status_interval_s: float = 2.0
     health_interval_s: float = 2.0
     legacy_accept_short_fc6_response: bool = True
 
@@ -114,8 +114,8 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
             el_slave_address=int(_get(axis_driver_section, "el_slave_address", 20)),
             serial_timeout_s=float(_get(axis_driver_section, "serial_timeout_s", 0.15)),
             command_timeout_s=float(_get(axis_driver_section, "command_timeout_s", 0.5)),
-            position_interval_s=float(_get(axis_driver_section, "position_interval_s", 0.2)),
-            status_interval_s=float(_get(axis_driver_section, "status_interval_s", 1.0)),
+            position_interval_s=float(_get(axis_driver_section, "position_interval_s", 0.5)),
+            status_interval_s=float(_get(axis_driver_section, "status_interval_s", 2.0)),
             health_interval_s=float(_get(axis_driver_section, "health_interval_s", 2.0)),
             legacy_accept_short_fc6_response=_as_bool(
                 _get(axis_driver_section, "legacy_accept_short_fc6_response", True),
