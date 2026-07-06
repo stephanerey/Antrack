@@ -303,22 +303,22 @@ class TrackingUiMixin:
 
         try:
             if axis == "az":
-                ack = self.axis_client.set_az_speed(rate, timeout=1.0)
+                ack = self.axis_client.set_az_speed(rate)
                 if ack is not None:
                     self.axis_client.antenna.az_setrate = rate
                 if direction == "CW":
-                    self.axis_client.move_cw(timeout=1.0)
+                    self.axis_client.move_cw()
                 else:
-                    self.axis_client.move_ccw(timeout=1.0)
+                    self.axis_client.move_ccw()
                 self._manual_jog_state["az"] = direction
             else:
-                ack = self.axis_client.set_el_speed(rate, timeout=1.0)
+                ack = self.axis_client.set_el_speed(rate)
                 if ack is not None:
                     self.axis_client.antenna.el_setrate = rate
                 if direction == "UP":
-                    self.axis_client.move_up(timeout=1.0)
+                    self.axis_client.move_up()
                 else:
-                    self.axis_client.move_down(timeout=1.0)
+                    self.axis_client.move_down()
                 self._manual_jog_state["el"] = direction
 
             if hasattr(self, "label_antenna_status"):
@@ -332,10 +332,10 @@ class TrackingUiMixin:
             return
         try:
             if axis == "az" and self._manual_jog_state.get("az") is not None:
-                self.axis_client.stop_az(timeout=1.0)
+                self.axis_client.stop_az()
                 self._manual_jog_state["az"] = None
             elif axis == "el" and self._manual_jog_state.get("el") is not None:
-                self.axis_client.stop_el(timeout=1.0)
+                self.axis_client.stop_el()
                 self._manual_jog_state["el"] = None
         except Exception as exc:
             self.logger.error(f"_stop_manual_jog error: {exc}")

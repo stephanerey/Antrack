@@ -2,9 +2,9 @@ import asyncio
 
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.backend import BaseAntennaBackend
-from antrack.core.antenna.controller_qt import AntennaControllerQt
+from antrack.core.antenna.controller_qt import AntennaControllerQt, _polling_intervals_for_config
 from antrack.core.axis.axis_driver_backend import AxisDriverBackend
-from antrack.core.antenna.types import AntennaConnectionState
+from antrack.core.antenna.types import AntennaConnectionMode, AntennaConnectionState
 
 
 class DummyThreadManager:
@@ -185,3 +185,23 @@ def test_axis_driver_controller_uses_extended_motion_timeout():
     controller.set_az_speed(42)
 
     assert thread_manager.timeouts[0] >= 6.0
+
+
+def test_axis_driver_polling_intervals_are_clamped_for_slow_rs485():
+    config = AxisDriverConnectionConfig(
+        comport="COM7",
+        position_interval_s=0.2,
+        status_interval_s=1.0,
+    )
+    wrapped = type(
+        "Cfg",
+        (),
+        {
+            "mode": AntennaConnectionMode.AXIS_DRIVER,
+            "selected_config": config,
+        },
+    )()
+
+    polling = _polling_intervals_for_config(wrapped)
+
+    assert polling == (0.5, 2.0)

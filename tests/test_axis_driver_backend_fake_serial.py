@@ -3,12 +3,19 @@ import asyncio
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.types import AntennaConnectionState
 from antrack.core.axis.axis_driver_backend import AxisDriverBackend
-from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
+from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, MOTION_STATE_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
 from antrack.core.axis.modbus_rtu import append_crc, build_fc03_request, build_fc06_request
 
 
 def _fc03_response(slave: int, value: int) -> bytes:
     return append_crc(bytes((slave, 0x03, 0x02, (value >> 8) & 0xFF, value & 0xFF)))
+
+
+def _fc03_block_response(slave: int, values: list[int]) -> bytes:
+    payload = bytes((slave, 0x03, 2 * len(values)))
+    for value in values:
+        payload += bytes(((value >> 8) & 0xFF, value & 0xFF))
+    return append_crc(payload)
 
 
 class FakeSerial:
@@ -43,6 +50,8 @@ def _driver_responses():
         build_fc03_request(20, RELEASE_REGISTER, 1): _fc03_response(20, 151),
         build_fc03_request(10, RAW_POSITION_REGISTER, 1): _fc03_response(10, 32768),
         build_fc03_request(20, RAW_POSITION_REGISTER, 1): _fc03_response(20, 16384),
+        build_fc03_request(10, MOTION_STATE_REGISTER, 7): _fc03_block_response(10, [30, 0, 32768, 1, 150, 2, 0]),
+        build_fc03_request(20, MOTION_STATE_REGISTER, 7): _fc03_block_response(20, [30, 0, 16384, 1, 151, 2, 0]),
     }
     for slave in (10, 20):
         for register, value in ((101, 30), (104, 1), (106, 2), (107, 0)):
@@ -88,6 +97,7 @@ def test_axis_driver_connect_reads_versions_and_position():
     assert backend.versions.server_version == "AxisDriver"
     assert backend.versions.driver_version_az == "1.50"
     assert backend.telemetry.az_raw == 32768
+    assert backend.telemetry.el_raw == 16384
     assert fake_serial.is_open is True
 
 
