@@ -30,14 +30,19 @@ class DummyThreadManager:
 
 
 def _axis_client_qt():
-    axis_client = SimpleNamespace(
-        stop_az=object(),
-        stop_el=object(),
-        axis_status={"azimuth": None, "elevation": None},
-    )
     return SimpleNamespace(
         antenna=SimpleNamespace(az=None, el=None),
-        axisClient=axis_client,
+        axis_status={"azimuth": None, "elevation": None},
+        stop_az=lambda *args, **kwargs: None,
+        stop_el=lambda *args, **kwargs: None,
+        set_az_speed=lambda *args, **kwargs: None,
+        set_el_speed=lambda *args, **kwargs: None,
+        move_cw=lambda *args, **kwargs: None,
+        move_ccw=lambda *args, **kwargs: None,
+        move_up=lambda *args, **kwargs: None,
+        move_down=lambda *args, **kwargs: None,
+        supports_absolute_targets=lambda: False,
+        server_status="DISCONNECTED",
     )
 
 

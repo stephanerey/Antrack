@@ -28,6 +28,8 @@ class PositioningController:
         self._last_el_cmd = "STOP"
         self._last_az_cmd_ts = 0.0
         self._last_el_cmd_ts = 0.0
+        self._last_target_command = (None, None)
+        self._last_target_command_ts = 0.0
 
     def is_running(self) -> bool:
         if not self.thread_manager:
@@ -111,6 +113,22 @@ class PositioningController:
                 time.sleep(interval)
                 worker = self.thread_manager.get_worker(self._thread_name)
                 continue
+            if getattr(self.axis_client_qt, "supports_absolute_targets", lambda: False)():
+                target = (round(float(az_set), 3), round(float(el_set), 3))
+                now_ts = time.monotonic()
+                if (
+                    target != self._last_target_command
+                    or (now_ts - self._last_target_command_ts) >= self._move_refresh_interval
+                ):
+                    try:
+                        self.axis_client_qt.set_target_position(az_set, el_set, timeout=1.0)
+                        self._last_target_command = target
+                        self._last_target_command_ts = now_ts
+                    except Exception as exc:
+                        log.warning("Positioning target command failed: %s", exc)
+                time.sleep(interval)
+                worker = self.thread_manager.get_worker(self._thread_name)
+                continue
             if not isinstance(az_cur, (int, float)) or not isinstance(el_cur, (int, float)):
                 time.sleep(interval)
                 worker = self.thread_manager.get_worker(self._thread_name)
@@ -191,7 +209,7 @@ class PositioningController:
                 rate_az = az_speed_close
             if getattr(self.axis_client_qt.antenna, "az_setrate", None) != rate_az:
                 self.axis_client_qt.antenna.az_setrate = rate_az
-                self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client_qt.axisClient.set_az_speed(rate_az), timeout=1.0)
+                self.axis_client_qt.set_az_speed(rate_az, timeout=1.0)
         except Exception:
             pass
 
@@ -204,7 +222,7 @@ class PositioningController:
                 rate_el = el_speed_close
             if getattr(self.axis_client_qt.antenna, "el_setrate", None) != rate_el:
                 self.axis_client_qt.antenna.el_setrate = rate_el
-                self.thread_manager.run_coro("AxisCoreLoop", lambda: self.axis_client_qt.axisClient.set_el_speed(rate_el), timeout=1.0)
+                self.axis_client_qt.set_el_speed(rate_el, timeout=1.0)
         except Exception:
             pass
 
@@ -212,20 +230,20 @@ class PositioningController:
             if need_az:
                 if az_error > 0:
                     if self._last_az_cmd != "CCW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                        self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.move_ccw, timeout=1.0)
-                        self.axis_client_qt.axisClient.axis_status["azimuth"] = AxisStatus.MOTION_AZ_CCW
+                        self.axis_client_qt.move_ccw(timeout=1.0)
+                        self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_CCW
                         self._last_az_cmd = "CCW"
                         self._last_az_cmd_ts = now_ts
                 else:
                     if self._last_az_cmd != "CW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                        self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.move_cw, timeout=1.0)
-                        self.axis_client_qt.axisClient.axis_status["azimuth"] = AxisStatus.MOTION_AZ_CW
+                        self.axis_client_qt.move_cw(timeout=1.0)
+                        self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_CW
                         self._last_az_cmd = "CW"
                         self._last_az_cmd_ts = now_ts
             else:
                 if self._last_az_cmd != "STOP" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.stop_az, timeout=1.0)
-                    self.axis_client_qt.axisClient.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
+                    self.axis_client_qt.stop_az(timeout=1.0)
+                    self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
                     self._last_az_cmd = "STOP"
                     self._last_az_cmd_ts = now_ts
         except Exception:
@@ -235,20 +253,20 @@ class PositioningController:
             if need_el:
                 if el_error > 0:
                     if self._last_el_cmd != "DOWN" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                        self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.move_down, timeout=1.0)
-                        self.axis_client_qt.axisClient.axis_status["elevation"] = AxisStatus.MOTION_EL_DOWN
+                        self.axis_client_qt.move_down(timeout=1.0)
+                        self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_DOWN
                         self._last_el_cmd = "DOWN"
                         self._last_el_cmd_ts = now_ts
                 else:
                     if self._last_el_cmd != "UP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                        self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.move_up, timeout=1.0)
-                        self.axis_client_qt.axisClient.axis_status["elevation"] = AxisStatus.MOTION_EL_UP
+                        self.axis_client_qt.move_up(timeout=1.0)
+                        self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_UP
                         self._last_el_cmd = "UP"
                         self._last_el_cmd_ts = now_ts
             else:
                 if self._last_el_cmd != "STOP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                    self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.stop_el, timeout=1.0)
-                    self.axis_client_qt.axisClient.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
+                    self.axis_client_qt.stop_el(timeout=1.0)
+                    self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
                     self._last_el_cmd = "STOP"
                     self._last_el_cmd_ts = now_ts
         except Exception:
@@ -256,10 +274,10 @@ class PositioningController:
 
     def _stop_motors(self) -> None:
         try:
-            self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.stop_az)
-            self.thread_manager.run_coro("AxisCoreLoop", self.axis_client_qt.axisClient.stop_el)
-            self.axis_client_qt.axisClient.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
-            self.axis_client_qt.axisClient.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
+            self.axis_client_qt.stop_az()
+            self.axis_client_qt.stop_el()
+            self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
+            self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
             self._last_az_cmd = "STOP"
             self._last_el_cmd = "STOP"
             self._last_az_cmd_ts = time.monotonic()

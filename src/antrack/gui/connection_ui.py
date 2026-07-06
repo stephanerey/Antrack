@@ -2,16 +2,72 @@
 
 from __future__ import annotations
 
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QComboBox, QLabel, QMessageBox
 
+from antrack.core.antenna.config import load_antenna_connection_config
+from antrack.core.antenna.controller_qt import AntennaControllerQt
 from antrack.core.axis.axis_client import AxisClientPollingAdapter
-from antrack.gui.axis.axis_client_qt import AxisClientQt
 from antrack.gui.ui_styles import green_label_color, orange_label_color, red_label_color, standard_label_color
 from antrack.tracking.tracking import Tracker
+from antrack.utils.settings_loader import update_and_persist_setting
 
 
 class ConnectionUiMixin:
     """Own Axis connection, polling, and live telemetry UI glue."""
+
+    def setup_connection_mode_selector(self):
+        config = load_antenna_connection_config(self.settings)
+        self._antenna_mode_items = (
+            ("Axis Server", "axis_server"),
+            ("AxisDriver", "axis_driver"),
+            ("PstRotator", "pst_rotator"),
+        )
+        self.label_antenna_mode = QLabel("Antenna mode", self)
+        self.label_antenna_mode.setGeometry(10, 0, 101, 18)
+        self.combo_antenna_mode = QComboBox(self)
+        self.combo_antenna_mode.setGeometry(230, 20, 131, 22)
+        for text, value in self._antenna_mode_items:
+            self.combo_antenna_mode.addItem(text, value)
+        index = max(
+            0,
+            next(
+                (idx for idx, (_text, value) in enumerate(self._antenna_mode_items) if value == config.mode.value),
+                0,
+            ),
+        )
+        self.combo_antenna_mode.setCurrentIndex(index)
+        self.combo_antenna_mode.currentIndexChanged.connect(self.on_antenna_mode_changed)
+
+    def selected_antenna_mode(self) -> str:
+        combo = getattr(self, "combo_antenna_mode", None)
+        if combo is None:
+            return load_antenna_connection_config(self.settings).mode.value
+        return str(combo.currentData() or "axis_server")
+
+    def on_antenna_mode_changed(self, index: int):
+        combo = getattr(self, "combo_antenna_mode", None)
+        if combo is None:
+            return
+        mode = str(combo.itemData(index) or "axis_server")
+        if self.has_connection():
+            combo.blockSignals(True)
+            try:
+                config = load_antenna_connection_config(self.settings)
+                previous = config.mode.value
+                revert_index = next(
+                    (idx for idx, (_text, value) in enumerate(self._antenna_mode_items) if value == previous),
+                    0,
+                )
+                combo.setCurrentIndex(revert_index)
+            finally:
+                combo.blockSignals(False)
+            QMessageBox.information(
+                self,
+                "Antenna mode",
+                "Disconnect the antenna before changing backend mode.",
+            )
+            return
+        update_and_persist_setting(self.settings, "ANTENNA_CONNECTION", "MODE", mode)
 
     def has_connection(self) -> bool:
         return bool(getattr(self, "axis_client", None) and self.axis_client.is_connected())
@@ -48,16 +104,17 @@ class ConnectionUiMixin:
             self.logger.error(f"Erreur stop_polling_threads: {exc}")
 
     def request_connect(self):
-        """Start the Axis connection in a background thread."""
+        """Start the selected antenna backend connection in a background thread."""
         if not self.connection_ready:
-            self.logger.info("Demarrage de la connexion au serveur Axis depuis un thread separe")
+            self.logger.info(
+                "Demarrage de la connexion antenne (%s) depuis un thread separe",
+                self.selected_antenna_mode(),
+            )
             self._user_requested_disconnect = False
 
             worker = self.thread_manager.start_thread(
-                "AxisConnection",
-                self.connect_to_axis_server,
-                self.ip_address,
-                self.port,
+                "AntennaConnection",
+                self.connect_antenna_controller,
             )
 
             worker.status.connect(lambda msg: self.status_bar.showMessage(msg))
@@ -147,6 +204,10 @@ class ConnectionUiMixin:
             except Exception:
                 pass
             try:
+                self.thread_manager.stop_asyncio_loop("AntennaCoreLoop")
+            except Exception:
+                pass
+            try:
                 self.thread_manager.stop_asyncio_loop("AxisCoreLoop")
             except Exception:
                 pass
@@ -156,7 +217,7 @@ class ConnectionUiMixin:
             self.pushButton_server_connect.setText("CONNECT")
             self.connection_ready = False
             self.telemetry_ready = False
-            self.status_bar.showMessage("Deconnecte du serveur Axis")
+            self.status_bar.showMessage("Antenna disconnected")
         except Exception as exc:
             self.logger.error(f"Erreur de deconnexion: {exc}")
         finally:
@@ -166,23 +227,25 @@ class ConnectionUiMixin:
                 pass
             self.logger.info("[UI] request_disconnect: end")
 
-    def connect_to_axis_server(self, ip_address, port):
-        """Function executed in a background thread to connect to Axis."""
+    def connect_antenna_controller(self):
+        """Function executed in a background thread to connect to the selected backend."""
         try:
-            self.logger.info(f"Tentative de connexion au serveur Axis {ip_address}:{port}")
-
-            axis_client = AxisClientQt(ip_address, port)
-            axis_client.thread_manager = self.thread_manager
-
+            mode = self.selected_antenna_mode()
+            self.logger.info("Tentative de connexion antenne: mode=%s", mode)
+            axis_client = AntennaControllerQt.from_settings(
+                self.settings,
+                self.thread_manager,
+                mode=mode,
+            )
             connected = axis_client.connect()
 
             if connected:
-                self.logger.info(f"Connexion etablie avec le serveur Axis: {ip_address}:{port}")
+                self.logger.info("Connexion antenne etablie: mode=%s backend=%s", mode, axis_client.backend_name)
                 return axis_client
-            raise ConnectionError(f"Impossible de se connecter au serveur {ip_address}:{port}")
+            raise ConnectionError(f"Unable to connect antenna backend in mode '{mode}'")
 
         except Exception as exc:
-            self.logger.error(f"Erreur de connexion au serveur Axis: {exc}")
+            self.logger.error(f"Erreur de connexion antenne: {exc}")
             raise
 
     def on_connection_success(self, axis_client):
@@ -200,7 +263,7 @@ class ConnectionUiMixin:
             return
 
         self.axis_client = axis_client
-        self.status_bar.showMessage("Connecte au serveur Axis")
+        self.status_bar.showMessage(f"Connected to {self.axis_client.backend_name}")
 
         if hasattr(self.axis_client, "connection_state_changed"):
             self.axis_client.connection_state_changed.connect(self.on_axis_connection_state_changed)
@@ -270,7 +333,7 @@ class ConnectionUiMixin:
         QMessageBox.critical(
             self,
             "Erreur de connexion",
-            f"Impossible de se connecter au serveur: {error_message}",
+            f"Impossible de se connecter a l'antenne: {error_message}",
         )
 
     def on_axis_connection_failed(self, message: str):
@@ -388,8 +451,15 @@ class ConnectionUiMixin:
                     self.axis_polling.stop()
                 except Exception:
                     pass
+            pos_interval = 0.2
+            status_interval = 1.0
+            if getattr(self, "axis_client", None) is not None:
+                try:
+                    pos_interval, status_interval = getattr(self.axis_client, "polling_intervals", (0.2, 1.0))
+                except Exception:
+                    pass
             self.axis_polling = AxisClientPollingAdapter(self.axis_client, self.thread_manager)
-            self.axis_polling.start(pos_interval=0.2, status_interval=1.0)
+            self.axis_polling.start(pos_interval=pos_interval, status_interval=status_interval)
         except Exception as exc:
             try:
                 self.logger.error(f"Erreur start_polling: {exc}")
@@ -523,7 +593,7 @@ class ConnectionUiMixin:
 
             try:
                 status = (
-                    getattr(self.axis_client.axisClient, "axis_status", None)
+                    getattr(self.axis_client, "axis_status", None)
                     if hasattr(self, "axis_client")
                     else None
                 )

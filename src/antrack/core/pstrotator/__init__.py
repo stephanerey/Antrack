@@ -1,0 +1,1 @@
+"""PstRotator transport integration."""

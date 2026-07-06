@@ -1,0 +1,121 @@
+import asyncio
+
+from antrack.core.antenna.backend import BaseAntennaBackend
+from antrack.core.antenna.controller_qt import AntennaControllerQt
+from antrack.core.antenna.types import AntennaConnectionState
+
+
+class DummyThreadManager:
+    def run_coro(self, _loop_name, coro_or_factory, timeout=None):
+        coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
+        return asyncio.run(coro)
+
+
+class FakeBackend(BaseAntennaBackend):
+    def __init__(self):
+        super().__init__("FakeBackend")
+        self.calls = []
+
+    def is_connected(self) -> bool:
+        return self.state == AntennaConnectionState.CONNECTED
+
+    async def connect(self) -> None:
+        self.calls.append("connect")
+        self.state = AntennaConnectionState.CONNECTED
+        self.telemetry.az = 12.5
+        self.telemetry.el = 34.5
+
+    async def disconnect(self) -> None:
+        self.calls.append("disconnect")
+        self.state = AntennaConnectionState.DISCONNECTED
+
+    async def set_az_speed(self, speed: float) -> int | None:
+        self.calls.append(("set_az_speed", speed))
+        self.telemetry.az_setrate = speed
+        return int(speed)
+
+    async def set_el_speed(self, speed: float) -> int | None:
+        self.calls.append(("set_el_speed", speed))
+        self.telemetry.el_setrate = speed
+        return int(speed)
+
+    async def move_cw(self) -> int | None:
+        self.calls.append("move_cw")
+        return 1
+
+    async def move_ccw(self) -> int | None:
+        self.calls.append("move_ccw")
+        return 1
+
+    async def move_up(self) -> int | None:
+        self.calls.append("move_up")
+        return 1
+
+    async def move_down(self) -> int | None:
+        self.calls.append("move_down")
+        return 1
+
+    async def stop_az(self) -> int | None:
+        self.calls.append("stop_az")
+        return 1
+
+    async def stop_el(self) -> int | None:
+        self.calls.append("stop_el")
+        return 1
+
+    async def get_position(self):
+        self.calls.append("get_position")
+        return 12.5, 34.5
+
+    async def get_status(self):
+        self.calls.append("get_status")
+        return {"endstop_az": 1, "endstop_el": 0}
+
+    async def get_versions(self):
+        self.calls.append("get_versions")
+        self.versions.server_version = "fake"
+        return self.versions
+
+
+def test_controller_emits_connection_state_changes():
+    backend = FakeBackend()
+    controller = AntennaControllerQt(backend, thread_manager=DummyThreadManager())
+    states = []
+    controller.connection_state_changed.connect(states.append)
+
+    assert controller.connect() is True
+    controller.disconnect()
+
+    assert states[0] == "CONNECTING"
+    assert "CONNECTED" in states
+    assert states[-1] == "DISCONNECTED"
+
+
+def test_controller_emits_telemetry_and_status_payloads():
+    backend = FakeBackend()
+    controller = AntennaControllerQt(backend, thread_manager=DummyThreadManager())
+    telemetry = []
+    statuses = []
+    controller.connect()
+    controller.antenna_telemetry_updated.connect(telemetry.append)
+    controller.status_updated.connect(statuses.append)
+
+    controller.get_position()
+    controller.get_status()
+
+    assert telemetry[-1]["az"] == 12.5
+    assert statuses[-1]["endstop_az"] == 1
+
+
+def test_controller_methods_map_to_backend_calls():
+    backend = FakeBackend()
+    controller = AntennaControllerQt(backend, thread_manager=DummyThreadManager())
+    controller.connect()
+
+    controller.set_az_speed(42, timeout=1.0)
+    controller.move_cw(timeout=1.0)
+    controller.stop_az(timeout=1.0)
+
+    assert ("set_az_speed", 42) in backend.calls
+    assert "move_cw" in backend.calls
+    assert "stop_az" in backend.calls
