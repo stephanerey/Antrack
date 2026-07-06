@@ -16,15 +16,22 @@ class FakeSerial:
         self.responses = responses
         self.writes = []
         self.last_request = b""
+        self.pending_response = b""
         self.is_open = True
 
     def write(self, data: bytes) -> int:
         self.writes.append(data)
         self.last_request = data
+        self.pending_response = self.responses.get(data, b"")
         return len(data)
 
     def read(self, size: int) -> bytes:
-        return self.responses.get(self.last_request, b"")[:size]
+        chunk = self.pending_response[:size]
+        self.pending_response = self.pending_response[size:]
+        return chunk
+
+    def reset_input_buffer(self) -> None:
+        self.pending_response = b""
 
     def close(self) -> None:
         self.is_open = False
@@ -54,6 +61,16 @@ def _driver_responses():
 
 def _backend_and_serial():
     fake_serial = FakeSerial(_driver_responses())
+    config = AxisDriverConnectionConfig(
+        comport="COM7",
+        legacy_accept_short_fc6_response=False,
+    )
+    backend = AxisDriverBackend(config, serial_factory=lambda **_kwargs: fake_serial)
+    return backend, fake_serial
+
+
+def _backend_and_serial_with_responses(responses):
+    fake_serial = FakeSerial(responses)
     config = AxisDriverConnectionConfig(
         comport="COM7",
         legacy_accept_short_fc6_response=False,
@@ -111,3 +128,20 @@ def test_axis_driver_timeout_sets_degraded_state():
         pass
 
     assert backend.get_connection_state() == AntennaConnectionState.DEGRADED
+
+
+def test_axis_driver_connect_tolerates_echoed_fc03_frames():
+    responses = {}
+    for request, response in _driver_responses().items():
+        if request[1] == 0x03:
+            responses[request] = request + response
+        else:
+            responses[request] = response
+
+    backend, _fake_serial = _backend_and_serial_with_responses(responses)
+
+    asyncio.run(backend.connect())
+
+    assert backend.is_connected()
+    assert backend.versions.driver_version_az == "1.50"
+    assert backend.telemetry.az_raw == 32768
