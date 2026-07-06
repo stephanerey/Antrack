@@ -46,4 +46,4 @@ def test_tracker_sends_absolute_target_without_local_telemetry():
 
     tracker.step()
 
-    assert (123.4, 45.6, 1.0) in client.commands
+    assert (123.4, 45.6, None) in client.commands

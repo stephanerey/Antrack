@@ -196,52 +196,58 @@ class AntennaControllerQt(QObject):
     def set_target_position(self, azimuth: float, elevation: float, timeout: float | None = None) -> None:
         self._run_backend_call(
             lambda: self.backend.set_target_position(azimuth, elevation),
-            timeout=timeout or self._default_timeout(),
+            timeout=timeout or self._target_command_timeout(),
         )
         self._refresh_from_backend()
 
     def set_az_speed(self, speed: float, timeout: float | None = None):
-        result = self._run_backend_call(lambda: self.backend.set_az_speed(speed), timeout=timeout or self._default_timeout())
+        result = self._run_backend_call(
+            lambda: self.backend.set_az_speed(speed),
+            timeout=timeout or self._motion_command_timeout(),
+        )
         self._refresh_from_backend()
         return result
 
     def set_el_speed(self, speed: float, timeout: float | None = None):
-        result = self._run_backend_call(lambda: self.backend.set_el_speed(speed), timeout=timeout or self._default_timeout())
+        result = self._run_backend_call(
+            lambda: self.backend.set_el_speed(speed),
+            timeout=timeout or self._motion_command_timeout(),
+        )
         self._refresh_from_backend()
         return result
 
     def move_cw(self, timeout: float | None = None):
-        result = self._run_backend_call(self.backend.move_cw, timeout=timeout or self._default_timeout())
+        result = self._run_backend_call(self.backend.move_cw, timeout=timeout or self._motion_command_timeout())
         self.axis_status["azimuth"] = "CW"
         self._refresh_from_backend()
         return result
 
     def move_ccw(self, timeout: float | None = None):
-        result = self._run_backend_call(self.backend.move_ccw, timeout=timeout or self._default_timeout())
+        result = self._run_backend_call(self.backend.move_ccw, timeout=timeout or self._motion_command_timeout())
         self.axis_status["azimuth"] = "CCW"
         self._refresh_from_backend()
         return result
 
     def move_up(self, timeout: float | None = None):
-        result = self._run_backend_call(self.backend.move_up, timeout=timeout or self._default_timeout())
+        result = self._run_backend_call(self.backend.move_up, timeout=timeout or self._motion_command_timeout())
         self.axis_status["elevation"] = "UP"
         self._refresh_from_backend()
         return result
 
     def move_down(self, timeout: float | None = None):
-        result = self._run_backend_call(self.backend.move_down, timeout=timeout or self._default_timeout())
+        result = self._run_backend_call(self.backend.move_down, timeout=timeout or self._motion_command_timeout())
         self.axis_status["elevation"] = "DOWN"
         self._refresh_from_backend()
         return result
 
     def stop_az(self, timeout: float | None = None):
-        result = self._run_backend_call(self.backend.stop_az, timeout=timeout or self._default_timeout())
+        result = self._run_backend_call(self.backend.stop_az, timeout=timeout or self._motion_command_timeout())
         self.axis_status["azimuth"] = "STOP"
         self._refresh_from_backend()
         return result
 
     def stop_el(self, timeout: float | None = None):
-        result = self._run_backend_call(self.backend.stop_el, timeout=timeout or self._default_timeout())
+        result = self._run_backend_call(self.backend.stop_el, timeout=timeout or self._motion_command_timeout())
         self.axis_status["elevation"] = "STOP"
         self._refresh_from_backend()
         return result
@@ -274,6 +280,18 @@ class AntennaControllerQt(QObject):
             command_timeout = float(getattr(self.backend.config, "command_timeout_s", 0.5))
             serial_timeout = float(getattr(self.backend.config, "serial_timeout_s", 0.15))
             return max(5.0, (10.0 * command_timeout) + (8.0 * serial_timeout) + 0.5)
+        return self._default_timeout()
+
+    def _motion_command_timeout(self) -> float:
+        if isinstance(self.backend, AxisDriverBackend):
+            command_timeout = float(getattr(self.backend.config, "command_timeout_s", 0.5))
+            serial_timeout = float(getattr(self.backend.config, "serial_timeout_s", 0.15))
+            return max(6.0, self._status_timeout() + command_timeout + serial_timeout + 0.5)
+        return self._default_timeout()
+
+    def _target_command_timeout(self) -> float:
+        if isinstance(self.backend, AxisDriverBackend):
+            return self._motion_command_timeout()
         return self._default_timeout()
 
     def _on_backend_disconnected(self) -> None:

@@ -1188,16 +1188,16 @@ class TrackingUiMixin:
             el_far = float(antenna_settings.get("el_speed_far_tracking", 500))
 
             try:
-                self.axis_client.stop_az(timeout=1.0)
+                self.axis_client.stop_az()
             except Exception:
                 pass
             try:
-                self.axis_client.stop_el(timeout=1.0)
+                self.axis_client.stop_el()
             except Exception:
                 pass
 
             try:
-                ack = self.axis_client.set_az_speed(az_far, timeout=1.0)
+                ack = self.axis_client.set_az_speed(az_far)
                 try:
                     if ack is not None:
                         self.axis_client.antenna.az_setrate = az_far
@@ -1206,7 +1206,7 @@ class TrackingUiMixin:
             except Exception as exc:
                 self.logger.debug(f"prime_axis_motion: set_az_speed erreur: {exc}")
             try:
-                ack = self.axis_client.set_el_speed(el_far, timeout=1.0)
+                ack = self.axis_client.set_el_speed(el_far)
                 try:
                     if ack is not None:
                         self.axis_client.antenna.el_setrate = el_far
