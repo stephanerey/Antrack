@@ -121,7 +121,7 @@ class PositioningController:
                     or (now_ts - self._last_target_command_ts) >= self._move_refresh_interval
                 ):
                     try:
-                        self.axis_client_qt.set_target_position(az_set, el_set, timeout=1.0)
+                        self.axis_client_qt.set_target_position(az_set, el_set)
                         self._last_target_command = target
                         self._last_target_command_ts = now_ts
                     except Exception as exc:
@@ -209,7 +209,7 @@ class PositioningController:
                 rate_az = az_speed_close
             if getattr(self.axis_client_qt.antenna, "az_setrate", None) != rate_az:
                 self.axis_client_qt.antenna.az_setrate = rate_az
-                self.axis_client_qt.set_az_speed(rate_az, timeout=1.0)
+                self.axis_client_qt.set_az_speed(rate_az)
         except Exception:
             pass
 
@@ -222,7 +222,7 @@ class PositioningController:
                 rate_el = el_speed_close
             if getattr(self.axis_client_qt.antenna, "el_setrate", None) != rate_el:
                 self.axis_client_qt.antenna.el_setrate = rate_el
-                self.axis_client_qt.set_el_speed(rate_el, timeout=1.0)
+                self.axis_client_qt.set_el_speed(rate_el)
         except Exception:
             pass
 
@@ -230,19 +230,19 @@ class PositioningController:
             if need_az:
                 if az_error > 0:
                     if self._last_az_cmd != "CCW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                        self.axis_client_qt.move_ccw(timeout=1.0)
+                        self.axis_client_qt.move_ccw()
                         self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_CCW
                         self._last_az_cmd = "CCW"
                         self._last_az_cmd_ts = now_ts
                 else:
                     if self._last_az_cmd != "CW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                        self.axis_client_qt.move_cw(timeout=1.0)
+                        self.axis_client_qt.move_cw()
                         self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_CW
                         self._last_az_cmd = "CW"
                         self._last_az_cmd_ts = now_ts
             else:
                 if self._last_az_cmd != "STOP" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                    self.axis_client_qt.stop_az(timeout=1.0)
+                    self.axis_client_qt.stop_az()
                     self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
                     self._last_az_cmd = "STOP"
                     self._last_az_cmd_ts = now_ts
@@ -253,19 +253,19 @@ class PositioningController:
             if need_el:
                 if el_error > 0:
                     if self._last_el_cmd != "DOWN" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                        self.axis_client_qt.move_down(timeout=1.0)
+                        self.axis_client_qt.move_down()
                         self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_DOWN
                         self._last_el_cmd = "DOWN"
                         self._last_el_cmd_ts = now_ts
                 else:
                     if self._last_el_cmd != "UP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                        self.axis_client_qt.move_up(timeout=1.0)
+                        self.axis_client_qt.move_up()
                         self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_UP
                         self._last_el_cmd = "UP"
                         self._last_el_cmd_ts = now_ts
             else:
                 if self._last_el_cmd != "STOP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                    self.axis_client_qt.stop_el(timeout=1.0)
+                    self.axis_client_qt.stop_el()
                     self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
                     self._last_el_cmd = "STOP"
                     self._last_el_cmd_ts = now_ts

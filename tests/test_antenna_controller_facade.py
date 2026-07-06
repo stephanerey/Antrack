@@ -162,3 +162,26 @@ def test_axis_driver_controller_uses_extended_poll_timeouts():
 
     assert thread_manager.timeouts[0] >= 2.0
     assert thread_manager.timeouts[1] >= 5.0
+
+
+def test_axis_driver_controller_uses_extended_motion_timeout():
+    backend = AxisDriverBackend(
+        AxisDriverConnectionConfig(
+            comport="COM7",
+            command_timeout_s=0.5,
+            serial_timeout_s=0.15,
+        ),
+        serial_factory=lambda **_kwargs: None,
+    )
+    backend.state = AntennaConnectionState.CONNECTED
+    thread_manager = RecordingThreadManager()
+    controller = AntennaControllerQt(backend, thread_manager=thread_manager)
+
+    async def fake_set_az_speed(_speed):
+        return 42
+
+    backend.set_az_speed = fake_set_az_speed
+
+    controller.set_az_speed(42)
+
+    assert thread_manager.timeouts[0] >= 6.0

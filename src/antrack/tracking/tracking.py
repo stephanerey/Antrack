@@ -287,7 +287,6 @@ class Tracker:
                     self.axis_client_qt.set_target_position(
                         self.tracked_object.az_set,
                         self.tracked_object.el_set,
-                        timeout=1.0,
                     )
                     self._last_target_command = target
                     self._last_target_command_ts = now_ts
@@ -358,7 +357,7 @@ class Tracker:
                     rate_az = az_speed_close
                 if getattr(self.axis_client_qt.antenna, 'az_setrate', None) != rate_az:
                     log.debug("CMD set_az_speed -> %.1f", rate_az)
-                    ack = self.axis_client_qt.set_az_speed(rate_az, timeout=1.0)
+                    ack = self.axis_client_qt.set_az_speed(rate_az)
                     if ack is not None:
                         self.axis_client_qt.antenna.az_setrate = rate_az
             except Exception as e:
@@ -372,7 +371,7 @@ class Tracker:
                 else:
                     rate_el = el_speed_close
                 if getattr(self.axis_client_qt.antenna, 'el_setrate', None) != rate_el:
-                    ack = self.axis_client_qt.set_el_speed(rate_el, timeout=1.0)
+                    ack = self.axis_client_qt.set_el_speed(rate_el)
                     if ack is not None:
                         self.axis_client_qt.antenna.el_setrate = rate_el
             except Exception as e:
@@ -383,18 +382,18 @@ class Tracker:
                 if need_az:
                     if self.tracked_object.az_error > 0:
                         if self._last_az_cmd != "CCW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                            self.axis_client_qt.move_ccw(timeout=1.0)
+                            self.axis_client_qt.move_ccw()
                             self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_CCW
                             self._last_az_cmd = "CCW"
                             self._last_az_cmd_ts = now_ts
                     else:
                         if self._last_az_cmd != "CW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                            self.axis_client_qt.move_cw(timeout=1.0)
+                            self.axis_client_qt.move_cw()
                             self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_CW
                             self._last_az_cmd = "CW"
                             self._last_az_cmd_ts = now_ts
                 elif self._last_az_cmd != "STOP" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                    self.axis_client_qt.stop_az(timeout=1.0)
+                    self.axis_client_qt.stop_az()
                     self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_STOP
                     self._last_az_cmd = "STOP"
                     self._last_az_cmd_ts = now_ts
@@ -406,18 +405,18 @@ class Tracker:
                 if need_el:
                     if self.tracked_object.el_error > 0:
                         if self._last_el_cmd != "DOWN" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                            self.axis_client_qt.move_down(timeout=1.0)
+                            self.axis_client_qt.move_down()
                             self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_DOWN
                             self._last_el_cmd = "DOWN"
                             self._last_el_cmd_ts = now_ts
                     else:
                         if self._last_el_cmd != "UP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                            self.axis_client_qt.move_up(timeout=1.0)
+                            self.axis_client_qt.move_up()
                             self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_UP
                             self._last_el_cmd = "UP"
                             self._last_el_cmd_ts = now_ts
                 elif self._last_el_cmd != "STOP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                    self.axis_client_qt.stop_el(timeout=1.0)
+                    self.axis_client_qt.stop_el()
                     self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_STOP
                     self._last_el_cmd = "STOP"
                     self._last_el_cmd_ts = now_ts
@@ -473,8 +472,8 @@ class Tracker:
         """Prime the controller with a STOP and fresh rates before the first tracking move."""
         try:
             if self._kickstart_pending:
-                self.axis_client_qt.stop_az(timeout=1.0)
-                self.axis_client_qt.stop_el(timeout=1.0)
+                self.axis_client_qt.stop_az()
+                self.axis_client_qt.stop_el()
                 self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
                 self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
                 self._last_az_cmd = "STOP"
@@ -484,10 +483,10 @@ class Tracker:
                 self._last_el_cmd_ts = now_ts
                 self._kickstart_pending = False
             if self._must_apply_speeds:
-                ack = self.axis_client_qt.set_az_speed(az_speed_far, timeout=1.0)
+                ack = self.axis_client_qt.set_az_speed(az_speed_far)
                 if ack is not None:
                     self.axis_client_qt.antenna.az_setrate = az_speed_far
-                ack = self.axis_client_qt.set_el_speed(el_speed_far, timeout=1.0)
+                ack = self.axis_client_qt.set_el_speed(el_speed_far)
                 if ack is not None:
                     self.axis_client_qt.antenna.el_setrate = el_speed_far
                 self._must_apply_speeds = False
