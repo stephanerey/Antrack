@@ -24,6 +24,7 @@ from antrack.utils.settings_loader import update_and_persist_setting
 _AXIS_DRIVER_REFERENCE_WARNING = "Antenna not referenced - pass AZ/EL index before trusting position"
 _INDEX_PASSING_BLUE = "color: white; background-color: #2F80ED;"
 _TOP_BANNER_GROUP_HEIGHT = 82
+_ANTENNA_LINK_FIELD_WIDTH = 150
 
 
 def format_antenna_endpoint_summary(config, mode: str | None = None) -> str:
@@ -172,8 +173,7 @@ class ConnectionUiMixin:
         self.label_antenna_endpoint_summary.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.label_antenna_endpoint_summary.setStyleSheet(standard_label_color)
         self.label_antenna_endpoint.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.label_antenna_endpoint_summary.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.label_antenna_endpoint_summary.setMinimumWidth(160)
+        self.label_antenna_endpoint_summary.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         if hasattr(self, "label_LocalTime_40"):
             self.label_LocalTime_40.setText("Version")
@@ -188,14 +188,12 @@ class ConnectionUiMixin:
         self.label_axisapp_version.setMinimumHeight(20)
         self.label_axisapp_version.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.label_axisapp_version.setMaximumWidth(120)
-        self.combo_antenna_mode.setMinimumWidth(120)
-        self.combo_antenna_mode.setMaximumWidth(150)
+        self.combo_antenna_mode.setFixedWidth(_ANTENNA_LINK_FIELD_WIDTH)
         self.combo_antenna_mode.setMinimumHeight(24)
         self.pushButton_server_connect.setMinimumWidth(104)
         self.pushButton_server_connect.setMinimumHeight(24)
         self.pushButton_server_connect.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.label_antenna_endpoint_summary.setMinimumWidth(150)
-        self.label_antenna_endpoint_summary.setMaximumWidth(180)
+        self.label_antenna_endpoint_summary.setFixedWidth(_ANTENNA_LINK_FIELD_WIDTH)
         self.label_antenna_endpoint_summary.setMinimumHeight(20)
 
         layout = QGridLayout()
