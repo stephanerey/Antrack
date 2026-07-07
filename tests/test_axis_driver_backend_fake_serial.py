@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -223,3 +224,30 @@ def test_axis_driver_snapshot_exposes_configured_and_observed_intervals():
     assert snapshot["configured_status_interval_s"] == pytest.approx(1.0)
     assert "position_interval_last_s" in snapshot
     assert "status_interval_last_s" in snapshot
+
+
+def test_axis_driver_background_status_poll_skips_while_motion_active():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    backend.axis_status["azimuth"] = "CW"
+    payload = asyncio.run(backend.poll_status())
+
+    assert payload == backend._last_status_payload
+    assert fake_serial.writes == []
+
+
+def test_axis_driver_background_position_poll_yields_to_command_priority():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    backend.telemetry.az = 123.0
+    backend.telemetry.el = 45.0
+    backend._command_priority_until_monotonic = time.monotonic() + 1.0
+
+    payload = asyncio.run(backend.poll_position())
+
+    assert payload == (123.0, 45.0)
+    assert fake_serial.writes == []

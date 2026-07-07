@@ -41,6 +41,10 @@ except Exception:  # pragma: no cover - import is validated in real runtime
     serial = None
 
 
+class _BackgroundPollDeferred(RuntimeError):
+    """Internal signal used to yield background polling to foreground motion commands."""
+
+
 class AxisDriverBackend(BaseAntennaBackend):
     """Axis Modbus RTU backend using a shared serial transport."""
 
@@ -49,6 +53,10 @@ class AxisDriverBackend(BaseAntennaBackend):
     _STATUS_BLOCK_LENGTH = 7
     _DIAGNOSTIC_WINDOW_S = 5.0
     _FAILURE_THRESHOLD = 3
+    _BACKGROUND_DEFER_STEP_S = 0.005
+    _BACKGROUND_DEFER_MAX_S = 0.05
+    _COMMAND_PRIORITY_WINDOW_S = 0.15
+    _MOTION_STATUS_MIN_INTERVAL_S = 1.0
 
     def __init__(
         self,
@@ -99,6 +107,10 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._status_interval_last_s: float | None = None
         self._status_interval_min_s: float | None = None
         self._status_interval_max_s: float | None = None
+        self._command_pending_count = 0
+        self._command_priority_until_monotonic = 0.0
+        self._background_position_skips = 0
+        self._background_status_skips = 0
 
     async def _ensure_async_primitives(self) -> None:
         loop = asyncio.get_running_loop()
@@ -210,19 +222,25 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _get_position(self, *, background: bool) -> tuple[float | None, float | None]:
         await self._ensure_async_primitives()
-        async with self._io_lock:
-            az_raw = self._read_register_locked(
-                self.config.az_slave_address,
-                RAW_POSITION_REGISTER,
-                background=background,
-                context="az_position",
-            )
-            el_raw = self._read_register_locked(
+        if background and not await self._await_background_slot("position"):
+            self._background_position_skips += 1
+            return self.telemetry.az, self.telemetry.el
+        az_raw = await self._read_register(
+            self.config.az_slave_address,
+            RAW_POSITION_REGISTER,
+            background=background,
+            context="az_position",
+        )
+        try:
+            el_raw = await self._read_register(
                 self.config.el_slave_address,
                 RAW_POSITION_REGISTER,
                 background=background,
                 context="el_position",
             )
+        except _BackgroundPollDeferred:
+            self._background_position_skips += 1
+            return self.telemetry.az, self.telemetry.el
         self.telemetry.az_raw = az_raw
         self.telemetry.el_raw = el_raw
         self.telemetry.az = raw_az_to_deg(az_raw)
@@ -238,13 +256,24 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _get_status(self, *, background: bool) -> dict:
         await self._ensure_async_primitives()
-        async with self._io_lock:
-            if self._status_read_mode() == self.STATUS_READ_MODE_BLOCK:
-                az_status = self._read_status_block_locked(self.config.az_slave_address, background=background)
-                el_status = self._read_status_block_locked(self.config.el_slave_address, background=background)
-            else:
-                az_status = self._read_status_single_locked(self.config.az_slave_address, background=background)
-                el_status = self._read_status_single_locked(self.config.el_slave_address, background=background)
+        if background and not await self._await_background_slot("status"):
+            self._background_status_skips += 1
+            return dict(self._last_status_payload)
+        if background and self._status_read_mode() == self.STATUS_READ_MODE_SINGLE_REGISTER:
+            try:
+                az_status = await self._read_status_single_async(self.config.az_slave_address, background=True)
+                el_status = await self._read_status_single_async(self.config.el_slave_address, background=True)
+            except _BackgroundPollDeferred:
+                self._background_status_skips += 1
+                return dict(self._last_status_payload)
+        else:
+            async with self._io_lock:
+                if self._status_read_mode() == self.STATUS_READ_MODE_BLOCK:
+                    az_status = self._read_status_block_locked(self.config.az_slave_address, background=background)
+                    el_status = self._read_status_block_locked(self.config.el_slave_address, background=background)
+                else:
+                    az_status = self._read_status_single_locked(self.config.az_slave_address, background=background)
+                    el_status = self._read_status_single_locked(self.config.el_slave_address, background=background)
 
         az_motion = az_status["motion"]
         el_motion = el_status["motion"]
@@ -297,10 +326,19 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.versions.driver_version_el = format_release(el_release)
         return self.versions
 
-    async def _read_register(self, slave: int, register: int) -> int:
+    async def _read_register(
+        self,
+        slave: int,
+        register: int,
+        *,
+        background: bool = False,
+        context: str = "fc03_read",
+    ) -> int:
         await self._ensure_async_primitives()
+        if background and not await self._await_background_slot("status"):
+            raise _BackgroundPollDeferred("Background poll deferred for pending motion command")
         async with self._io_lock:
-            return self._read_register_locked(slave, register)
+            return self._read_register_locked(slave, register, background=background, context=context)
 
     def _read_register_locked(
         self,
@@ -404,10 +442,58 @@ class AxisDriverBackend(BaseAntennaBackend):
             ),
         }
 
+    async def _read_status_single_async(self, slave: int, *, background: bool) -> dict[str, int]:
+        return {
+            "motion": int(
+                await self._read_register(
+                    slave,
+                    MOTION_STATE_REGISTER,
+                    background=background,
+                    context=f"status_motion_slave_{slave}",
+                )
+            ),
+            "raw_position": int(
+                await self._read_register(
+                    slave,
+                    RAW_POSITION_REGISTER,
+                    background=background,
+                    context=f"status_position_slave_{slave}",
+                )
+            ),
+            "endstop": int(
+                await self._read_register(
+                    slave,
+                    ENDSTOP_REGISTER,
+                    background=background,
+                    context=f"status_endstop_slave_{slave}",
+                )
+            ),
+            "index": int(
+                await self._read_register(
+                    slave,
+                    INDEX_REGISTER,
+                    background=background,
+                    context=f"status_index_slave_{slave}",
+                )
+            ),
+            "alarm": int(
+                await self._read_register(
+                    slave,
+                    MOTOR_ALARM_REGISTER,
+                    background=background,
+                    context=f"status_alarm_slave_{slave}",
+                )
+            ),
+        }
+
     async def _write_register(self, slave: int, register: int, value: int) -> tuple[int, int]:
         await self._ensure_async_primitives()
-        async with self._io_lock:
-            return self._write_register_locked(slave, register, value)
+        self._mark_command_priority()
+        try:
+            async with self._io_lock:
+                return self._write_register_locked(slave, register, value)
+        finally:
+            self._release_command_priority()
 
     def _write_register_locked(self, slave: int, register: int, value: int) -> tuple[int, int]:
         self._ensure_serial_open()
@@ -520,6 +606,48 @@ class AxisDriverBackend(BaseAntennaBackend):
             command_timeout,
             max(serial_timeout * 2.0, command_timeout * 0.8, serial_timeout + 0.05),
         )
+
+    def _mark_command_priority(self) -> None:
+        self._command_pending_count += 1
+        self._command_priority_until_monotonic = max(
+            self._command_priority_until_monotonic,
+            time.monotonic() + self._COMMAND_PRIORITY_WINDOW_S,
+        )
+
+    def _release_command_priority(self) -> None:
+        self._command_pending_count = max(0, self._command_pending_count - 1)
+        self._command_priority_until_monotonic = max(
+            self._command_priority_until_monotonic,
+            time.monotonic() + self._COMMAND_PRIORITY_WINDOW_S,
+        )
+
+    def _motion_active(self) -> bool:
+        return any(
+            str(self.axis_status.get(axis, "STOP")).upper() != "STOP"
+            for axis in ("azimuth", "elevation")
+        )
+
+    def _should_defer_background_poll(self, kind: str) -> bool:
+        now = time.monotonic()
+        if self._command_pending_count > 0 or now < self._command_priority_until_monotonic:
+            return True
+        if kind == "status" and self._motion_active():
+            last_status = self._status_last_update_monotonic
+            min_interval = max(
+                float(getattr(self.config, "status_interval_s", 1.0)),
+                self._MOTION_STATUS_MIN_INTERVAL_S,
+            )
+            if last_status is not None and (now - float(last_status)) < min_interval:
+                return True
+        return False
+
+    async def _await_background_slot(self, kind: str) -> bool:
+        deadline = time.monotonic() + self._BACKGROUND_DEFER_MAX_S
+        while self._should_defer_background_poll(kind):
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(self._BACKGROUND_DEFER_STEP_S)
+        return True
 
     def _status_read_mode(self) -> str:
         mode = str(getattr(self.config, "status_read_mode", self.STATUS_READ_MODE_SINGLE_REGISTER)).strip().lower()
@@ -735,6 +863,8 @@ class AxisDriverBackend(BaseAntennaBackend):
             "status_interval_min_s": self._status_interval_min_s,
             "status_interval_avg_s": status_interval_avg,
             "status_interval_max_s": self._status_interval_max_s,
+            "background_position_skips": self._background_position_skips,
+            "background_status_skips": self._background_status_skips,
         }
 
     def _close_serial(self) -> None:
