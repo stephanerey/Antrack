@@ -1,6 +1,8 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from antrack.tracking.ephemeris_service import EphemerisService, SimpleSignal
 
 
@@ -68,3 +70,29 @@ def test_ephemeris_service_stop_all_stops_shared_worker():
     assert service._targets == {}
     assert service._workers == {}
     assert thread_manager.stopped == ["EphemerisLoop"]
+
+
+def test_ephemeris_service_compute_wakeup_timeout_uses_true_next_due():
+    thread_manager = RecordingThreadManager()
+    service = _lightweight_ephem_service(thread_manager)
+
+    assert service._compute_wakeup_timeout(None, now_monotonic=10.0) == 0.5
+    assert service._compute_wakeup_timeout(10.4, now_monotonic=10.0) == pytest.approx(0.4)
+    assert service._compute_wakeup_timeout(12.0, now_monotonic=10.0) == 0.5
+
+
+def test_ephemeris_service_step_object_emits_single_merged_payload_when_pass_info_due():
+    thread_manager = RecordingThreadManager()
+    service = _lightweight_ephem_service(thread_manager)
+    received = []
+    service.pose_updated.connect(lambda key, payload: received.append((key, payload)))
+    service._compute_payload = lambda obj_type, name, t_now: {"az": 1.0, "el": 2.0}
+    service._compute_pass_info = lambda obj_type, name, t_now: {"next_event": "AOS"}
+
+    service._step_object(
+        "primary",
+        {"obj_type": "Solar System", "name": "Sun"},
+        t_now=SimpleNamespace(tt=10.0),
+    )
+
+    assert received == [("primary", {"az": 1.0, "el": 2.0, "name": "Sun", "next_event": "AOS"})]

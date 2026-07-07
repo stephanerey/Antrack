@@ -73,6 +73,8 @@ def load_planets(ephemeris_name: str = "de440s.bsp", logger=None):
 class EphemerisService:
     """Compute tracking ephemerides and manage background updates."""
 
+    _MAX_LOOP_WAIT_S = 0.5
+
     def __init__(
         self,
         thread_manager,
@@ -285,7 +287,7 @@ class EphemerisService:
         while True:
             scheduled = self._snapshot_active_targets()
             if not scheduled:
-                self._wakeup.wait(timeout=0.05)
+                self._wakeup.wait(timeout=self._MAX_LOOP_WAIT_S)
                 self._wakeup.clear()
                 if not self._snapshot_active_targets():
                     break
@@ -293,6 +295,7 @@ class EphemerisService:
 
             now_mono = time.monotonic()
             next_due = None
+            t_now = None
             for key, sel in scheduled.items():
                 interval = float(max(0.1, sel.get("interval") or 0.1))
                 with self._state_lock:
@@ -300,20 +303,26 @@ class EphemerisService:
                 if now_mono + 1e-6 < due_at:
                     next_due = due_at if next_due is None else min(next_due, due_at)
                     continue
-                self._step_object(key, sel)
+                if t_now is None:
+                    t_now = self.observer.timescale.now()
+                self._step_object(key, sel, t_now=t_now)
                 next_run = time.monotonic() + interval
                 with self._state_lock:
                     if self._workers.get(key, False):
                         self._next_run_at[key] = next_run
                 next_due = next_run if next_due is None else min(next_due, next_run)
 
-            timeout_s = 0.05
-            if next_due is not None:
-                timeout_s = min(0.05, max(0.0, next_due - time.monotonic()))
+            timeout_s = self._compute_wakeup_timeout(next_due)
             self._wakeup.wait(timeout=timeout_s)
             self._wakeup.clear()
 
-    def _step_object(self, key: str, sel: Dict):
+    def _compute_wakeup_timeout(self, next_due: Optional[float], *, now_monotonic: Optional[float] = None) -> float:
+        if next_due is None:
+            return self._MAX_LOOP_WAIT_S
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        return min(self._MAX_LOOP_WAIT_S, max(0.0, float(next_due) - now))
+
+    def _step_object(self, key: str, sel: Dict, *, t_now=None):
         try:
             if not sel or not self.observer or not self.planets:
                 return
@@ -324,21 +333,17 @@ class EphemerisService:
             if obj_type == "Star" and self._hip_df is None:
                 self._ensure_hipparcos_loaded()
 
-            t_now = self.observer.timescale.now()
+            if t_now is None:
+                t_now = self.observer.timescale.now()
 
             payload = self._compute_payload(obj_type, name, t_now)
             payload['name'] = name
 
             cache = self._pass_cache.setdefault(key, {'last_tt': 0.0, 'payload': self._empty_pass_info()})
             now_tt = float(t_now.tt)
-
-            fast_payload = dict(payload)
+            emitted_payload = dict(payload)
             if float(cache.get('last_tt') or 0.0) > 0.0:
-                fast_payload.update(cache.get('payload') or {})
-            try:
-                self.pose_updated.emit(key, fast_payload)
-            except Exception:
-                pass
+                emitted_payload.update(cache.get('payload') or {})
 
             if obj_type == "Artificial Satellite":
                 min_period_s = 1.0
@@ -350,12 +355,12 @@ class EphemerisService:
             if (now_tt - float(cache['last_tt'])) * 86400.0 >= min_period_s:
                 cache['payload'] = self._compute_pass_info(obj_type, name, t_now)
                 cache['last_tt'] = now_tt
-                detailed_payload = dict(payload)
-                detailed_payload.update(cache['payload'])
-                try:
-                    self.pose_updated.emit(key, detailed_payload)
-                except Exception:
-                    pass
+                emitted_payload.update(cache['payload'])
+
+            try:
+                self.pose_updated.emit(key, emitted_payload)
+            except Exception:
+                pass
 
         except Exception as e:
             if self.logger:
