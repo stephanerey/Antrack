@@ -89,6 +89,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._diag_latency_max_s: float | None = None
         self._position_last_update_monotonic: float | None = None
         self._status_last_update_monotonic: float | None = None
+        self._background_poll_holdoff_until_monotonic = 0.0
 
     async def _ensure_async_primitives(self) -> None:
         loop = asyncio.get_running_loop()
@@ -200,7 +201,11 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _get_position(self, *, background: bool) -> tuple[float | None, float | None]:
         await self._ensure_async_primitives()
+        if background and self._should_skip_background_poll():
+            return self.telemetry.az, self.telemetry.el
         async with self._io_lock:
+            if background and self._should_skip_background_poll():
+                return self.telemetry.az, self.telemetry.el
             az_raw = self._read_register_locked(
                 self.config.az_slave_address,
                 RAW_POSITION_REGISTER,
@@ -226,7 +231,11 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _get_status(self, *, background: bool) -> dict:
         await self._ensure_async_primitives()
+        if background and self._should_skip_background_poll():
+            return dict(self._last_status_payload)
         async with self._io_lock:
+            if background and self._should_skip_background_poll():
+                return dict(self._last_status_payload)
             if self._status_read_mode() == self.STATUS_READ_MODE_BLOCK:
                 az_status = self._read_status_block_locked(self.config.az_slave_address, background=background)
                 el_status = self._read_status_block_locked(self.config.el_slave_address, background=background)
@@ -392,8 +401,11 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _write_register(self, slave: int, register: int, value: int) -> tuple[int, int]:
         await self._ensure_async_primitives()
+        self._defer_background_polls()
         async with self._io_lock:
-            return self._write_register_locked(slave, register, value)
+            result = self._write_register_locked(slave, register, value)
+        self._defer_background_polls()
+        return result
 
     def _write_register_locked(self, slave: int, register: int, value: int) -> tuple[int, int]:
         self._ensure_serial_open()
@@ -506,6 +518,25 @@ class AxisDriverBackend(BaseAntennaBackend):
             command_timeout,
             max(serial_timeout * 2.0, command_timeout * 0.8, serial_timeout + 0.05),
         )
+
+    def _background_poll_holdoff_s(self) -> float:
+        return max(0.0, float(getattr(self.config, "background_poll_holdoff_s", 0.3)))
+
+    def _defer_background_polls(self) -> None:
+        holdoff_s = self._background_poll_holdoff_s()
+        if holdoff_s <= 0.0:
+            return
+        self._background_poll_holdoff_until_monotonic = max(
+            self._background_poll_holdoff_until_monotonic,
+            time.monotonic() + holdoff_s,
+        )
+
+    def _should_skip_background_poll(self) -> bool:
+        if self._background_poll_holdoff_s() <= 0.0:
+            return False
+        if self._io_lock is not None and self._io_lock.locked():
+            return True
+        return time.monotonic() < self._background_poll_holdoff_until_monotonic
 
     def _status_read_mode(self) -> str:
         mode = str(getattr(self.config, "status_read_mode", self.STATUS_READ_MODE_SINGLE_REGISTER)).strip().lower()
@@ -621,7 +652,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.logger.info(
             "AxisDriver startup: mode=axis_driver port=%s baudrate=%s az_slave=%s el_slave=%s "
             "serial_timeout_s=%.3f command_timeout_s=%.3f position_interval_s=%.3f "
-            "status_interval_s=%.3f health_interval_s=%.3f status_read_mode=%s",
+            "status_interval_s=%.3f health_interval_s=%.3f background_poll_holdoff_s=%.3f status_read_mode=%s",
             self.config.comport,
             self.config.baudrate,
             self.config.az_slave_address,
@@ -631,6 +662,7 @@ class AxisDriverBackend(BaseAntennaBackend):
             effective_position_interval,
             effective_status_interval,
             float(self.config.health_interval_s),
+            self._background_poll_holdoff_s(),
             self._status_read_mode(),
         )
 

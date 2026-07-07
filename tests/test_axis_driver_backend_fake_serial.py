@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.types import AntennaConnectionState
@@ -202,11 +203,28 @@ def test_axis_driver_background_timeout_is_relaxed_but_below_command_timeout():
     assert timeout_s == 0.4
 
 
+def test_axis_driver_background_polls_skip_io_during_holdoff():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    backend.telemetry.az = 123.4
+    backend.telemetry.el = 45.6
+    backend._last_status_payload = {"endstop_az": 1, "endstop_el": 0}
+    backend._background_poll_holdoff_until_monotonic = time.monotonic() + 60.0
+    fake_serial.writes.clear()
+
+    position = asyncio.run(backend.poll_position())
+    status = asyncio.run(backend.poll_status())
+
+    assert position == (123.4, 45.6)
+    assert status == {"endstop_az": 1, "endstop_el": 0}
+    assert fake_serial.writes == []
+
+
 def test_axis_driver_success_clears_stale_diag_last_error():
     backend, _fake_serial = _backend_and_serial()
     backend._diag_last_error = "stale"
     backend._diag_failures = 0
 
-    backend._record_modbus_success(0x03)
+    backend._record_modbus_success(0x03, latency_s=0.01)
 
     assert backend._diag_last_error is None

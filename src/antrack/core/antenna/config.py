@@ -34,6 +34,7 @@ class AxisDriverConnectionConfig:
     position_interval_s: float = 0.2
     status_interval_s: float = 1.0
     health_interval_s: float = 2.0
+    background_poll_holdoff_s: float = 0.3
     status_read_mode: str = "single_register"
     legacy_accept_short_fc6_response: bool = True
 
@@ -127,6 +128,7 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
             position_interval_s=float(_get(axis_driver_section, "position_interval_s", 0.2)),
             status_interval_s=float(_get(axis_driver_section, "status_interval_s", 1.0)),
             health_interval_s=float(_get(axis_driver_section, "health_interval_s", 2.0)),
+            background_poll_holdoff_s=float(_get(axis_driver_section, "background_poll_holdoff_s", 0.3)),
             status_read_mode=_axis_driver_status_read_mode(
                 _get(axis_driver_section, "status_read_mode", "single_register"),
                 "single_register",
