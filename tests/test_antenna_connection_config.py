@@ -21,7 +21,6 @@ def test_axis_driver_settings_are_parsed():
                 "el_slave_address": 20,
                 "position_interval_s": 0.1,
                 "status_interval_s": 0.5,
-                "background_poll_holdoff_s": 0.35,
                 "status_read_mode": "single_register",
             },
         }
@@ -32,7 +31,6 @@ def test_axis_driver_settings_are_parsed():
     assert config.axis_driver.el_slave_address == 20
     assert config.axis_driver.position_interval_s == 0.1
     assert config.axis_driver.status_interval_s == 0.5
-    assert config.axis_driver.background_poll_holdoff_s == 0.35
     assert config.axis_driver.status_read_mode == "single_register"
 
 

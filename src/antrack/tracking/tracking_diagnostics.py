@@ -71,8 +71,6 @@ class TrackingDiagnosticsConfig:
     csv_prefix: str = "tracking_diagnostics"
     include_backend_transactions: bool = True
     rate_limit_warnings_s: float = 1.0
-    csv_flush_every_rows: int = 25
-    csv_flush_interval_s: float = 1.0
 
 
 def _to_bool(value: Any, default: bool) -> bool:
@@ -106,14 +104,6 @@ def load_tracking_diagnostics_config(settings: dict[str, Any] | None) -> Trackin
         rate_limit_warnings_s=max(
             0.1,
             float(section.get("RATE_LIMIT_WARNINGS_S", section.get("rate_limit_warnings_s", 1.0)) or 1.0),
-        ),
-        csv_flush_every_rows=max(
-            1,
-            int(section.get("CSV_FLUSH_EVERY_ROWS", section.get("csv_flush_every_rows", 25)) or 25),
-        ),
-        csv_flush_interval_s=max(
-            0.1,
-            float(section.get("CSV_FLUSH_INTERVAL_S", section.get("csv_flush_interval_s", 1.0)) or 1.0),
         ),
     )
 
@@ -168,8 +158,6 @@ class TrackingDiagnosticsCsvLogger:
         self.path: Path | None = None
         self._writer = None
         self._file_handle = None
-        self._rows_since_flush = 0
-        self._last_flush_monotonic = time.monotonic()
 
     def log_row(self, row: dict[str, Any]) -> None:
         if not (self.config.enabled and self.config.log_to_csv):
@@ -181,35 +169,15 @@ class TrackingDiagnosticsCsvLogger:
             self._file_handle = self.path.open("w", newline="", encoding="utf-8")
             self._writer = csv.DictWriter(self._file_handle, fieldnames=self.columns, extrasaction="ignore")
             self._writer.writeheader()
-            self._last_flush_monotonic = time.monotonic()
         payload = {column: row.get(column) for column in self.columns}
         self._writer.writerow(payload)
-        self._rows_since_flush += 1
-        self._flush_if_due()
-
-    def _flush_if_due(self, *, force: bool = False) -> None:
-        if self._file_handle is None:
-            return
-        now = time.monotonic()
-        if force:
-            self._file_handle.flush()
-            self._rows_since_flush = 0
-            self._last_flush_monotonic = now
-            return
-        if self._rows_since_flush < self.config.csv_flush_every_rows:
-            if (now - self._last_flush_monotonic) < self.config.csv_flush_interval_s:
-                return
         self._file_handle.flush()
-        self._rows_since_flush = 0
-        self._last_flush_monotonic = now
 
     def close(self) -> None:
         if self._file_handle is not None:
-            self._flush_if_due(force=True)
             self._file_handle.close()
         self._file_handle = None
         self._writer = None
-        self._rows_since_flush = 0
 
 
 class RateLimitedWarningLogger:

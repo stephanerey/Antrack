@@ -1,11 +1,9 @@
 import asyncio
-import time
 
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.types import AntennaConnectionState
 from antrack.core.axis.axis_driver_backend import AxisDriverBackend
 from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, MOTION_STATE_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
-from antrack.core.axis.axis_driver_constants import PARAMETER_TRIGGER_REGISTER
 from antrack.core.axis.modbus_rtu import append_crc, build_fc03_request, build_fc06_request
 
 
@@ -60,12 +58,6 @@ def _driver_responses():
             responses[build_fc03_request(slave, register, 1)] = _fc03_response(slave, value)
     for request in (
         build_fc06_request(10, SPEED_REGISTER, 25),
-        build_fc06_request(10, PARAMETER_TRIGGER_REGISTER, 0),
-        build_fc06_request(10, PARAMETER_TRIGGER_REGISTER, 1),
-        build_fc06_request(20, PARAMETER_TRIGGER_REGISTER, 0),
-        build_fc06_request(20, PARAMETER_TRIGGER_REGISTER, 1),
-        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 0),
-        build_fc06_request(20, COMMAND_TRIGGER_REGISTER, 0),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
         build_fc06_request(10, COMMAND_REGISTER, 100),
         build_fc06_request(20, COMMAND_REGISTER, 100),
@@ -128,10 +120,8 @@ def test_axis_driver_set_speed_and_move_emit_expected_frames():
     asyncio.run(backend.move_cw())
 
     assert fake_serial.writes == [
-        build_fc06_request(10, PARAMETER_TRIGGER_REGISTER, 0),
         build_fc06_request(10, SPEED_REGISTER, 25),
-        build_fc06_request(10, PARAMETER_TRIGGER_REGISTER, 1),
-        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 0),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
         build_fc06_request(10, COMMAND_REGISTER, 100),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
     ]
@@ -212,28 +202,11 @@ def test_axis_driver_background_timeout_is_relaxed_but_below_command_timeout():
     assert timeout_s == 0.4
 
 
-def test_axis_driver_background_polls_skip_io_during_holdoff():
-    backend, fake_serial = _backend_and_serial()
-    asyncio.run(backend.connect())
-    backend.telemetry.az = 123.4
-    backend.telemetry.el = 45.6
-    backend._last_status_payload = {"endstop_az": 1, "endstop_el": 0}
-    backend._background_poll_holdoff_until_monotonic = time.monotonic() + 60.0
-    fake_serial.writes.clear()
-
-    position = asyncio.run(backend.poll_position())
-    status = asyncio.run(backend.poll_status())
-
-    assert position == (123.4, 45.6)
-    assert status == {"endstop_az": 1, "endstop_el": 0}
-    assert fake_serial.writes == []
-
-
 def test_axis_driver_success_clears_stale_diag_last_error():
     backend, _fake_serial = _backend_and_serial()
     backend._diag_last_error = "stale"
     backend._diag_failures = 0
 
-    backend._record_modbus_success(0x03, latency_s=0.01)
+    backend._record_modbus_success(0x03)
 
     assert backend._diag_last_error is None
