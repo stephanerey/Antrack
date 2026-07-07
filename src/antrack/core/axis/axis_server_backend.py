@@ -17,6 +17,28 @@ class AxisServerBackend(BaseAntennaBackend):
         super().__init__("Axis Server")
         self.config = config
         self.axis = Axis(config.host, config.port)
+        self._position_last_update_monotonic: float | None = None
+        self._status_last_update_monotonic: float | None = None
+        self._diag_counts: dict[str, int] = {}
+        self._diag_last_latency_s: dict[str, float | None] = {}
+        self._diag_total_latency_s: dict[str, float] = {}
+        self._diag_min_latency_s: dict[str, float | None] = {}
+        self._diag_max_latency_s: dict[str, float | None] = {}
+
+    async def _measure_call(self, name: str, func):
+        start = time.monotonic()
+        try:
+            return await func()
+        finally:
+            end = time.monotonic()
+            latency = max(0.0, end - start)
+            self._diag_counts[name] = self._diag_counts.get(name, 0) + 1
+            self._diag_last_latency_s[name] = latency
+            self._diag_total_latency_s[name] = self._diag_total_latency_s.get(name, 0.0) + latency
+            cur_min = self._diag_min_latency_s.get(name)
+            cur_max = self._diag_max_latency_s.get(name)
+            self._diag_min_latency_s[name] = latency if cur_min is None else min(cur_min, latency)
+            self._diag_max_latency_s[name] = latency if cur_max is None else max(cur_max, latency)
 
     @property
     def axis_status(self) -> dict:
@@ -33,13 +55,13 @@ class AxisServerBackend(BaseAntennaBackend):
         self.state = AntennaConnectionState.CONNECTING
         self.last_error = None
         self.axis.set_disconnect_callback(self._handle_core_disconnect)
-        await self.axis.connect()
+        await self._measure_call("connect", self.axis.connect)
         self._sync_from_axis()
         if not self.is_connected():
             self.state = AntennaConnectionState.ERROR
             self.last_error = f"Unable to connect to Axis Server {self.config.host}:{self.config.port}"
             raise ConnectionError(self.last_error)
-        await self.axis.get_versions()
+        await self._measure_call("get_versions", self.axis.get_versions)
         self._sync_from_axis()
 
     async def disconnect(self) -> None:
@@ -52,67 +74,86 @@ class AxisServerBackend(BaseAntennaBackend):
             await self.axis.stop_keep_alive()
         except Exception:
             pass
-        await self.axis.disconnect()
+        await self._measure_call("disconnect", self.axis.disconnect)
         self._sync_from_axis(force_state=AntennaConnectionState.DISCONNECTED)
 
     async def set_az_speed(self, speed: float) -> int | None:
-        ack = await self.axis.set_az_speed(speed)
+        ack = await self._measure_call("set_az_speed", lambda: self.axis.set_az_speed(speed))
         if ack is not None:
             self.telemetry.az_setrate = float(speed)
         self._sync_from_axis()
         return ack
 
     async def set_el_speed(self, speed: float) -> int | None:
-        ack = await self.axis.set_el_speed(speed)
+        ack = await self._measure_call("set_el_speed", lambda: self.axis.set_el_speed(speed))
         if ack is not None:
             self.telemetry.el_setrate = float(speed)
         self._sync_from_axis()
         return ack
 
     async def move_cw(self) -> int | None:
-        ack = await self.axis.move_cw()
+        ack = await self._measure_call("move_cw", self.axis.move_cw)
         self._sync_from_axis()
         return ack
 
     async def move_ccw(self) -> int | None:
-        ack = await self.axis.move_ccw()
+        ack = await self._measure_call("move_ccw", self.axis.move_ccw)
         self._sync_from_axis()
         return ack
 
     async def move_up(self) -> int | None:
-        ack = await self.axis.move_up()
+        ack = await self._measure_call("move_up", self.axis.move_up)
         self._sync_from_axis()
         return ack
 
     async def move_down(self) -> int | None:
-        ack = await self.axis.move_down()
+        ack = await self._measure_call("move_down", self.axis.move_down)
         self._sync_from_axis()
         return ack
 
     async def stop_az(self) -> int | None:
-        ack = await self.axis.stop_az()
+        ack = await self._measure_call("stop_az", self.axis.stop_az)
         self._sync_from_axis()
         return ack
 
     async def stop_el(self) -> int | None:
-        ack = await self.axis.stop_el()
+        ack = await self._measure_call("stop_el", self.axis.stop_el)
         self._sync_from_axis()
         return ack
 
     async def get_position(self) -> tuple[float | None, float | None]:
-        result = await self.axis.get_position()
+        result = await self._measure_call("get_position", self.axis.get_position)
+        self._position_last_update_monotonic = time.monotonic()
         self._sync_from_axis()
         return result
 
     async def get_status(self) -> dict:
-        status = await self.axis.get_status()
+        status = await self._measure_call("get_status", self.axis.get_status)
+        self._status_last_update_monotonic = time.monotonic()
         self._sync_from_axis()
         return status
 
     async def get_versions(self) -> AntennaVersions:
-        await self.axis.get_versions()
+        await self._measure_call("get_versions", self.axis.get_versions)
         self._sync_from_axis()
         return self.versions
+
+    def get_diagnostics_snapshot(self) -> dict:
+        call_latency_avg = {}
+        for name, count in self._diag_counts.items():
+            total = self._diag_total_latency_s.get(name, 0.0)
+            call_latency_avg[name] = (total / count) if count else None
+        return {
+            "position_last_update_monotonic_s": self._position_last_update_monotonic,
+            "status_last_update_monotonic_s": self._status_last_update_monotonic,
+            "call_counts": dict(self._diag_counts),
+            "call_last_latency_s": dict(self._diag_last_latency_s),
+            "call_min_latency_s": dict(self._diag_min_latency_s),
+            "call_max_latency_s": dict(self._diag_max_latency_s),
+            "call_avg_latency_s": call_latency_avg,
+            "last_error": self.last_error,
+            "backend_state": self.state.value if hasattr(self.state, "value") else str(self.state),
+        }
 
     def _handle_core_disconnect(self) -> None:
         self._sync_from_axis(force_state=AntennaConnectionState.DISCONNECTED)

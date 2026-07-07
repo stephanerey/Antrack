@@ -26,6 +26,7 @@ from antrack.gui.event_countdown import format_next_event_countdown, next_event_
 from antrack.gui.widgets.multi_track_card import MultiTrackStrip
 from antrack.tracking.positioning import PositioningController
 from antrack.tracking.tracking import Tracker
+from antrack.tracking.tracking_diagnostics import load_tracking_diagnostics_config
 from antrack.utils.settings_loader import update_and_persist_setting
 
 
@@ -1528,6 +1529,12 @@ class TrackingUiMixin:
                 try:
                     if hasattr(self.tracker, "mark_speeds_dirty"):
                         self.tracker.mark_speeds_dirty()
+                except Exception:
+                    pass
+                try:
+                    diag_cfg = load_tracking_diagnostics_config(self.settings)
+                    if diag_cfg.enabled:
+                        self.status_bar.showMessage("Tracking diagnostics: ON", 3000)
                 except Exception:
                     pass
                 self._auto_restart_tracking = True

@@ -77,6 +77,18 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._diag_failures = 0
         self._diag_timeouts = 0
         self._diag_last_error: str | None = None
+        self._diag_total_requests = 0
+        self._diag_total_fc03 = 0
+        self._diag_total_fc06 = 0
+        self._diag_total_failures = 0
+        self._diag_total_timeouts = 0
+        self._diag_latency_count = 0
+        self._diag_latency_total_s = 0.0
+        self._diag_latency_last_s: float | None = None
+        self._diag_latency_min_s: float | None = None
+        self._diag_latency_max_s: float | None = None
+        self._position_last_update_monotonic: float | None = None
+        self._status_last_update_monotonic: float | None = None
 
     async def _ensure_async_primitives(self) -> None:
         loop = asyncio.get_running_loop()
@@ -206,6 +218,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.telemetry.az = raw_az_to_deg(az_raw)
         self.telemetry.el = raw_el_to_deg(el_raw)
         self.telemetry.last_update_monotonic = time.monotonic()
+        self._position_last_update_monotonic = self.telemetry.last_update_monotonic
         return self.telemetry.az, self.telemetry.el
 
     async def get_status(self) -> dict:
@@ -244,6 +257,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.telemetry.modbus_status_az = MODBUS_OK
         self.telemetry.modbus_status_el = MODBUS_OK
         self.telemetry.last_update_monotonic = time.monotonic()
+        self._status_last_update_monotonic = self.telemetry.last_update_monotonic
         payload = {
             "motion_az": az_motion,
             "motion_el": el_motion,
@@ -421,6 +435,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         background: bool,
         context: str,
     ):
+        started = time.monotonic()
         try:
             reset_input = getattr(self.serial_port, "reset_input_buffer", None)
             if callable(reset_input):
@@ -439,7 +454,7 @@ class AxisDriverBackend(BaseAntennaBackend):
                     buffer += chunk
                 parsed, last_error = self._scan_for_valid_frame(buffer, candidate_lengths, parser)
                 if parsed is not None:
-                    self._record_modbus_success(func_code)
+                    self._record_modbus_success(func_code, latency_s=max(0.0, time.monotonic() - started))
                     return parsed
                 if not chunk:
                     break
@@ -451,7 +466,13 @@ class AxisDriverBackend(BaseAntennaBackend):
                 f"Expected valid Modbus response ({candidate_lengths}), got {len(buffer)} bytes | raw={raw}"
             )
         except Exception as exc:
-            self._record_modbus_failure(func_code, exc, background=background, context=context)
+            self._record_modbus_failure(
+                func_code,
+                exc,
+                background=background,
+                context=context,
+                latency_s=max(0.0, time.monotonic() - started),
+            )
             raise
 
     @staticmethod
@@ -492,12 +513,16 @@ class AxisDriverBackend(BaseAntennaBackend):
             return self.STATUS_READ_MODE_SINGLE_REGISTER
         return mode
 
-    def _record_modbus_success(self, func_code: int) -> None:
+    def _record_modbus_success(self, func_code: int, *, latency_s: float) -> None:
         self._diag_requests += 1
+        self._diag_total_requests += 1
         if func_code == 0x03:
             self._diag_fc03 += 1
+            self._diag_total_fc03 += 1
         elif func_code == 0x06:
             self._diag_fc06 += 1
+            self._diag_total_fc06 += 1
+        self._record_latency(latency_s)
         if self._consecutive_failures and self.state == AntennaConnectionState.DEGRADED:
             self.logger.info("AxisDriver Modbus recovered after %d consecutive failures", self._consecutive_failures)
         self._consecutive_failures = 0
@@ -510,15 +535,29 @@ class AxisDriverBackend(BaseAntennaBackend):
             self._diag_last_error = None
         self._maybe_log_diagnostics()
 
-    def _record_modbus_failure(self, func_code: int, exc: Exception, *, background: bool, context: str) -> None:
+    def _record_modbus_failure(
+        self,
+        func_code: int,
+        exc: Exception,
+        *,
+        background: bool,
+        context: str,
+        latency_s: float,
+    ) -> None:
         self._diag_requests += 1
+        self._diag_total_requests += 1
         if func_code == 0x03:
             self._diag_fc03 += 1
+            self._diag_total_fc03 += 1
         elif func_code == 0x06:
             self._diag_fc06 += 1
+            self._diag_total_fc06 += 1
         self._diag_failures += 1
+        self._diag_total_failures += 1
         if isinstance(exc, TimeoutError):
             self._diag_timeouts += 1
+            self._diag_total_timeouts += 1
+        self._record_latency(latency_s)
         self._diag_last_error = str(exc)
         self.last_error = str(exc)
         self.telemetry.modbus_status_az = MODBUS_FAIL
@@ -568,6 +607,14 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._diag_timeouts = 0
         self._diag_last_error = None
 
+    def _record_latency(self, latency_s: float) -> None:
+        latency = max(0.0, float(latency_s))
+        self._diag_latency_last_s = latency
+        self._diag_latency_count += 1
+        self._diag_latency_total_s += latency
+        self._diag_latency_min_s = latency if self._diag_latency_min_s is None else min(self._diag_latency_min_s, latency)
+        self._diag_latency_max_s = latency if self._diag_latency_max_s is None else max(self._diag_latency_max_s, latency)
+
     def _log_startup_config(self) -> None:
         effective_position_interval = max(0.05, float(self.config.position_interval_s))
         effective_status_interval = max(0.1, float(self.config.status_interval_s))
@@ -600,6 +647,29 @@ class AxisDriverBackend(BaseAntennaBackend):
             "motor_alarm_el": None,
             "modbus_az": None,
             "modbus_el": None,
+        }
+
+    def get_diagnostics_snapshot(self) -> dict:
+        latency_avg = (
+            self._diag_latency_total_s / self._diag_latency_count
+            if self._diag_latency_count
+            else None
+        )
+        return {
+            "position_last_update_monotonic_s": self._position_last_update_monotonic,
+            "status_last_update_monotonic_s": self._status_last_update_monotonic,
+            "backend_state": self.state.value if hasattr(self.state, "value") else str(self.state),
+            "last_error": self.last_error,
+            "modbus_requests": self._diag_total_requests,
+            "modbus_fc03": self._diag_total_fc03,
+            "modbus_fc06": self._diag_total_fc06,
+            "modbus_failures": self._diag_total_failures,
+            "modbus_timeouts": self._diag_total_timeouts,
+            "modbus_latency_last_s": self._diag_latency_last_s,
+            "modbus_latency_min_s": self._diag_latency_min_s,
+            "modbus_latency_avg_s": latency_avg,
+            "modbus_latency_max_s": self._diag_latency_max_s,
+            "modbus_last_error": self._diag_last_error or self.last_error,
         }
 
     def _close_serial(self) -> None:

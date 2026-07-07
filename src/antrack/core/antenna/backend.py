@@ -131,6 +131,9 @@ class BaseAntennaBackend(AntennaBackend):
     def get_last_error(self) -> str | None:
         return self.last_error
 
+    def get_diagnostics_snapshot(self) -> dict:
+        return {}
+
     def snapshot(self) -> AntennaStatusSnapshot:
         return AntennaStatusSnapshot(
             state=self.state,
