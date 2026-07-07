@@ -22,6 +22,7 @@ from antrack.core.axis.axis_driver_constants import (
     MOTION_CW,
     MOTION_STATE_REGISTER,
     MOTION_STOP,
+    PARAMETER_TRIGGER_REGISTER,
     RAW_POSITION_REGISTER,
     RELEASE_REGISTER,
     SPEED_REGISTER,
@@ -429,12 +430,21 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _write_axis_speed(self, slave: int, speed: float) -> None:
         speed_value = int(max(0, round(float(speed))))
+        await self._pulse_trigger_register(slave, PARAMETER_TRIGGER_REGISTER, before_write=True)
         await self._write_register(slave, SPEED_REGISTER, speed_value)
-        await self._write_register(slave, COMMAND_TRIGGER_REGISTER, 1)
+        await self._write_register(slave, PARAMETER_TRIGGER_REGISTER, 1)
 
     async def _write_motion(self, slave: int, motion_value: int) -> None:
+        await self._pulse_trigger_register(slave, COMMAND_TRIGGER_REGISTER, before_write=True)
         await self._write_register(slave, COMMAND_REGISTER, motion_value)
         await self._write_register(slave, COMMAND_TRIGGER_REGISTER, 1)
+
+    async def _pulse_trigger_register(self, slave: int, register: int, *, before_write: bool = False) -> None:
+        try:
+            await self._write_register(slave, register, 0)
+        except Exception:
+            if not before_write:
+                raise
 
     def _exchange_and_parse(
         self,
