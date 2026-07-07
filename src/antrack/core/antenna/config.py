@@ -31,9 +31,10 @@ class AxisDriverConnectionConfig:
     el_slave_address: int = 20
     serial_timeout_s: float = 0.15
     command_timeout_s: float = 0.5
-    position_interval_s: float = 0.5
-    status_interval_s: float = 2.0
+    position_interval_s: float = 0.2
+    status_interval_s: float = 1.0
     health_interval_s: float = 2.0
+    status_read_mode: str = "single_register"
     legacy_accept_short_fc6_response: bool = True
 
 
@@ -85,6 +86,15 @@ def _as_bool(value: Any, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _axis_driver_status_read_mode(value: Any, default: str = "single_register") -> str:
+    mode = str(value if value is not None else default).strip().lower()
+    if mode in {"block", "single_register"}:
+        return mode
+    raise AntennaConfigError(
+        "Invalid AXIS_DRIVER STATUS_READ_MODE. Allowed values: 'block', 'single_register'."
+    )
+
+
 def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> AntennaConnectionConfig:
     antenna_section = _section(settings, "ANTENNA_CONNECTION")
     try:
@@ -114,9 +124,13 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
             el_slave_address=int(_get(axis_driver_section, "el_slave_address", 20)),
             serial_timeout_s=float(_get(axis_driver_section, "serial_timeout_s", 0.15)),
             command_timeout_s=float(_get(axis_driver_section, "command_timeout_s", 0.5)),
-            position_interval_s=float(_get(axis_driver_section, "position_interval_s", 0.5)),
-            status_interval_s=float(_get(axis_driver_section, "status_interval_s", 2.0)),
+            position_interval_s=float(_get(axis_driver_section, "position_interval_s", 0.2)),
+            status_interval_s=float(_get(axis_driver_section, "status_interval_s", 1.0)),
             health_interval_s=float(_get(axis_driver_section, "health_interval_s", 2.0)),
+            status_read_mode=_axis_driver_status_read_mode(
+                _get(axis_driver_section, "status_read_mode", "single_register"),
+                "single_register",
+            ),
             legacy_accept_short_fc6_response=_as_bool(
                 _get(axis_driver_section, "legacy_accept_short_fc6_response", True),
                 True,

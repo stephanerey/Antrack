@@ -651,9 +651,10 @@ class AxisClientPollingAdapter:
         logger = logging.getLogger("AxisPoller.Position")
         last_hb = time.monotonic()
         ticks = 0
-        try:
-            while worker and not worker.abort:
-                az, el = self.client.get_position()
+        while worker and not worker.abort:
+            try:
+                poll_position = getattr(self.client, "poll_position", None) or self.client.get_position
+                az, el = poll_position()
                 ticks += 1
                 if az is not None and el is not None:
                     try:
@@ -668,19 +669,23 @@ class AxisClientPollingAdapter:
                         self.client.antenna_telemetry_updated.emit(payload)
                 except Exception:
                     pass
-                time.sleep(interval)
-        except Exception:
-            # Laisser remonter pour que Worker.error émette le signal d'erreur
-            raise
+            except Exception as exc:
+                try:
+                    logger.warning("Position poll iteration failed: %s", exc)
+                except Exception:
+                    pass
+            time.sleep(interval)
+            worker = self.thread_manager.get_worker("AxisPositionPoller")
 
     def _poll_status_loop(self, interval: float = 1.0):
         import time
         worker = self.thread_manager.get_worker("AxisStatusPoller")
         logger = logging.getLogger("AxisPoller.Status")
         ticks = 0
-        try:
-            while worker and not worker.abort:
-                status = self.client.get_status()
+        while worker and not worker.abort:
+            try:
+                poll_status = getattr(self.client, "poll_status", None) or self.client.get_status
+                status = poll_status()
                 ticks += 1
                 if isinstance(status, dict):
                     try:
@@ -694,10 +699,13 @@ class AxisClientPollingAdapter:
                         self.client.telemetry_updated.emit(self.client.snapshot())
                 except Exception:
                     pass
-                time.sleep(interval)
-        except Exception:
-            # Laisser remonter pour que Worker.error émette le signal d'erreur
-            raise
+            except Exception as exc:
+                try:
+                    logger.warning("Status poll iteration failed: %s", exc)
+                except Exception:
+                    pass
+            time.sleep(interval)
+            worker = self.thread_manager.get_worker("AxisStatusPoller")
 
     def _log_error(self, msg: str):
         logger = getattr(self.client, "logger", None)

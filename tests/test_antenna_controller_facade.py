@@ -190,8 +190,8 @@ def test_axis_driver_controller_uses_extended_motion_timeout():
 def test_axis_driver_polling_intervals_are_clamped_for_slow_rs485():
     config = AxisDriverConnectionConfig(
         comport="COM7",
-        position_interval_s=0.2,
-        status_interval_s=1.0,
+        position_interval_s=0.1,
+        status_interval_s=0.5,
     )
     wrapped = type(
         "Cfg",
@@ -204,4 +204,24 @@ def test_axis_driver_polling_intervals_are_clamped_for_slow_rs485():
 
     polling = _polling_intervals_for_config(wrapped)
 
-    assert polling == (0.5, 2.0)
+    assert polling == (0.1, 0.5)
+
+
+def test_axis_driver_polling_intervals_apply_only_busy_loop_floor():
+    config = AxisDriverConnectionConfig(
+        comport="COM7",
+        position_interval_s=0.0,
+        status_interval_s=0.0,
+    )
+    wrapped = type(
+        "Cfg",
+        (),
+        {
+            "mode": AntennaConnectionMode.AXIS_DRIVER,
+            "selected_config": config,
+        },
+    )()
+
+    polling = _polling_intervals_for_config(wrapped)
+
+    assert polling == (0.05, 0.1)

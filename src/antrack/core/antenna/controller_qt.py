@@ -193,6 +193,24 @@ class AntennaControllerQt(QObject):
             pass
         return result
 
+    def poll_position(self):
+        backend_call = getattr(self.backend, "poll_position", None) or self.backend.get_position
+        result = self._run_backend_call(
+            backend_call,
+            timeout=self._position_timeout(),
+        )
+        self._refresh_from_backend()
+        return result
+
+    def poll_status(self):
+        backend_call = getattr(self.backend, "poll_status", None) or self.backend.get_status
+        result = self._run_backend_call(
+            backend_call,
+            timeout=self._status_timeout(),
+        )
+        self._refresh_from_backend()
+        return result
+
     def set_target_position(self, azimuth: float, elevation: float, timeout: float | None = None) -> None:
         self._run_backend_call(
             lambda: self.backend.set_target_position(azimuth, elevation),
@@ -338,6 +356,6 @@ def _polling_intervals_for_config(config: AntennaConnectionConfig) -> tuple[floa
     position_interval = float(getattr(selected, "position_interval_s", 0.2))
     status_interval = float(getattr(selected, "status_interval_s", 1.0))
     if config.mode == AntennaConnectionMode.AXIS_DRIVER:
-        position_interval = max(0.5, position_interval)
-        status_interval = max(2.0, status_interval)
+        position_interval = max(0.05, position_interval)
+        status_interval = max(0.1, status_interval)
     return position_interval, status_interval
