@@ -481,7 +481,10 @@ class AxisDriverBackend(BaseAntennaBackend):
             return float(getattr(self.config, "command_timeout_s", 0.5))
         serial_timeout = float(getattr(self.config, "serial_timeout_s", 0.15))
         command_timeout = float(getattr(self.config, "command_timeout_s", 0.5))
-        return max(serial_timeout, min(command_timeout, serial_timeout + 0.05))
+        return min(
+            command_timeout,
+            max(serial_timeout * 2.0, command_timeout * 0.8, serial_timeout + 0.05),
+        )
 
     def _status_read_mode(self) -> str:
         mode = str(getattr(self.config, "status_read_mode", self.STATUS_READ_MODE_SINGLE_REGISTER)).strip().lower()
@@ -503,6 +506,8 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.last_error = None
         self.telemetry.modbus_status_az = MODBUS_OK
         self.telemetry.modbus_status_el = MODBUS_OK
+        if self._diag_failures == 0:
+            self._diag_last_error = None
         self._maybe_log_diagnostics()
 
     def _record_modbus_failure(self, func_code: int, exc: Exception, *, background: bool, context: str) -> None:
@@ -561,6 +566,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._diag_fc06 = 0
         self._diag_failures = 0
         self._diag_timeouts = 0
+        self._diag_last_error = None
 
     def _log_startup_config(self) -> None:
         effective_position_interval = max(0.05, float(self.config.position_interval_s))
