@@ -2,14 +2,70 @@
 
 from __future__ import annotations
 
-from PyQt5.QtWidgets import QComboBox, QLabel, QMessageBox
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QComboBox, QFrame, QGridLayout, QLabel, QMessageBox, QWidget
 
 from antrack.core.antenna.config import load_antenna_connection_config
+from antrack.core.antenna.types import AntennaConnectionMode
 from antrack.core.antenna.controller_qt import AntennaControllerQt
 from antrack.core.axis.axis_client import AxisClientPollingAdapter
-from antrack.gui.ui_styles import green_label_color, orange_label_color, red_label_color, standard_label_color
+from antrack.gui.ui_styles import (
+    green_label_color,
+    lightgrey_label_color,
+    orange_label_color,
+    red_label_color,
+    standard_label_color,
+)
 from antrack.tracking.tracking import Tracker
 from antrack.utils.settings_loader import update_and_persist_setting
+
+
+_AXIS_DRIVER_REFERENCE_WARNING = "Antenna not referenced - pass AZ/EL index before trusting position"
+
+
+def format_antenna_endpoint_summary(config, mode: str | None = None) -> str:
+    selected_mode = str(mode or getattr(config.mode, "value", AntennaConnectionMode.AXIS_SERVER.value))
+    if selected_mode == AntennaConnectionMode.AXIS_SERVER.value:
+        endpoint = config.axis_server
+        return f"{endpoint.host}:{endpoint.port}"
+    if selected_mode == AntennaConnectionMode.AXIS_DRIVER.value:
+        endpoint = config.axis_driver
+        return f"{endpoint.comport} @ {endpoint.baudrate}"
+    if selected_mode == AntennaConnectionMode.PST_ROTATOR.value:
+        endpoint = config.pst_rotator
+        return f"{endpoint.host} {endpoint.udp_port}"
+    return "-"
+
+
+def format_axis_index_status(mode: str, index_value: int | None) -> str:
+    if str(mode) != AntennaConnectionMode.AXIS_DRIVER.value:
+        return "N/A"
+    if index_value == 0:
+        return "NOT REF"
+    if index_value == 1:
+        return "REF"
+    if index_value == 2:
+        return "TRIG"
+    return "UNKNOWN"
+
+
+def axis_reference_valid(mode: str, index_az: int | None, index_el: int | None) -> bool | None:
+    if str(mode) != AntennaConnectionMode.AXIS_DRIVER.value:
+        return None
+    return (index_az in (1, 2)) and (index_el in (1, 2))
+
+
+def _axis_index_style(mode: str, index_value: int | None) -> str:
+    text = format_axis_index_status(mode, index_value)
+    if text == "NOT REF":
+        return red_label_color
+    if text == "REF":
+        return green_label_color
+    if text == "TRIG":
+        return orange_label_color
+    if text == "UNKNOWN":
+        return standard_label_color
+    return lightgrey_label_color
 
 
 class ConnectionUiMixin:
@@ -23,9 +79,7 @@ class ConnectionUiMixin:
             ("PstRotator", "pst_rotator"),
         )
         self.label_antenna_mode = QLabel("Antenna mode", self)
-        self.label_antenna_mode.setGeometry(10, 0, 101, 18)
         self.combo_antenna_mode = QComboBox(self)
-        self.combo_antenna_mode.setGeometry(230, 20, 131, 22)
         for text, value in self._antenna_mode_items:
             self.combo_antenna_mode.addItem(text, value)
         index = max(
@@ -37,6 +91,88 @@ class ConnectionUiMixin:
         )
         self.combo_antenna_mode.setCurrentIndex(index)
         self.combo_antenna_mode.currentIndexChanged.connect(self.on_antenna_mode_changed)
+        self._setup_connection_link_panel()
+        self._setup_reference_status_panel()
+        self._refresh_connection_panel()
+        self._refresh_reference_status_panel()
+
+    def _setup_connection_link_panel(self):
+        group = getattr(self, "groupBox_10", None)
+        if group is None:
+            return
+
+        geometry = group.geometry()
+        group.setGeometry(geometry.x(), geometry.y(), geometry.width(), max(geometry.height(), 100))
+        group.setTitle("Antenna Link")
+
+        self.label_antenna_mode.setParent(group)
+        self.label_antenna_mode.setText("Mode")
+
+        self.label_antenna_endpoint = QLabel("Endpoint", group)
+        self.label_antenna_endpoint_summary = QLabel("-", group)
+        self.label_antenna_endpoint_summary.setFrameShape(QFrame.StyledPanel)
+        self.label_antenna_endpoint_summary.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.label_antenna_endpoint_summary.setStyleSheet(standard_label_color)
+
+        if hasattr(self, "label_LocalTime_40"):
+            self.label_LocalTime_40.setText("Version")
+
+        self.label_antenna_server_status.setAlignment(Qt.AlignCenter)
+        self.label_axisapp_version.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        layout = QGridLayout()
+        layout.setContentsMargins(8, 18, 8, 8)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(3)
+        layout.addWidget(self.pushButton_server_connect, 0, 0)
+        layout.addWidget(self.label_antenna_server_status, 0, 1)
+        layout.addWidget(self.label_antenna_mode, 1, 0)
+        layout.addWidget(self.combo_antenna_mode, 1, 1)
+        layout.addWidget(self.label_antenna_endpoint, 2, 0)
+        layout.addWidget(self.label_antenna_endpoint_summary, 2, 1)
+        layout.addWidget(self.label_LocalTime_40, 3, 0)
+        layout.addWidget(self.label_axisapp_version, 3, 1)
+        layout.setColumnStretch(1, 1)
+        group.setLayout(layout)
+
+    def _setup_reference_status_panel(self):
+        group = getattr(self, "groupBox_5", None)
+        if group is None or hasattr(self, "label_antenna_index_az"):
+            return
+
+        reference_widget = QWidget(group)
+        reference_widget.setGeometry(10, 145, 221, 46)
+        reference_layout = QGridLayout(reference_widget)
+        reference_layout.setContentsMargins(0, 0, 0, 0)
+        reference_layout.setHorizontalSpacing(6)
+        reference_layout.setVerticalSpacing(2)
+
+        self.label_antenna_reference_title = QLabel("Reference", reference_widget)
+        self.label_antenna_reference_title.setStyleSheet(standard_label_color)
+        self.label_antenna_reference_title.setFrameShape(QFrame.NoFrame)
+
+        label_az_title = QLabel("AZ INDEX", reference_widget)
+        label_el_title = QLabel("EL INDEX", reference_widget)
+        self.label_antenna_index_az = QLabel("N/A", reference_widget)
+        self.label_antenna_index_el = QLabel("N/A", reference_widget)
+
+        for widget in (self.label_antenna_index_az, self.label_antenna_index_el):
+            widget.setFrameShape(QFrame.StyledPanel)
+            widget.setAlignment(Qt.AlignCenter)
+            widget.setStyleSheet(lightgrey_label_color)
+
+        reference_layout.addWidget(self.label_antenna_reference_title, 0, 0, 1, 2)
+        reference_layout.addWidget(label_az_title, 1, 0)
+        reference_layout.addWidget(self.label_antenna_index_az, 1, 1)
+        reference_layout.addWidget(label_el_title, 2, 0)
+        reference_layout.addWidget(self.label_antenna_index_el, 2, 1)
+        reference_layout.setColumnStretch(1, 1)
+
+        if hasattr(self, "verticalLayoutWidget_2"):
+            self.verticalLayoutWidget_2.setGeometry(10, 195, 221, 326)
+            layout = self.verticalLayout_gauges.layout()
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(4)
 
     def selected_antenna_mode(self) -> str:
         combo = getattr(self, "combo_antenna_mode", None)
@@ -68,9 +204,64 @@ class ConnectionUiMixin:
             )
             return
         update_and_persist_setting(self.settings, "ANTENNA_CONNECTION", "MODE", mode)
+        self._refresh_connection_panel()
+        self._refresh_reference_status_panel()
 
     def has_connection(self) -> bool:
         return bool(getattr(self, "axis_client", None) and self.axis_client.is_connected())
+
+    def _current_connection_config(self):
+        config = load_antenna_connection_config(self.settings)
+        config.mode = AntennaConnectionMode.from_value(self.selected_antenna_mode())
+        return config
+
+    def _refresh_connection_panel(self):
+        if hasattr(self, "label_antenna_endpoint_summary"):
+            try:
+                config = self._current_connection_config()
+                self.label_antenna_endpoint_summary.setText(
+                    format_antenna_endpoint_summary(config, self.selected_antenna_mode())
+                )
+            except Exception:
+                self.label_antenna_endpoint_summary.setText("-")
+
+        combo = getattr(self, "combo_antenna_mode", None)
+        if combo is not None:
+            combo.setEnabled(not self.has_connection())
+
+    def _refresh_reference_status_panel(self, data: dict | None = None):
+        if not hasattr(self, "label_antenna_index_az") or not hasattr(self, "label_antenna_index_el"):
+            return
+
+        mode = self.selected_antenna_mode()
+        payload = data if isinstance(data, dict) else {}
+        index_az = payload.get("index_az")
+        index_el = payload.get("index_el")
+
+        az_text = format_axis_index_status(mode, index_az)
+        el_text = format_axis_index_status(mode, index_el)
+        self.label_antenna_index_az.setText(az_text)
+        self.label_antenna_index_el.setText(el_text)
+        self.label_antenna_index_az.setStyleSheet(_axis_index_style(mode, index_az))
+        self.label_antenna_index_el.setStyleSheet(_axis_index_style(mode, index_el))
+
+        reference_state = axis_reference_valid(mode, index_az, index_el)
+        if mode == AntennaConnectionMode.AXIS_DRIVER.value and (index_az is None or index_el is None):
+            self.label_antenna_reference_title.setText("Reference - Unknown")
+            self.label_antenna_reference_title.setStyleSheet(standard_label_color)
+            self.label_antenna_reference_title.setToolTip(_AXIS_DRIVER_REFERENCE_WARNING)
+        elif reference_state is True:
+            self.label_antenna_reference_title.setText("Reference")
+            self.label_antenna_reference_title.setStyleSheet(green_label_color)
+            self.label_antenna_reference_title.setToolTip("")
+        elif reference_state is False:
+            self.label_antenna_reference_title.setText("Reference - Not Referenced")
+            self.label_antenna_reference_title.setStyleSheet(orange_label_color)
+            self.label_antenna_reference_title.setToolTip(_AXIS_DRIVER_REFERENCE_WARNING)
+        else:
+            self.label_antenna_reference_title.setText("Reference - N/A")
+            self.label_antenna_reference_title.setStyleSheet(lightgrey_label_color)
+            self.label_antenna_reference_title.setToolTip("")
 
     def on_connect_button_clicked(self):
         if self._connect_toggle_in_progress:
@@ -264,6 +455,7 @@ class ConnectionUiMixin:
 
         self.axis_client = axis_client
         self.status_bar.showMessage(f"Connected to {self.axis_client.backend_name}")
+        self._refresh_connection_panel()
 
         if hasattr(self.axis_client, "connection_state_changed"):
             self.axis_client.connection_state_changed.connect(self.on_axis_connection_state_changed)
@@ -291,6 +483,7 @@ class ConnectionUiMixin:
         self.pushButton_server_connect.setText("DISCONNECT")
         self.set_server_status("CONNECTED")
         self.set_data_labels_enabled(True)
+        self._refresh_reference_status_panel(self.axis_client.get_antenna_telemetry())
 
         self.start_polling()
 
@@ -406,6 +599,7 @@ class ConnectionUiMixin:
                     pass
                 self.telemetry_ready = False
                 self.ui_set_default_state()
+            self._refresh_connection_panel()
         except Exception as exc:
             self.logger.error(f"Erreur on_axis_connection_state_changed: {exc}")
 
@@ -435,6 +629,8 @@ class ConnectionUiMixin:
                 "label_antenna_el_setrate",
                 "label_antenna_endstop_az",
                 "label_antenna_endstop_el",
+                "label_antenna_index_az",
+                "label_antenna_index_el",
             ):
                 if hasattr(self, attr):
                     getattr(self, attr).setEnabled(enabled)
@@ -471,6 +667,8 @@ class ConnectionUiMixin:
         try:
             if hasattr(self, "label_axisapp_version"):
                 self.label_axisapp_version.setText("")
+            if hasattr(self, "label_antenna_endpoint_summary"):
+                self.label_antenna_endpoint_summary.setStyleSheet(standard_label_color)
             if hasattr(self, "label_axisaz_version"):
                 self.label_axisaz_version.setText("")
             if hasattr(self, "label_axisel_version"):
@@ -532,6 +730,8 @@ class ConnectionUiMixin:
             self._ui_show_tracking_stopped()
 
             self.set_data_labels_enabled(False)
+            self._refresh_connection_panel()
+            self._refresh_reference_status_panel()
 
             if hasattr(self, "pushButton_antenna_track"):
                 self.pushButton_antenna_track.setEnabled(False)
@@ -546,7 +746,8 @@ class ConnectionUiMixin:
             if not isinstance(versions, dict):
                 return
             if hasattr(self, "label_axisapp_version"):
-                self.label_axisapp_version.setText(str(versions.get("server_version") or ""))
+                version_text = str(versions.get("server_version") or getattr(self.axis_client, "backend_name", "") or "")
+                self.label_axisapp_version.setText(version_text)
             if hasattr(self, "label_axisaz_version"):
                 self.label_axisaz_version.setText(str(versions.get("driver_version_az") or ""))
             if hasattr(self, "label_axisel_version"):
@@ -582,6 +783,7 @@ class ConnectionUiMixin:
             end_el = data.get("endstop_el")
             self.label_antenna_endstop_az.setText(str(end_az) if end_az is not None else "-")
             self.label_antenna_endstop_el.setText(str(end_el) if end_el is not None else "-")
+            self._refresh_reference_status_panel(data)
 
             try:
                 if isinstance(az, (int, float)):

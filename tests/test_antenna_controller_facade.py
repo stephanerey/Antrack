@@ -119,6 +119,19 @@ def test_controller_emits_telemetry_and_status_payloads():
     assert statuses[-1]["endstop_az"] == 1
 
 
+def test_controller_telemetry_payload_includes_index_fields():
+    backend = FakeBackend()
+    backend.telemetry.index_az = 1
+    backend.telemetry.index_el = 2
+    controller = AntennaControllerQt(backend, thread_manager=DummyThreadManager())
+    controller.connect()
+
+    payload = controller.get_antenna_telemetry()
+
+    assert payload["index_az"] == 1
+    assert payload["index_el"] == 2
+
+
 def test_controller_methods_map_to_backend_calls():
     backend = FakeBackend()
     controller = AntennaControllerQt(backend, thread_manager=DummyThreadManager())
