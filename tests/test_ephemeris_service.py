@@ -95,4 +95,48 @@ def test_ephemeris_service_step_object_emits_single_merged_payload_when_pass_inf
         t_now=SimpleNamespace(tt=10.0),
     )
 
-    assert received == [("primary", {"az": 1.0, "el": 2.0, "name": "Sun", "next_event": "AOS"})]
+    assert received == [(
+        "primary",
+        {
+            "az": 1.0,
+            "el": 2.0,
+            "name": "Sun",
+            "visible_now": True,
+            "el_now_deg": 2.0,
+            "next_event": "AOS",
+        },
+    )]
+
+
+def test_ephemeris_service_reuses_cached_pass_info_until_event_boundary():
+    thread_manager = RecordingThreadManager()
+    service = _lightweight_ephem_service(thread_manager)
+    received = []
+    compute_pass_calls = []
+    service.pose_updated.connect(lambda key, payload: received.append((key, payload)))
+    service._compute_payload = lambda obj_type, name, t_now: {"az": 1.0, "el": 2.0}
+
+    def _compute_pass_info(obj_type, name, t_now):
+        compute_pass_calls.append((obj_type, name, float(t_now.tt)))
+        return {
+            "visible_now": False,
+            "el_now_deg": -1.0,
+            "aos_tt": 20.0,
+            "los_tt": 30.0,
+            "dur_str": "10m",
+            "max_el_deg": 42.0,
+            "max_el_time_utc": "2026-07-07 12:00:00",
+            "aos_utc": "2026-07-07 11:50:00",
+            "los_utc": "2026-07-07 12:00:00",
+            "max_tt": 25.0,
+        }
+
+    service._compute_pass_info = _compute_pass_info
+
+    service._step_object("primary", {"obj_type": "Solar System", "name": "Sun"}, t_now=SimpleNamespace(tt=10.0))
+    service._step_object("primary", {"obj_type": "Solar System", "name": "Sun"}, t_now=SimpleNamespace(tt=15.0))
+
+    assert len(compute_pass_calls) == 1
+    assert received[-1][1]["visible_now"] is True
+    assert received[-1][1]["el_now_deg"] == 2.0
+    assert received[-1][1]["los_tt"] == 30.0

@@ -162,7 +162,7 @@ class EphemerisService:
             self._workers[key] = True
             self._next_run_at[key] = 0.0
         if target_changed:
-            self._pass_cache[key] = {'last_tt': 0.0, 'payload': self._empty_pass_info()}
+            self._pass_cache[key] = {'last_tt': 0.0, 'refresh_after_tt': 0.0, 'payload': self._empty_pass_info()}
         if previous and previous.get("obj_type") == obj_type and previous.get("name") == name and self._workers.get(key, False):
             if self.logger:
                 self.logger.info(f"[Ephemeris] target updated key='{key}' type='{obj_type}' name='{name}'")
@@ -338,12 +338,18 @@ class EphemerisService:
 
             payload = self._compute_payload(obj_type, name, t_now)
             payload['name'] = name
+            el = payload.get('el')
 
-            cache = self._pass_cache.setdefault(key, {'last_tt': 0.0, 'payload': self._empty_pass_info()})
+            cache = self._pass_cache.setdefault(
+                key,
+                {'last_tt': 0.0, 'refresh_after_tt': 0.0, 'payload': self._empty_pass_info()},
+            )
             now_tt = float(t_now.tt)
             emitted_payload = dict(payload)
+            emitted_payload['visible_now'] = bool((el is not None) and (float(el) >= 0.0))
+            emitted_payload['el_now_deg'] = el
             if float(cache.get('last_tt') or 0.0) > 0.0:
-                emitted_payload.update(cache.get('payload') or {})
+                emitted_payload.update(self._pass_payload_for_emit(cache.get('payload') or {}))
 
             if obj_type == "Artificial Satellite":
                 min_period_s = 1.0
@@ -352,10 +358,13 @@ class EphemerisService:
             else:
                 min_period_s = 3.0
 
-            if (now_tt - float(cache['last_tt'])) * 86400.0 >= min_period_s:
+            refresh_after_tt = float(cache.get('refresh_after_tt') or 0.0)
+            needs_refresh = refresh_after_tt <= 0.0 or now_tt >= refresh_after_tt
+            if needs_refresh and (now_tt - float(cache['last_tt'])) * 86400.0 >= min_period_s:
                 cache['payload'] = self._compute_pass_info(obj_type, name, t_now)
                 cache['last_tt'] = now_tt
-                emitted_payload.update(cache['payload'])
+                cache['refresh_after_tt'] = self._next_pass_info_refresh_tt(obj_type, cache['payload'], now_tt)
+                emitted_payload.update(self._pass_payload_for_emit(cache['payload']))
 
             try:
                 self.pose_updated.emit(key, emitted_payload)
@@ -1119,3 +1128,23 @@ class EphemerisService:
             'los_tt': None,
             'max_tt': None,
         }
+
+    @staticmethod
+    def _pass_payload_for_emit(payload: dict) -> dict:
+        data = dict(payload or {})
+        data.pop('visible_now', None)
+        data.pop('el_now_deg', None)
+        return data
+
+    @staticmethod
+    def _next_pass_info_refresh_tt(obj_type: str, payload: dict, now_tt: float) -> float:
+        payload = dict(payload or {})
+        future_events = [
+            float(value)
+            for value in (payload.get('aos_tt'), payload.get('los_tt'))
+            if isinstance(value, (int, float)) and float(value) > float(now_tt)
+        ]
+        if future_events:
+            return max(future_events) + (2.0 / 86400.0)
+        fallback_s = 60.0 if obj_type == "Artificial Satellite" else 300.0
+        return float(now_tt) + (fallback_s / 86400.0)
