@@ -23,6 +23,7 @@ from antrack.utils.settings_loader import update_and_persist_setting
 
 _AXIS_DRIVER_REFERENCE_WARNING = "Antenna not referenced - pass AZ/EL index before trusting position"
 _INDEX_PASSING_BLUE = "color: white; background-color: #2F80ED;"
+_TOP_BANNER_GROUP_HEIGHT = 82
 
 
 def format_antenna_endpoint_summary(config, mode: str | None = None) -> str:
@@ -156,7 +157,8 @@ class ConnectionUiMixin:
             return
 
         geometry = group.geometry()
-        group.setGeometry(geometry.x(), geometry.y(), geometry.width(), max(geometry.height(), 71))
+        group.setGeometry(geometry.x(), geometry.y(), geometry.width(), max(geometry.height(), _TOP_BANNER_GROUP_HEIGHT))
+        group.setMinimumHeight(_TOP_BANNER_GROUP_HEIGHT)
         group.setTitle("Antenna Link")
         self._relayout_top_banner_groups()
 
@@ -179,21 +181,26 @@ class ConnectionUiMixin:
 
         self.label_antenna_server_status.setAlignment(Qt.AlignCenter)
         self.label_antenna_server_status.setMinimumWidth(110)
+        self.label_antenna_server_status.setMinimumHeight(22)
         self.label_antenna_server_status.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.label_axisapp_version.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.label_axisapp_version.setMinimumWidth(90)
+        self.label_axisapp_version.setMinimumHeight(20)
         self.label_axisapp_version.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.label_axisapp_version.setMaximumWidth(120)
         self.combo_antenna_mode.setMinimumWidth(120)
         self.combo_antenna_mode.setMaximumWidth(150)
+        self.combo_antenna_mode.setMinimumHeight(24)
         self.pushButton_server_connect.setMinimumWidth(104)
+        self.pushButton_server_connect.setMinimumHeight(24)
         self.pushButton_server_connect.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.label_antenna_endpoint_summary.setMinimumWidth(150)
         self.label_antenna_endpoint_summary.setMaximumWidth(180)
+        self.label_antenna_endpoint_summary.setMinimumHeight(20)
 
         layout = QGridLayout()
-        layout.setContentsMargins(8, 18, 8, 8)
-        layout.setHorizontalSpacing(6)
+        layout.setContentsMargins(8, 12, 8, 6)
+        layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(3)
         layout.addWidget(self.pushButton_server_connect, 0, 0)
         layout.addWidget(self.label_antenna_server_status, 1, 0)
@@ -215,13 +222,15 @@ class ConnectionUiMixin:
             return
 
         frame_width = max(int(frame.width()), 900)
-        banner_height = max(int(group.height()), 71)
+        banner_height = max(int(group.height()), _TOP_BANNER_GROUP_HEIGHT)
         spacing = 8
         time_width = max(int(time_group.width()), 241)
         link_width = min(590, max(520, frame_width - time_width - spacing - 8))
         time_x = min(link_width + spacing, max(0, frame_width - time_width))
 
+        frame.setMinimumHeight(banner_height)
         group.setGeometry(0, 0, link_width, banner_height)
+        time_group.setMinimumHeight(banner_height)
         time_group.setGeometry(time_x, 0, time_width, banner_height)
 
     def _setup_reference_status_panel(self):
