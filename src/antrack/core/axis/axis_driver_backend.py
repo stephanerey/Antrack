@@ -222,25 +222,20 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _get_position(self, *, background: bool) -> tuple[float | None, float | None]:
         await self._ensure_async_primitives()
-        if background and not await self._await_background_slot("position"):
-            self._background_position_skips += 1
-            return self.telemetry.az, self.telemetry.el
         az_raw = await self._read_register(
             self.config.az_slave_address,
             RAW_POSITION_REGISTER,
             background=background,
             context="az_position",
+            defer_background=False,
         )
-        try:
-            el_raw = await self._read_register(
-                self.config.el_slave_address,
-                RAW_POSITION_REGISTER,
-                background=background,
-                context="el_position",
-            )
-        except _BackgroundPollDeferred:
-            self._background_position_skips += 1
-            return self.telemetry.az, self.telemetry.el
+        el_raw = await self._read_register(
+            self.config.el_slave_address,
+            RAW_POSITION_REGISTER,
+            background=background,
+            context="el_position",
+            defer_background=False,
+        )
         self.telemetry.az_raw = az_raw
         self.telemetry.el_raw = el_raw
         self.telemetry.az = raw_az_to_deg(az_raw)
@@ -333,9 +328,10 @@ class AxisDriverBackend(BaseAntennaBackend):
         *,
         background: bool = False,
         context: str = "fc03_read",
+        defer_background: bool = True,
     ) -> int:
         await self._ensure_async_primitives()
-        if background and not await self._await_background_slot("status"):
+        if background and defer_background and not await self._await_background_slot("status"):
             raise _BackgroundPollDeferred("Background poll deferred for pending motion command")
         async with self._io_lock:
             return self._read_register_locked(slave, register, background=background, context=context)

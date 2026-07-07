@@ -238,16 +238,17 @@ def test_axis_driver_background_status_poll_skips_while_motion_active():
     assert fake_serial.writes == []
 
 
-def test_axis_driver_background_position_poll_yields_to_command_priority():
+def test_axis_driver_background_position_poll_is_not_skipped_by_command_priority():
     backend, fake_serial = _backend_and_serial()
     asyncio.run(backend.connect())
     fake_serial.writes.clear()
 
-    backend.telemetry.az = 123.0
-    backend.telemetry.el = 45.0
     backend._command_priority_until_monotonic = time.monotonic() + 1.0
 
     payload = asyncio.run(backend.poll_position())
 
-    assert payload == (123.0, 45.0)
-    assert fake_serial.writes == []
+    assert payload[0] is not None
+    assert payload[1] is not None
+    assert build_fc03_request(10, RAW_POSITION_REGISTER, 1) in fake_serial.writes
+    assert build_fc03_request(20, RAW_POSITION_REGISTER, 1) in fake_serial.writes
+
