@@ -1170,38 +1170,12 @@ class TrackingUiMixin:
         try:
             if getattr(self, "_tracking_ui_timer", None) is None:
                 self._tracking_ui_timer = QTimer(self)
+                self._tracking_ui_timer.setInterval(100)
                 self._tracking_ui_timer.timeout.connect(self._update_tracking_ui)
-            self._tracking_ui_timer.setInterval(self._tracking_ui_interval_ms())
             if not self._tracking_ui_timer.isActive():
                 self._tracking_ui_timer.start()
         except Exception as exc:
             self.logger.error(f"Erreur start_tracking_ui_timer: {exc}")
-
-    @staticmethod
-    def _tracking_ui_to_bool(value, default=False):
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-    def _tracking_ui_interval_ms(self):
-        settings = self.settings if isinstance(getattr(self, "settings", None), dict) else {}
-        perf = settings.get("PERFORMANCE", settings.get("performance", {})) or {}
-        if not isinstance(perf, dict):
-            return 100
-        cpu_optimized = self._tracking_ui_to_bool(
-            perf.get("CPU_OPTIMIZED", perf.get("cpu_optimized")),
-            False,
-        )
-        default_interval_ms = 250 if cpu_optimized else 100
-        configured = perf.get(
-            "TRACKING_UI_INTERVAL_MS",
-            perf.get("tracking_ui_interval_ms", default_interval_ms),
-        )
-        return max(50, int(float(configured or default_interval_ms)))
 
     def prime_axis_motion(self):
         """
