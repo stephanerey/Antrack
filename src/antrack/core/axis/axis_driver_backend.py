@@ -89,6 +89,16 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._diag_latency_max_s: float | None = None
         self._position_last_update_monotonic: float | None = None
         self._status_last_update_monotonic: float | None = None
+        self._position_interval_count = 0
+        self._position_interval_total_s = 0.0
+        self._position_interval_last_s: float | None = None
+        self._position_interval_min_s: float | None = None
+        self._position_interval_max_s: float | None = None
+        self._status_interval_count = 0
+        self._status_interval_total_s = 0.0
+        self._status_interval_last_s: float | None = None
+        self._status_interval_min_s: float | None = None
+        self._status_interval_max_s: float | None = None
 
     async def _ensure_async_primitives(self) -> None:
         loop = asyncio.get_running_loop()
@@ -217,8 +227,10 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.telemetry.el_raw = el_raw
         self.telemetry.az = raw_az_to_deg(az_raw)
         self.telemetry.el = raw_el_to_deg(el_raw)
-        self.telemetry.last_update_monotonic = time.monotonic()
-        self._position_last_update_monotonic = self.telemetry.last_update_monotonic
+        now_monotonic = time.monotonic()
+        self._record_update_interval(kind="position", previous_monotonic=self._position_last_update_monotonic, now_monotonic=now_monotonic)
+        self.telemetry.last_update_monotonic = now_monotonic
+        self._position_last_update_monotonic = now_monotonic
         return self.telemetry.az, self.telemetry.el
 
     async def get_status(self) -> dict:
@@ -256,8 +268,10 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.telemetry.motor_alarm_el = alarm_el
         self.telemetry.modbus_status_az = MODBUS_OK
         self.telemetry.modbus_status_el = MODBUS_OK
-        self.telemetry.last_update_monotonic = time.monotonic()
-        self._status_last_update_monotonic = self.telemetry.last_update_monotonic
+        now_monotonic = time.monotonic()
+        self._record_update_interval(kind="status", previous_monotonic=self._status_last_update_monotonic, now_monotonic=now_monotonic)
+        self.telemetry.last_update_monotonic = now_monotonic
+        self._status_last_update_monotonic = now_monotonic
         payload = {
             "motion_az": az_motion,
             "motion_el": el_motion,
@@ -615,6 +629,37 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._diag_latency_min_s = latency if self._diag_latency_min_s is None else min(self._diag_latency_min_s, latency)
         self._diag_latency_max_s = latency if self._diag_latency_max_s is None else max(self._diag_latency_max_s, latency)
 
+    def _record_update_interval(
+        self,
+        *,
+        kind: str,
+        previous_monotonic: float | None,
+        now_monotonic: float,
+    ) -> None:
+        if previous_monotonic is None:
+            return
+        interval_s = max(0.0, float(now_monotonic) - float(previous_monotonic))
+        if kind == "position":
+            self._position_interval_last_s = interval_s
+            self._position_interval_count += 1
+            self._position_interval_total_s += interval_s
+            self._position_interval_min_s = (
+                interval_s if self._position_interval_min_s is None else min(self._position_interval_min_s, interval_s)
+            )
+            self._position_interval_max_s = (
+                interval_s if self._position_interval_max_s is None else max(self._position_interval_max_s, interval_s)
+            )
+            return
+        self._status_interval_last_s = interval_s
+        self._status_interval_count += 1
+        self._status_interval_total_s += interval_s
+        self._status_interval_min_s = (
+            interval_s if self._status_interval_min_s is None else min(self._status_interval_min_s, interval_s)
+        )
+        self._status_interval_max_s = (
+            interval_s if self._status_interval_max_s is None else max(self._status_interval_max_s, interval_s)
+        )
+
     def _log_startup_config(self) -> None:
         effective_position_interval = max(0.05, float(self.config.position_interval_s))
         effective_status_interval = max(0.1, float(self.config.status_interval_s))
@@ -655,7 +700,19 @@ class AxisDriverBackend(BaseAntennaBackend):
             if self._diag_latency_count
             else None
         )
+        position_interval_avg = (
+            self._position_interval_total_s / self._position_interval_count
+            if self._position_interval_count
+            else None
+        )
+        status_interval_avg = (
+            self._status_interval_total_s / self._status_interval_count
+            if self._status_interval_count
+            else None
+        )
         return {
+            "configured_position_interval_s": max(0.05, float(self.config.position_interval_s)),
+            "configured_status_interval_s": max(0.1, float(self.config.status_interval_s)),
             "position_last_update_monotonic_s": self._position_last_update_monotonic,
             "status_last_update_monotonic_s": self._status_last_update_monotonic,
             "backend_state": self.state.value if hasattr(self.state, "value") else str(self.state),
@@ -670,6 +727,14 @@ class AxisDriverBackend(BaseAntennaBackend):
             "modbus_latency_avg_s": latency_avg,
             "modbus_latency_max_s": self._diag_latency_max_s,
             "modbus_last_error": self._diag_last_error or self.last_error,
+            "position_interval_last_s": self._position_interval_last_s,
+            "position_interval_min_s": self._position_interval_min_s,
+            "position_interval_avg_s": position_interval_avg,
+            "position_interval_max_s": self._position_interval_max_s,
+            "status_interval_last_s": self._status_interval_last_s,
+            "status_interval_min_s": self._status_interval_min_s,
+            "status_interval_avg_s": status_interval_avg,
+            "status_interval_max_s": self._status_interval_max_s,
         }
 
     def _close_serial(self) -> None:

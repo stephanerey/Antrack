@@ -6,6 +6,7 @@ from antrack.tracking.tracking_diagnostics import (
     TRACKING_DIAGNOSTIC_COLUMNS,
     TrackingDiagnosticsConfig,
     TrackingDiagnosticsCsvLogger,
+    compute_reaction_latency,
     compute_telemetry_age,
     load_tracking_diagnostics_config,
     measure_command_latency,
@@ -120,3 +121,10 @@ def test_measure_command_latency_preserves_exception_behavior():
 def test_compute_telemetry_age_handles_timestamp_and_missing_value():
     assert compute_telemetry_age(12.5, 12.0) == pytest.approx(0.5)
     assert compute_telemetry_age(12.5, None) is None
+
+
+def test_compute_reaction_latency_handles_timestamp_and_missing_value():
+    assert compute_reaction_latency(15.2, 15.0) == pytest.approx(0.2)
+    assert compute_reaction_latency(15.0, 15.2) == pytest.approx(0.0)
+    assert compute_reaction_latency(None, 15.0) is None
+    assert compute_reaction_latency(15.0, None) is None

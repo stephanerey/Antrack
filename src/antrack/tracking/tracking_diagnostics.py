@@ -19,7 +19,11 @@ TRACKING_DIAGNOSTIC_COLUMNS = [
     "axis",
     "loop_dt_s",
     "expected_loop_interval_s",
+    "configured_position_interval_s",
+    "configured_status_interval_s",
     "telemetry_age_s",
+    "reaction_latency_s",
+    "reaction_complete_latency_s",
     "target_deg",
     "actual_deg",
     "error_deg",
@@ -60,6 +64,14 @@ TRACKING_DIAGNOSTIC_COLUMNS = [
     "backend_diag_latency_min_s",
     "backend_diag_latency_avg_s",
     "backend_diag_latency_max_s",
+    "backend_diag_position_interval_last_s",
+    "backend_diag_position_interval_min_s",
+    "backend_diag_position_interval_avg_s",
+    "backend_diag_position_interval_max_s",
+    "backend_diag_status_interval_last_s",
+    "backend_diag_status_interval_min_s",
+    "backend_diag_status_interval_avg_s",
+    "backend_diag_status_interval_max_s",
 ]
 
 
@@ -122,6 +134,12 @@ def compute_telemetry_age(now_monotonic: float, last_update_monotonic: float | N
     if last_update_monotonic is None:
         return None
     return max(0.0, float(now_monotonic) - float(last_update_monotonic))
+
+
+def compute_reaction_latency(event_monotonic: float | None, last_update_monotonic: float | None) -> float | None:
+    if event_monotonic is None or last_update_monotonic is None:
+        return None
+    return max(0.0, float(event_monotonic) - float(last_update_monotonic))
 
 
 def measure_command_latency(

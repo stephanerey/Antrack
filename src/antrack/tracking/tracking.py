@@ -12,6 +12,7 @@ import logging
 from antrack.core.axis.axis_client import AxisStatus
 from antrack.tracking.tracking_diagnostics import (
     TrackingDiagnosticsSession,
+    compute_reaction_latency,
     compute_telemetry_age,
     load_tracking_diagnostics_config,
     measure_command_latency,
@@ -248,6 +249,21 @@ class Tracker:
         antenna = getattr(self.axis_client_qt, "antenna", None)
         backend_state = backend_snapshot.get("backend_state")
         backend_last_error = backend_snapshot.get("last_error") or backend_snapshot.get("modbus_last_error")
+        configured_polling = getattr(self.axis_client_qt, "polling_intervals", (None, None))
+        configured_position_interval = backend_snapshot.get("configured_position_interval_s")
+        configured_status_interval = backend_snapshot.get("configured_status_interval_s")
+        if not isinstance(configured_position_interval, (int, float)) and isinstance(configured_polling, tuple):
+            configured_position_interval = configured_polling[0]
+        if not isinstance(configured_status_interval, (int, float)) and isinstance(configured_polling, tuple):
+            configured_status_interval = configured_polling[1]
+        position_last_update_monotonic = backend_snapshot.get("position_last_update_monotonic_s")
+        command_start_monotonic = None if not command_record else command_record.get("command_start_monotonic_s")
+        command_end_monotonic = None if not command_record else command_record.get("command_end_monotonic_s")
+        reaction_latency_s = compute_reaction_latency(
+            command_start_monotonic if isinstance(command_start_monotonic, (int, float)) else step_started,
+            position_last_update_monotonic,
+        )
+        reaction_complete_latency_s = compute_reaction_latency(command_end_monotonic, position_last_update_monotonic)
         call_counts = backend_snapshot.get("call_counts") or {}
         call_last_latency = backend_snapshot.get("call_last_latency_s") or {}
         call_avg_latency = backend_snapshot.get("call_avg_latency_s") or {}
@@ -266,7 +282,11 @@ class Tracker:
             "axis": axis,
             "loop_dt_s": loop_dt_s,
             "expected_loop_interval_s": expected_loop_interval_s,
+            "configured_position_interval_s": configured_position_interval,
+            "configured_status_interval_s": configured_status_interval,
             "telemetry_age_s": telemetry_age_s,
+            "reaction_latency_s": reaction_latency_s,
+            "reaction_complete_latency_s": reaction_complete_latency_s,
             "target_deg": target_deg,
             "actual_deg": actual_deg,
             "error_deg": error_deg,
@@ -307,6 +327,14 @@ class Tracker:
             "backend_diag_latency_min_s": backend_snapshot.get("modbus_latency_min_s"),
             "backend_diag_latency_avg_s": backend_snapshot.get("modbus_latency_avg_s", fallback_latency_avg),
             "backend_diag_latency_max_s": backend_snapshot.get("modbus_latency_max_s"),
+            "backend_diag_position_interval_last_s": backend_snapshot.get("position_interval_last_s"),
+            "backend_diag_position_interval_min_s": backend_snapshot.get("position_interval_min_s"),
+            "backend_diag_position_interval_avg_s": backend_snapshot.get("position_interval_avg_s"),
+            "backend_diag_position_interval_max_s": backend_snapshot.get("position_interval_max_s"),
+            "backend_diag_status_interval_last_s": backend_snapshot.get("status_interval_last_s"),
+            "backend_diag_status_interval_min_s": backend_snapshot.get("status_interval_min_s"),
+            "backend_diag_status_interval_avg_s": backend_snapshot.get("status_interval_avg_s"),
+            "backend_diag_status_interval_max_s": backend_snapshot.get("status_interval_max_s"),
         }
 
     def _refresh_runtime_tuning(self) -> None:

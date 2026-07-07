@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.types import AntennaConnectionState
 from antrack.core.axis.axis_driver_backend import AxisDriverBackend
@@ -207,6 +209,17 @@ def test_axis_driver_success_clears_stale_diag_last_error():
     backend._diag_last_error = "stale"
     backend._diag_failures = 0
 
-    backend._record_modbus_success(0x03)
+    backend._record_modbus_success(0x03, latency_s=0.01)
 
     assert backend._diag_last_error is None
+
+
+def test_axis_driver_snapshot_exposes_configured_and_observed_intervals():
+    backend, _fake_serial = _backend_and_serial()
+
+    snapshot = backend.get_diagnostics_snapshot()
+
+    assert snapshot["configured_position_interval_s"] == pytest.approx(0.2)
+    assert snapshot["configured_status_interval_s"] == pytest.approx(1.0)
+    assert "position_interval_last_s" in snapshot
+    assert "status_interval_last_s" in snapshot
