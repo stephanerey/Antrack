@@ -192,3 +192,21 @@ def test_axis_driver_block_status_mode_issues_block_fc03_reads():
 
     assert build_fc03_request(10, MOTION_STATE_REGISTER, 7) in fake_serial.writes
     assert build_fc03_request(10, MOTION_STATE_REGISTER, 1) not in fake_serial.writes
+
+
+def test_axis_driver_background_timeout_is_relaxed_but_below_command_timeout():
+    backend, _fake_serial = _backend_and_serial()
+
+    timeout_s = backend._request_timeout(background=True)
+
+    assert timeout_s == 0.4
+
+
+def test_axis_driver_success_clears_stale_diag_last_error():
+    backend, _fake_serial = _backend_and_serial()
+    backend._diag_last_error = "stale"
+    backend._diag_failures = 0
+
+    backend._record_modbus_success(0x03)
+
+    assert backend._diag_last_error is None
