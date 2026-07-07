@@ -1,6 +1,8 @@
 # src/tracking/tracking.py
 # Tracking components: tracked target (TrackedObject) and tracking controller (Tracker)
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import math
