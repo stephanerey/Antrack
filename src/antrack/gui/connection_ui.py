@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QComboBox, QFrame, QGridLayout, QLabel, QMessageBox, QWidget
+from PyQt5.QtWidgets import QComboBox, QFrame, QGridLayout, QLabel, QMessageBox
 
 from antrack.core.antenna.config import load_antenna_connection_config
 from antrack.core.antenna.types import AntennaConnectionMode
@@ -53,6 +53,19 @@ def axis_reference_valid(mode: str, index_az: int | None, index_el: int | None) 
     if str(mode) != AntennaConnectionMode.AXIS_DRIVER.value:
         return None
     return (index_az in (1, 2)) and (index_el in (1, 2))
+
+
+def format_axis_index_tooltip(axis_name: str, mode: str, index_value: int | None) -> str:
+    prefix = f"{axis_name} index:"
+    if str(mode) != AntennaConnectionMode.AXIS_DRIVER.value:
+        return f"{prefix} N/A"
+    if index_value == 0:
+        return f"{prefix} not referenced"
+    if index_value == 1:
+        return f"{prefix} referenced"
+    if index_value == 2:
+        return f"{prefix} trigger"
+    return f"{prefix} unknown"
 
 
 def _axis_index_style(mode: str, index_value: int | None) -> str:
@@ -140,36 +153,28 @@ class ConnectionUiMixin:
         if group is None or hasattr(self, "label_antenna_index_az"):
             return
 
-        reference_widget = QWidget(group)
-        reference_widget.setGeometry(10, 145, 221, 46)
-        reference_layout = QGridLayout(reference_widget)
-        reference_layout.setContentsMargins(0, 0, 0, 0)
-        reference_layout.setHorizontalSpacing(6)
-        reference_layout.setVerticalSpacing(2)
-
-        self.label_antenna_reference_title = QLabel("Reference", reference_widget)
+        self.label_antenna_reference_title = QLabel("Index", group)
+        self.label_antenna_reference_title.setGeometry(10, 140, 91, 20)
         self.label_antenna_reference_title.setStyleSheet(standard_label_color)
         self.label_antenna_reference_title.setFrameShape(QFrame.NoFrame)
+        self.label_antenna_reference_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        label_az_title = QLabel("AZ INDEX", reference_widget)
-        label_el_title = QLabel("EL INDEX", reference_widget)
-        self.label_antenna_index_az = QLabel("N/A", reference_widget)
-        self.label_antenna_index_el = QLabel("N/A", reference_widget)
+        self.label_antenna_index_az = QLabel("", group)
+        self.label_antenna_index_el = QLabel("", group)
+        self.label_antenna_index_az.setGeometry(123, 143, 14, 14)
+        self.label_antenna_index_el.setGeometry(193, 143, 14, 14)
 
         for widget in (self.label_antenna_index_az, self.label_antenna_index_el):
-            widget.setFrameShape(QFrame.StyledPanel)
+            widget.setFrameShape(QFrame.Box)
+            widget.setLineWidth(1)
             widget.setAlignment(Qt.AlignCenter)
             widget.setStyleSheet(lightgrey_label_color)
-
-        reference_layout.addWidget(self.label_antenna_reference_title, 0, 0, 1, 2)
-        reference_layout.addWidget(label_az_title, 1, 0)
-        reference_layout.addWidget(self.label_antenna_index_az, 1, 1)
-        reference_layout.addWidget(label_el_title, 2, 0)
-        reference_layout.addWidget(self.label_antenna_index_el, 2, 1)
-        reference_layout.setColumnStretch(1, 1)
+            widget.setText("")
+            widget.setToolTip("")
+            widget.setAccessibleDescription("")
 
         if hasattr(self, "verticalLayoutWidget_2"):
-            self.verticalLayoutWidget_2.setGeometry(10, 195, 221, 326)
+            self.verticalLayoutWidget_2.setGeometry(10, 168, 221, 353)
             layout = self.verticalLayout_gauges.layout()
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(4)
@@ -240,26 +245,26 @@ class ConnectionUiMixin:
 
         az_text = format_axis_index_status(mode, index_az)
         el_text = format_axis_index_status(mode, index_el)
-        self.label_antenna_index_az.setText(az_text)
-        self.label_antenna_index_el.setText(el_text)
+        self.label_antenna_index_az.setText("")
+        self.label_antenna_index_el.setText("")
         self.label_antenna_index_az.setStyleSheet(_axis_index_style(mode, index_az))
         self.label_antenna_index_el.setStyleSheet(_axis_index_style(mode, index_el))
+        self.label_antenna_index_az.setToolTip(format_axis_index_tooltip("AZ", mode, index_az))
+        self.label_antenna_index_el.setToolTip(format_axis_index_tooltip("EL", mode, index_el))
+        self.label_antenna_index_az.setAccessibleDescription(az_text)
+        self.label_antenna_index_el.setAccessibleDescription(el_text)
 
         reference_state = axis_reference_valid(mode, index_az, index_el)
         if mode == AntennaConnectionMode.AXIS_DRIVER.value and (index_az is None or index_el is None):
-            self.label_antenna_reference_title.setText("Reference - Unknown")
             self.label_antenna_reference_title.setStyleSheet(standard_label_color)
             self.label_antenna_reference_title.setToolTip(_AXIS_DRIVER_REFERENCE_WARNING)
         elif reference_state is True:
-            self.label_antenna_reference_title.setText("Reference")
             self.label_antenna_reference_title.setStyleSheet(green_label_color)
             self.label_antenna_reference_title.setToolTip("")
         elif reference_state is False:
-            self.label_antenna_reference_title.setText("Reference - Not Referenced")
             self.label_antenna_reference_title.setStyleSheet(orange_label_color)
             self.label_antenna_reference_title.setToolTip(_AXIS_DRIVER_REFERENCE_WARNING)
         else:
-            self.label_antenna_reference_title.setText("Reference - N/A")
             self.label_antenna_reference_title.setStyleSheet(lightgrey_label_color)
             self.label_antenna_reference_title.setToolTip("")
 

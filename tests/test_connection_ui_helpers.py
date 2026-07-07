@@ -1,6 +1,11 @@
 from antrack.core.antenna.config import load_antenna_connection_config
 from antrack.core.antenna.types import AntennaTelemetry
-from antrack.gui.connection_ui import axis_reference_valid, format_antenna_endpoint_summary, format_axis_index_status
+from antrack.gui.connection_ui import (
+    axis_reference_valid,
+    format_antenna_endpoint_summary,
+    format_axis_index_status,
+    format_axis_index_tooltip,
+)
 
 
 def test_format_axis_index_status_for_axis_driver():
@@ -19,6 +24,13 @@ def test_axis_reference_valid_is_limited_to_axis_driver():
     assert axis_reference_valid("axis_driver", 1, 2) is True
     assert axis_reference_valid("axis_driver", 1, 0) is False
     assert axis_reference_valid("axis_server", 1, 2) is None
+
+
+def test_format_axis_index_tooltip_matches_led_state():
+    assert format_axis_index_tooltip("AZ", "axis_driver", 1) == "AZ index: referenced"
+    assert format_axis_index_tooltip("AZ", "axis_driver", 0) == "AZ index: not referenced"
+    assert format_axis_index_tooltip("EL", "axis_driver", 2) == "EL index: trigger"
+    assert format_axis_index_tooltip("EL", "pst_rotator", None) == "EL index: N/A"
 
 
 def test_format_antenna_endpoint_summary_for_axis_server():
