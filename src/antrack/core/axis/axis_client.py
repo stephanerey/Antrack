@@ -618,6 +618,45 @@ class AxisClientPollingAdapter:
         self.client = client
         self.thread_manager = thread_manager
 
+    def _cached_antenna_telemetry_payload(self):
+        backend = getattr(self.client, "backend", None)
+        get_telemetry = getattr(backend, "get_telemetry", None)
+        if callable(get_telemetry):
+            try:
+                telemetry = get_telemetry()
+                to_dict = getattr(telemetry, "to_dict", None)
+                if callable(to_dict):
+                    return to_dict()
+            except Exception:
+                pass
+        antenna = getattr(self.client, "antenna", None)
+        if antenna is not None:
+            try:
+                return dict(vars(antenna))
+            except Exception:
+                pass
+        getter = getattr(self.client, "get_antenna_telemetry", None)
+        if callable(getter):
+            return getter()
+        return None
+
+    def _cached_snapshot_payload(self):
+        backend = getattr(self.client, "backend", None)
+        snapshot = getattr(backend, "snapshot", None)
+        if callable(snapshot):
+            try:
+                value = snapshot()
+                to_dict = getattr(value, "to_dict", None)
+                if callable(to_dict):
+                    return to_dict()
+                return value
+            except Exception:
+                pass
+        snapshot = getattr(self.client, "snapshot", None)
+        if callable(snapshot):
+            return snapshot()
+        return None
+
     def start(self, pos_interval: float = 0.2, status_interval: float = 1.0):
         # Position poller (AZ/EL)
         worker_azel = self.thread_manager.start_thread(
@@ -664,8 +703,10 @@ class AxisClientPollingAdapter:
                         pass
                 # Emit unified “antenna telemetry” payload (positions + endstops + rates)
                 try:
-                    if hasattr(self.client, "antenna_telemetry_updated") and hasattr(self.client, "get_antenna_telemetry"):
-                        payload = self.client.get_antenna_telemetry()
+                    if hasattr(self.client, "antenna_telemetry_updated"):
+                        payload = self._cached_antenna_telemetry_payload()
+                        if payload is None:
+                            raise RuntimeError("No cached antenna telemetry payload available")
                         self.client.antenna_telemetry_updated.emit(payload)
                 except Exception:
                     pass
@@ -695,8 +736,11 @@ class AxisClientPollingAdapter:
                         pass
                 # Emit a full snapshot if available
                 try:
-                    if hasattr(self.client, "telemetry_updated") and hasattr(self.client, "snapshot"):
-                        self.client.telemetry_updated.emit(self.client.snapshot())
+                    if hasattr(self.client, "telemetry_updated"):
+                        payload = self._cached_snapshot_payload()
+                        if payload is None:
+                            raise RuntimeError("No cached telemetry snapshot available")
+                        self.client.telemetry_updated.emit(payload)
                 except Exception:
                     pass
             except Exception as exc:
