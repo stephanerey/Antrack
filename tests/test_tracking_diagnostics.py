@@ -26,6 +26,8 @@ def test_tracking_diagnostics_config_enabled_parses_prefix():
                 "ENABLED": True,
                 "CSV_PREFIX": "diag_custom",
                 "LOG_TO_CSV": True,
+                "CSV_FLUSH_EVERY_ROWS": 12,
+                "CSV_FLUSH_INTERVAL_S": 2.5,
             }
         }
     )
@@ -33,6 +35,8 @@ def test_tracking_diagnostics_config_enabled_parses_prefix():
     assert config.enabled is True
     assert config.csv_prefix == "diag_custom"
     assert config.log_to_csv is True
+    assert config.csv_flush_every_rows == 12
+    assert config.csv_flush_interval_s == pytest.approx(2.5)
 
 
 def test_tracking_diagnostics_csv_logger_creates_file_and_header(tmp_path: Path):
@@ -61,6 +65,26 @@ def test_tracking_diagnostics_disabled_creates_no_file(tmp_path: Path):
     logger.close()
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_tracking_diagnostics_csv_logger_flushes_buffer_on_close(tmp_path: Path):
+    logger = TrackingDiagnosticsCsvLogger(
+        TrackingDiagnosticsConfig(
+            enabled=True,
+            log_to_csv=True,
+            csv_flush_every_rows=999,
+            csv_flush_interval_s=3600.0,
+        ),
+        log_dir=tmp_path,
+    )
+
+    logger.log_row({"timestamp_iso": "2026-07-07T12:00:01", "axis": "EL", "decision": "HOLD"})
+    logger.close()
+
+    files = list(tmp_path.glob("tracking_diagnostics_*.csv"))
+    assert len(files) == 1
+    content = files[0].read_text(encoding="utf-8")
+    assert "HOLD" in content
 
 
 def test_measure_command_latency_preserves_result_and_records_latency():
