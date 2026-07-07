@@ -41,11 +41,21 @@ def test_axis_reference_indicator_latches_after_reference_acquisition():
     assert latched is True
 
     state, latched = compute_axis_reference_indicator("axis_driver", 2, latched)
-    assert state == "REF"
+    assert state == "PASSING"
     assert latched is True
 
     state, latched = compute_axis_reference_indicator("axis_driver", 0, latched)
     assert state == "REF"
+    assert latched is True
+
+    state, latched = compute_axis_reference_indicator("axis_driver", None, latched)
+    assert state == "REF"
+    assert latched is True
+
+
+def test_axis_reference_indicator_keeps_blue_flash_after_trigger():
+    state, latched = compute_axis_reference_indicator("axis_driver", 0, True, flash_active=True)
+    assert state == "PASSING"
     assert latched is True
 
 
@@ -60,9 +70,10 @@ def test_axis_reference_indicator_reset_clears_latch():
 
 
 def test_format_axis_index_tooltip_matches_led_state():
-    assert format_axis_index_tooltip("AZ", "axis_driver", 1, True) == "AZ index: referenced (raw=1, latched=true)"
-    assert format_axis_index_tooltip("AZ", "axis_driver", 0, False) == "AZ index: not referenced (raw=0, latched=false)"
-    assert format_axis_index_tooltip("EL", "axis_driver", 2, True) == "EL index: referenced (raw=2, latched=true)"
+    assert format_axis_index_tooltip("AZ", "axis_driver", 1, True) == "AZ index: referenced, raw=1"
+    assert format_axis_index_tooltip("AZ", "axis_driver", 0, False) == "AZ index: not referenced, raw=0"
+    assert format_axis_index_tooltip("EL", "axis_driver", 2, True, passing=True) == "EL index: referenced, raw=2, passing index"
+    assert format_axis_index_tooltip("EL", "axis_driver", None, True) == "EL index: referenced, raw=unknown"
     assert format_axis_index_tooltip("EL", "pst_rotator", None) == "EL index: N/A"
 
 

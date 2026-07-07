@@ -1,9 +1,10 @@
 """Connection and live-telemetry UI extraction for MainUi."""
 
 from __future__ import annotations
+from time import monotonic
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QSizePolicy
+from PyQt5.QtWidgets import QComboBox, QFrame, QGridLayout, QLabel, QMessageBox, QSizePolicy
 
 from antrack.core.antenna.config import load_antenna_connection_config
 from antrack.core.antenna.types import AntennaConnectionMode
@@ -21,6 +22,7 @@ from antrack.utils.settings_loader import update_and_persist_setting
 
 
 _AXIS_DRIVER_REFERENCE_WARNING = "Antenna not referenced - pass AZ/EL index before trusting position"
+_INDEX_PASSING_BLUE = "color: white; background-color: #2F80ED;"
 
 
 def format_antenna_endpoint_summary(config, mode: str | None = None) -> str:
@@ -55,9 +57,16 @@ def axis_reference_valid(mode: str, index_az: int | None, index_el: int | None) 
     return (index_az in (1, 2)) and (index_el in (1, 2))
 
 
-def compute_axis_reference_indicator(mode: str, index_value: int | None, latched: bool) -> tuple[str, bool]:
+def compute_axis_reference_indicator(
+    mode: str,
+    index_value: int | None,
+    latched: bool,
+    flash_active: bool = False,
+) -> tuple[str, bool]:
     if str(mode) != AntennaConnectionMode.AXIS_DRIVER.value:
         return "N/A", False
+    if latched and (index_value == 2 or flash_active):
+        return "PASSING", True
     if latched:
         return "REF", True
     if index_value == 0:
@@ -69,32 +78,42 @@ def compute_axis_reference_indicator(mode: str, index_value: int | None, latched
     return "UNKNOWN", False
 
 
-def format_axis_index_tooltip(axis_name: str, mode: str, index_value: int | None, latched: bool = False) -> str:
+def format_axis_index_tooltip(
+    axis_name: str,
+    mode: str,
+    index_value: int | None,
+    latched: bool = False,
+    passing: bool = False,
+) -> str:
     prefix = f"{axis_name} index:"
     if str(mode) != AntennaConnectionMode.AXIS_DRIVER.value:
         return f"{prefix} N/A"
     raw_value = "None" if index_value is None else str(index_value)
-    latched_text = "true" if latched else "false"
+    if latched and passing:
+        return f"{prefix} referenced, raw={raw_value}, passing index"
+    if latched and index_value is None:
+        return f"{prefix} referenced, raw=unknown"
     if latched:
-        return f"{prefix} referenced (raw={raw_value}, latched={latched_text})"
+        return f"{prefix} referenced, raw={raw_value}"
     if index_value == 0:
-        return f"{prefix} not referenced (raw=0, latched={latched_text})"
+        return f"{prefix} not referenced, raw=0"
     if index_value == 1:
-        return f"{prefix} referenced (raw=1, latched=true)"
+        return f"{prefix} referenced, raw=1"
     if index_value == 2:
-        return f"{prefix} trigger (raw=2, latched=true)"
-    return f"{prefix} unknown (raw={raw_value}, latched={latched_text})"
+        return f"{prefix} acquiring, raw=2"
+    return f"{prefix} unknown, raw={raw_value}"
 
 
-def _axis_index_style(mode: str, index_value: int | None) -> str:
-    text = format_axis_index_status(mode, index_value)
-    if text == "NOT REF":
+def _axis_index_style(display_state: str) -> str:
+    if display_state == "NOT REF":
         return red_label_color
-    if text == "REF":
+    if display_state == "REF":
         return green_label_color
-    if text == "TRIG":
+    if display_state == "TRIG":
         return orange_label_color
-    if text == "UNKNOWN":
+    if display_state == "PASSING":
+        return _INDEX_PASSING_BLUE
+    if display_state == "UNKNOWN":
         return lightgrey_label_color
     return lightgrey_label_color
 
@@ -124,6 +143,8 @@ class ConnectionUiMixin:
         self.combo_antenna_mode.currentIndexChanged.connect(self.on_antenna_mode_changed)
         self.az_reference_latched = False
         self.el_reference_latched = False
+        self._az_index_blue_until = 0.0
+        self._el_index_blue_until = 0.0
         self._setup_connection_link_panel()
         self._setup_reference_status_panel()
         self._refresh_connection_panel()
@@ -160,27 +181,30 @@ class ConnectionUiMixin:
         self.label_antenna_server_status.setMinimumWidth(110)
         self.label_antenna_server_status.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.label_axisapp_version.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.label_axisapp_version.setMinimumWidth(100)
+        self.label_axisapp_version.setMinimumWidth(90)
         self.label_axisapp_version.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.combo_antenna_mode.setMinimumWidth(130)
-        self.combo_antenna_mode.setMaximumWidth(160)
+        self.label_axisapp_version.setMaximumWidth(120)
+        self.combo_antenna_mode.setMinimumWidth(120)
+        self.combo_antenna_mode.setMaximumWidth(150)
         self.pushButton_server_connect.setMinimumWidth(104)
         self.pushButton_server_connect.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.label_antenna_endpoint_summary.setMinimumWidth(150)
+        self.label_antenna_endpoint_summary.setMaximumWidth(180)
 
-        layout = QHBoxLayout()
+        layout = QGridLayout()
         layout.setContentsMargins(8, 18, 8, 8)
-        layout.setSpacing(6)
-        layout.addWidget(self.pushButton_server_connect)
-        layout.addWidget(self.label_antenna_server_status)
-        layout.addSpacing(4)
-        layout.addWidget(self.label_antenna_mode)
-        layout.addWidget(self.combo_antenna_mode)
-        layout.addSpacing(4)
-        layout.addWidget(self.label_antenna_endpoint)
-        layout.addWidget(self.label_antenna_endpoint_summary, 1)
-        layout.addSpacing(4)
-        layout.addWidget(self.label_LocalTime_40)
-        layout.addWidget(self.label_axisapp_version)
+        layout.setHorizontalSpacing(6)
+        layout.setVerticalSpacing(3)
+        layout.addWidget(self.pushButton_server_connect, 0, 0)
+        layout.addWidget(self.label_antenna_server_status, 1, 0)
+        layout.addWidget(self.label_antenna_mode, 0, 1)
+        layout.addWidget(self.combo_antenna_mode, 0, 2)
+        layout.addWidget(self.label_antenna_endpoint, 1, 1)
+        layout.addWidget(self.label_antenna_endpoint_summary, 1, 2)
+        layout.addWidget(self.label_LocalTime_40, 1, 3)
+        layout.addWidget(self.label_axisapp_version, 1, 4)
+        layout.setColumnMinimumWidth(0, 110)
+        layout.setColumnMinimumWidth(2, 130)
         group.setLayout(layout)
 
     def _relayout_top_banner_groups(self):
@@ -194,7 +218,7 @@ class ConnectionUiMixin:
         banner_height = max(int(group.height()), 71)
         spacing = 8
         time_width = max(int(time_group.width()), 241)
-        link_width = max(720, frame_width - time_width - spacing - 8)
+        link_width = min(590, max(520, frame_width - time_width - spacing - 8))
         time_x = min(link_width + spacing, max(0, frame_width - time_width))
 
         group.setGeometry(0, 0, link_width, banner_height)
@@ -291,6 +315,8 @@ class ConnectionUiMixin:
     def _reset_reference_latches(self):
         self.az_reference_latched = False
         self.el_reference_latched = False
+        self._az_index_blue_until = 0.0
+        self._el_index_blue_until = 0.0
 
     def _refresh_reference_status_panel(self, data: dict | None = None):
         if not hasattr(self, "label_antenna_index_az") or not hasattr(self, "label_antenna_index_el"):
@@ -300,21 +326,52 @@ class ConnectionUiMixin:
         payload = data if isinstance(data, dict) else {}
         index_az = payload.get("index_az")
         index_el = payload.get("index_el")
+        now = monotonic()
 
-        az_state, next_az_latched = compute_axis_reference_indicator(mode, index_az, self.az_reference_latched)
-        el_state, next_el_latched = compute_axis_reference_indicator(mode, index_el, self.el_reference_latched)
+        if mode == AntennaConnectionMode.AXIS_DRIVER.value and self.az_reference_latched and index_az == 2:
+            self._az_index_blue_until = max(self._az_index_blue_until, now + 0.5)
+        if mode == AntennaConnectionMode.AXIS_DRIVER.value and self.el_reference_latched and index_el == 2:
+            self._el_index_blue_until = max(self._el_index_blue_until, now + 0.5)
+
+        az_flash_active = mode == AntennaConnectionMode.AXIS_DRIVER.value and now < self._az_index_blue_until
+        el_flash_active = mode == AntennaConnectionMode.AXIS_DRIVER.value and now < self._el_index_blue_until
+
+        az_state, next_az_latched = compute_axis_reference_indicator(
+            mode,
+            index_az,
+            self.az_reference_latched,
+            flash_active=az_flash_active,
+        )
+        el_state, next_el_latched = compute_axis_reference_indicator(
+            mode,
+            index_el,
+            self.el_reference_latched,
+            flash_active=el_flash_active,
+        )
         self.az_reference_latched = next_az_latched
         self.el_reference_latched = next_el_latched
 
         self.label_antenna_index_az.setText("")
         self.label_antenna_index_el.setText("")
-        self.label_antenna_index_az.setStyleSheet(_axis_index_style(mode, 1 if az_state == "REF" else index_az))
-        self.label_antenna_index_el.setStyleSheet(_axis_index_style(mode, 1 if el_state == "REF" else index_el))
+        self.label_antenna_index_az.setStyleSheet(_axis_index_style(az_state))
+        self.label_antenna_index_el.setStyleSheet(_axis_index_style(el_state))
         self.label_antenna_index_az.setToolTip(
-            format_axis_index_tooltip("AZ", mode, index_az, self.az_reference_latched)
+            format_axis_index_tooltip(
+                "AZ",
+                mode,
+                index_az,
+                self.az_reference_latched,
+                passing=(az_state == "PASSING"),
+            )
         )
         self.label_antenna_index_el.setToolTip(
-            format_axis_index_tooltip("EL", mode, index_el, self.el_reference_latched)
+            format_axis_index_tooltip(
+                "EL",
+                mode,
+                index_el,
+                self.el_reference_latched,
+                passing=(el_state == "PASSING"),
+            )
         )
         self.label_antenna_index_az.setAccessibleDescription(az_state)
         self.label_antenna_index_el.setAccessibleDescription(el_state)
