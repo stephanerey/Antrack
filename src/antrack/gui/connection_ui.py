@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QComboBox, QFrame, QGridLayout, QLabel, QMessageBox
+from PyQt5.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QSizePolicy
 
 from antrack.core.antenna.config import load_antenna_connection_config
 from antrack.core.antenna.types import AntennaConnectionMode
@@ -55,17 +55,35 @@ def axis_reference_valid(mode: str, index_az: int | None, index_el: int | None) 
     return (index_az in (1, 2)) and (index_el in (1, 2))
 
 
-def format_axis_index_tooltip(axis_name: str, mode: str, index_value: int | None) -> str:
+def compute_axis_reference_indicator(mode: str, index_value: int | None, latched: bool) -> tuple[str, bool]:
+    if str(mode) != AntennaConnectionMode.AXIS_DRIVER.value:
+        return "N/A", False
+    if latched:
+        return "REF", True
+    if index_value == 0:
+        return "NOT REF", False
+    if index_value == 1:
+        return "REF", True
+    if index_value == 2:
+        return "TRIG", True
+    return "UNKNOWN", False
+
+
+def format_axis_index_tooltip(axis_name: str, mode: str, index_value: int | None, latched: bool = False) -> str:
     prefix = f"{axis_name} index:"
     if str(mode) != AntennaConnectionMode.AXIS_DRIVER.value:
         return f"{prefix} N/A"
+    raw_value = "None" if index_value is None else str(index_value)
+    latched_text = "true" if latched else "false"
+    if latched:
+        return f"{prefix} referenced (raw={raw_value}, latched={latched_text})"
     if index_value == 0:
-        return f"{prefix} not referenced"
+        return f"{prefix} not referenced (raw=0, latched={latched_text})"
     if index_value == 1:
-        return f"{prefix} referenced"
+        return f"{prefix} referenced (raw=1, latched=true)"
     if index_value == 2:
-        return f"{prefix} trigger"
-    return f"{prefix} unknown"
+        return f"{prefix} trigger (raw=2, latched=true)"
+    return f"{prefix} unknown (raw={raw_value}, latched={latched_text})"
 
 
 def _axis_index_style(mode: str, index_value: int | None) -> str:
@@ -77,7 +95,7 @@ def _axis_index_style(mode: str, index_value: int | None) -> str:
     if text == "TRIG":
         return orange_label_color
     if text == "UNKNOWN":
-        return standard_label_color
+        return lightgrey_label_color
     return lightgrey_label_color
 
 
@@ -104,6 +122,8 @@ class ConnectionUiMixin:
         )
         self.combo_antenna_mode.setCurrentIndex(index)
         self.combo_antenna_mode.currentIndexChanged.connect(self.on_antenna_mode_changed)
+        self.az_reference_latched = False
+        self.el_reference_latched = False
         self._setup_connection_link_panel()
         self._setup_reference_status_panel()
         self._refresh_connection_panel()
@@ -115,38 +135,70 @@ class ConnectionUiMixin:
             return
 
         geometry = group.geometry()
-        group.setGeometry(geometry.x(), geometry.y(), geometry.width(), max(geometry.height(), 100))
+        group.setGeometry(geometry.x(), geometry.y(), geometry.width(), max(geometry.height(), 71))
         group.setTitle("Antenna Link")
+        self._relayout_top_banner_groups()
 
         self.label_antenna_mode.setParent(group)
         self.label_antenna_mode.setText("Mode")
+        self.label_antenna_mode.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         self.label_antenna_endpoint = QLabel("Endpoint", group)
         self.label_antenna_endpoint_summary = QLabel("-", group)
         self.label_antenna_endpoint_summary.setFrameShape(QFrame.StyledPanel)
         self.label_antenna_endpoint_summary.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.label_antenna_endpoint_summary.setStyleSheet(standard_label_color)
+        self.label_antenna_endpoint.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.label_antenna_endpoint_summary.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.label_antenna_endpoint_summary.setMinimumWidth(160)
 
         if hasattr(self, "label_LocalTime_40"):
             self.label_LocalTime_40.setText("Version")
+            self.label_LocalTime_40.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         self.label_antenna_server_status.setAlignment(Qt.AlignCenter)
+        self.label_antenna_server_status.setMinimumWidth(110)
+        self.label_antenna_server_status.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.label_axisapp_version.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.label_axisapp_version.setMinimumWidth(100)
+        self.label_axisapp_version.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.combo_antenna_mode.setMinimumWidth(130)
+        self.combo_antenna_mode.setMaximumWidth(160)
+        self.pushButton_server_connect.setMinimumWidth(104)
+        self.pushButton_server_connect.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        layout = QGridLayout()
+        layout = QHBoxLayout()
         layout.setContentsMargins(8, 18, 8, 8)
-        layout.setHorizontalSpacing(6)
-        layout.setVerticalSpacing(3)
-        layout.addWidget(self.pushButton_server_connect, 0, 0)
-        layout.addWidget(self.label_antenna_server_status, 0, 1)
-        layout.addWidget(self.label_antenna_mode, 1, 0)
-        layout.addWidget(self.combo_antenna_mode, 1, 1)
-        layout.addWidget(self.label_antenna_endpoint, 2, 0)
-        layout.addWidget(self.label_antenna_endpoint_summary, 2, 1)
-        layout.addWidget(self.label_LocalTime_40, 3, 0)
-        layout.addWidget(self.label_axisapp_version, 3, 1)
-        layout.setColumnStretch(1, 1)
+        layout.setSpacing(6)
+        layout.addWidget(self.pushButton_server_connect)
+        layout.addWidget(self.label_antenna_server_status)
+        layout.addSpacing(4)
+        layout.addWidget(self.label_antenna_mode)
+        layout.addWidget(self.combo_antenna_mode)
+        layout.addSpacing(4)
+        layout.addWidget(self.label_antenna_endpoint)
+        layout.addWidget(self.label_antenna_endpoint_summary, 1)
+        layout.addSpacing(4)
+        layout.addWidget(self.label_LocalTime_40)
+        layout.addWidget(self.label_axisapp_version)
         group.setLayout(layout)
+
+    def _relayout_top_banner_groups(self):
+        frame = getattr(self, "frame_top_bar", None)
+        group = getattr(self, "groupBox_10", None)
+        time_group = getattr(self, "groupBox_Time", None)
+        if frame is None or group is None or time_group is None:
+            return
+
+        frame_width = max(int(frame.width()), 900)
+        banner_height = max(int(group.height()), 71)
+        spacing = 8
+        time_width = max(int(time_group.width()), 241)
+        link_width = max(720, frame_width - time_width - spacing - 8)
+        time_x = min(link_width + spacing, max(0, frame_width - time_width))
+
+        group.setGeometry(0, 0, link_width, banner_height)
+        time_group.setGeometry(time_x, 0, time_width, banner_height)
 
     def _setup_reference_status_panel(self):
         group = getattr(self, "groupBox_5", None)
@@ -155,7 +207,7 @@ class ConnectionUiMixin:
 
         self.label_antenna_reference_title = QLabel("Index", group)
         self.label_antenna_reference_title.setGeometry(10, 140, 91, 20)
-        self.label_antenna_reference_title.setStyleSheet(standard_label_color)
+        self.label_antenna_reference_title.setStyleSheet("")
         self.label_antenna_reference_title.setFrameShape(QFrame.NoFrame)
         self.label_antenna_reference_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
@@ -209,6 +261,7 @@ class ConnectionUiMixin:
             )
             return
         update_and_persist_setting(self.settings, "ANTENNA_CONNECTION", "MODE", mode)
+        self._reset_reference_latches()
         self._refresh_connection_panel()
         self._refresh_reference_status_panel()
 
@@ -221,6 +274,7 @@ class ConnectionUiMixin:
         return config
 
     def _refresh_connection_panel(self):
+        self._relayout_top_banner_groups()
         if hasattr(self, "label_antenna_endpoint_summary"):
             try:
                 config = self._current_connection_config()
@@ -234,6 +288,10 @@ class ConnectionUiMixin:
         if combo is not None:
             combo.setEnabled(not self.has_connection())
 
+    def _reset_reference_latches(self):
+        self.az_reference_latched = False
+        self.el_reference_latched = False
+
     def _refresh_reference_status_panel(self, data: dict | None = None):
         if not hasattr(self, "label_antenna_index_az") or not hasattr(self, "label_antenna_index_el"):
             return
@@ -243,29 +301,29 @@ class ConnectionUiMixin:
         index_az = payload.get("index_az")
         index_el = payload.get("index_el")
 
-        az_text = format_axis_index_status(mode, index_az)
-        el_text = format_axis_index_status(mode, index_el)
+        az_state, next_az_latched = compute_axis_reference_indicator(mode, index_az, self.az_reference_latched)
+        el_state, next_el_latched = compute_axis_reference_indicator(mode, index_el, self.el_reference_latched)
+        self.az_reference_latched = next_az_latched
+        self.el_reference_latched = next_el_latched
+
         self.label_antenna_index_az.setText("")
         self.label_antenna_index_el.setText("")
-        self.label_antenna_index_az.setStyleSheet(_axis_index_style(mode, index_az))
-        self.label_antenna_index_el.setStyleSheet(_axis_index_style(mode, index_el))
-        self.label_antenna_index_az.setToolTip(format_axis_index_tooltip("AZ", mode, index_az))
-        self.label_antenna_index_el.setToolTip(format_axis_index_tooltip("EL", mode, index_el))
-        self.label_antenna_index_az.setAccessibleDescription(az_text)
-        self.label_antenna_index_el.setAccessibleDescription(el_text)
+        self.label_antenna_index_az.setStyleSheet(_axis_index_style(mode, 1 if az_state == "REF" else index_az))
+        self.label_antenna_index_el.setStyleSheet(_axis_index_style(mode, 1 if el_state == "REF" else index_el))
+        self.label_antenna_index_az.setToolTip(
+            format_axis_index_tooltip("AZ", mode, index_az, self.az_reference_latched)
+        )
+        self.label_antenna_index_el.setToolTip(
+            format_axis_index_tooltip("EL", mode, index_el, self.el_reference_latched)
+        )
+        self.label_antenna_index_az.setAccessibleDescription(az_state)
+        self.label_antenna_index_el.setAccessibleDescription(el_state)
 
-        reference_state = axis_reference_valid(mode, index_az, index_el)
-        if mode == AntennaConnectionMode.AXIS_DRIVER.value and (index_az is None or index_el is None):
-            self.label_antenna_reference_title.setStyleSheet(standard_label_color)
-            self.label_antenna_reference_title.setToolTip(_AXIS_DRIVER_REFERENCE_WARNING)
-        elif reference_state is True:
-            self.label_antenna_reference_title.setStyleSheet(green_label_color)
-            self.label_antenna_reference_title.setToolTip("")
-        elif reference_state is False:
-            self.label_antenna_reference_title.setStyleSheet(orange_label_color)
+        if mode == AntennaConnectionMode.AXIS_DRIVER.value and not (
+            self.az_reference_latched and self.el_reference_latched
+        ):
             self.label_antenna_reference_title.setToolTip(_AXIS_DRIVER_REFERENCE_WARNING)
         else:
-            self.label_antenna_reference_title.setStyleSheet(lightgrey_label_color)
             self.label_antenna_reference_title.setToolTip("")
 
     def on_connect_button_clicked(self):
@@ -307,6 +365,7 @@ class ConnectionUiMixin:
                 self.selected_antenna_mode(),
             )
             self._user_requested_disconnect = False
+            self._reset_reference_latches()
 
             worker = self.thread_manager.start_thread(
                 "AntennaConnection",
@@ -670,6 +729,7 @@ class ConnectionUiMixin:
     def ui_set_default_state(self):
         """Apply the default disconnected UI state."""
         try:
+            self._reset_reference_latches()
             if hasattr(self, "label_axisapp_version"):
                 self.label_axisapp_version.setText("")
             if hasattr(self, "label_antenna_endpoint_summary"):

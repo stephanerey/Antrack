@@ -2,6 +2,7 @@ from antrack.core.antenna.config import load_antenna_connection_config
 from antrack.core.antenna.types import AntennaTelemetry
 from antrack.gui.connection_ui import (
     axis_reference_valid,
+    compute_axis_reference_indicator,
     format_antenna_endpoint_summary,
     format_axis_index_status,
     format_axis_index_tooltip,
@@ -26,10 +27,42 @@ def test_axis_reference_valid_is_limited_to_axis_driver():
     assert axis_reference_valid("axis_server", 1, 2) is None
 
 
+def test_axis_reference_indicator_latches_after_reference_acquisition():
+    state, latched = compute_axis_reference_indicator("axis_driver", 0, False)
+    assert state == "NOT REF"
+    assert latched is False
+
+    state, latched = compute_axis_reference_indicator("axis_driver", 2, latched)
+    assert state == "TRIG"
+    assert latched is True
+
+    state, latched = compute_axis_reference_indicator("axis_driver", 1, latched)
+    assert state == "REF"
+    assert latched is True
+
+    state, latched = compute_axis_reference_indicator("axis_driver", 2, latched)
+    assert state == "REF"
+    assert latched is True
+
+    state, latched = compute_axis_reference_indicator("axis_driver", 0, latched)
+    assert state == "REF"
+    assert latched is True
+
+
+def test_axis_reference_indicator_reset_clears_latch():
+    state, latched = compute_axis_reference_indicator("axis_driver", 1, False)
+    assert state == "REF"
+    assert latched is True
+
+    state, latched = compute_axis_reference_indicator("axis_driver", 0, False)
+    assert state == "NOT REF"
+    assert latched is False
+
+
 def test_format_axis_index_tooltip_matches_led_state():
-    assert format_axis_index_tooltip("AZ", "axis_driver", 1) == "AZ index: referenced"
-    assert format_axis_index_tooltip("AZ", "axis_driver", 0) == "AZ index: not referenced"
-    assert format_axis_index_tooltip("EL", "axis_driver", 2) == "EL index: trigger"
+    assert format_axis_index_tooltip("AZ", "axis_driver", 1, True) == "AZ index: referenced (raw=1, latched=true)"
+    assert format_axis_index_tooltip("AZ", "axis_driver", 0, False) == "AZ index: not referenced (raw=0, latched=false)"
+    assert format_axis_index_tooltip("EL", "axis_driver", 2, True) == "EL index: referenced (raw=2, latched=true)"
     assert format_axis_index_tooltip("EL", "pst_rotator", None) == "EL index: N/A"
 
 
