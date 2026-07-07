@@ -44,7 +44,11 @@ except Exception:  # pragma: no cover - import is validated in real runtime
 class AxisDriverBackend(BaseAntennaBackend):
     """Axis Modbus RTU backend using a shared serial transport."""
 
+    STATUS_READ_MODE_BLOCK = "block"
+    STATUS_READ_MODE_SINGLE_REGISTER = "single_register"
     _STATUS_BLOCK_LENGTH = 7
+    _DIAGNOSTIC_WINDOW_S = 5.0
+    _FAILURE_THRESHOLD = 3
 
     def __init__(
         self,
@@ -64,6 +68,15 @@ class AxisDriverBackend(BaseAntennaBackend):
         }
         self._async_loop = None
         self._io_lock = None
+        self._last_status_payload = self._empty_status_payload()
+        self._consecutive_failures = 0
+        self._diag_window_started_monotonic = time.monotonic()
+        self._diag_requests = 0
+        self._diag_fc03 = 0
+        self._diag_fc06 = 0
+        self._diag_failures = 0
+        self._diag_timeouts = 0
+        self._diag_last_error: str | None = None
 
     async def _ensure_async_primitives(self) -> None:
         loop = asyncio.get_running_loop()
@@ -86,6 +99,7 @@ class AxisDriverBackend(BaseAntennaBackend):
             return
         self.state = AntennaConnectionState.CONNECTING
         self.last_error = None
+        self._log_startup_config()
         try:
             self.serial_port = self.serial_factory(
                 port=self.config.comport,
@@ -101,6 +115,20 @@ class AxisDriverBackend(BaseAntennaBackend):
             self.logger.error("AxisDriver connect failed: %s", exc)
             self._close_serial()
             raise
+
+    async def poll_position(self) -> tuple[float | None, float | None]:
+        try:
+            return await self._get_position(background=True)
+        except Exception as exc:
+            self.logger.warning("AxisDriver background position poll failed: %s", exc)
+            return self.telemetry.az, self.telemetry.el
+
+    async def poll_status(self) -> dict:
+        try:
+            return await self._get_status(background=True)
+        except Exception as exc:
+            self.logger.warning("AxisDriver background status poll failed: %s", exc)
+            return dict(self._last_status_payload)
 
     async def disconnect(self) -> None:
         await self._ensure_async_primitives()
@@ -156,10 +184,23 @@ class AxisDriverBackend(BaseAntennaBackend):
         return MOTION_STOP
 
     async def get_position(self) -> tuple[float | None, float | None]:
+        return await self._get_position(background=False)
+
+    async def _get_position(self, *, background: bool) -> tuple[float | None, float | None]:
         await self._ensure_async_primitives()
         async with self._io_lock:
-            az_raw = self._read_register_locked(self.config.az_slave_address, RAW_POSITION_REGISTER)
-            el_raw = self._read_register_locked(self.config.el_slave_address, RAW_POSITION_REGISTER)
+            az_raw = self._read_register_locked(
+                self.config.az_slave_address,
+                RAW_POSITION_REGISTER,
+                background=background,
+                context="az_position",
+            )
+            el_raw = self._read_register_locked(
+                self.config.el_slave_address,
+                RAW_POSITION_REGISTER,
+                background=background,
+                context="el_position",
+            )
         self.telemetry.az_raw = az_raw
         self.telemetry.el_raw = el_raw
         self.telemetry.az = raw_az_to_deg(az_raw)
@@ -168,10 +209,17 @@ class AxisDriverBackend(BaseAntennaBackend):
         return self.telemetry.az, self.telemetry.el
 
     async def get_status(self) -> dict:
+        return await self._get_status(background=False)
+
+    async def _get_status(self, *, background: bool) -> dict:
         await self._ensure_async_primitives()
         async with self._io_lock:
-            az_status = self._read_status_block_locked(self.config.az_slave_address)
-            el_status = self._read_status_block_locked(self.config.el_slave_address)
+            if self._status_read_mode() == self.STATUS_READ_MODE_BLOCK:
+                az_status = self._read_status_block_locked(self.config.az_slave_address, background=background)
+                el_status = self._read_status_block_locked(self.config.el_slave_address, background=background)
+            else:
+                az_status = self._read_status_single_locked(self.config.az_slave_address, background=background)
+                el_status = self._read_status_single_locked(self.config.el_slave_address, background=background)
 
         az_motion = az_status["motion"]
         el_motion = el_status["motion"]
@@ -196,7 +244,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.telemetry.modbus_status_az = MODBUS_OK
         self.telemetry.modbus_status_el = MODBUS_OK
         self.telemetry.last_update_monotonic = time.monotonic()
-        return {
+        payload = {
             "motion_az": az_motion,
             "motion_el": el_motion,
             "endstop_az": endstop_az,
@@ -208,12 +256,14 @@ class AxisDriverBackend(BaseAntennaBackend):
             "modbus_az": MODBUS_OK,
             "modbus_el": MODBUS_OK,
         }
+        self._last_status_payload = dict(payload)
+        return payload
 
     async def get_versions(self) -> AntennaVersions:
         await self._ensure_async_primitives()
         async with self._io_lock:
-            az_release = self._read_register_locked(self.config.az_slave_address, RELEASE_REGISTER)
-            el_release = self._read_register_locked(self.config.el_slave_address, RELEASE_REGISTER)
+            az_release = self._read_register_locked(self.config.az_slave_address, RELEASE_REGISTER, context="az_release")
+            el_release = self._read_register_locked(self.config.el_slave_address, RELEASE_REGISTER, context="el_release")
         self.versions.server_version = "AxisDriver"
         self.versions.driver_version_az = format_release(az_release)
         self.versions.driver_version_el = format_release(el_release)
@@ -224,33 +274,106 @@ class AxisDriverBackend(BaseAntennaBackend):
         async with self._io_lock:
             return self._read_register_locked(slave, register)
 
-    def _read_register_locked(self, slave: int, register: int) -> int:
+    def _read_register_locked(
+        self,
+        slave: int,
+        register: int,
+        *,
+        background: bool = False,
+        context: str = "fc03_read",
+    ) -> int:
         self._ensure_serial_open()
         request = build_fc03_request(slave, register, 1)
         values = self._exchange_and_parse(
             request,
             candidate_lengths=(7,),
             parser=lambda frame: parse_fc03_response(frame, slave=slave, length=1),
+            func_code=0x03,
+            timeout_s=self._request_timeout(background=background),
+            background=background,
+            context=context,
         )
         return values[0]
 
-    def _read_registers_locked(self, slave: int, register: int, length: int) -> list[int]:
+    def _read_registers_locked(
+        self,
+        slave: int,
+        register: int,
+        length: int,
+        *,
+        background: bool = False,
+        context: str = "fc03_block_read",
+    ) -> list[int]:
         self._ensure_serial_open()
         request = build_fc03_request(slave, register, length)
         return self._exchange_and_parse(
             request,
             candidate_lengths=(5 + (2 * int(length)),),
             parser=lambda frame: parse_fc03_response(frame, slave=slave, length=length),
+            func_code=0x03,
+            timeout_s=self._request_timeout(background=background),
+            background=background,
+            context=context,
         )
 
-    def _read_status_block_locked(self, slave: int) -> dict[str, int]:
-        values = self._read_registers_locked(slave, MOTION_STATE_REGISTER, self._STATUS_BLOCK_LENGTH)
+    def _read_status_block_locked(self, slave: int, *, background: bool = False) -> dict[str, int]:
+        values = self._read_registers_locked(
+            slave,
+            MOTION_STATE_REGISTER,
+            self._STATUS_BLOCK_LENGTH,
+            background=background,
+            context=f"status_block_slave_{slave}",
+        )
         return {
             "motion": int(values[0]),
             "raw_position": int(values[RAW_POSITION_REGISTER - MOTION_STATE_REGISTER]),
             "endstop": int(values[ENDSTOP_REGISTER - MOTION_STATE_REGISTER]),
             "index": int(values[INDEX_REGISTER - MOTION_STATE_REGISTER]),
             "alarm": int(values[MOTOR_ALARM_REGISTER - MOTION_STATE_REGISTER]),
+        }
+
+    def _read_status_single_locked(self, slave: int, *, background: bool = False) -> dict[str, int]:
+        return {
+            "motion": int(
+                self._read_register_locked(
+                    slave,
+                    MOTION_STATE_REGISTER,
+                    background=background,
+                    context=f"status_motion_slave_{slave}",
+                )
+            ),
+            "raw_position": int(
+                self._read_register_locked(
+                    slave,
+                    RAW_POSITION_REGISTER,
+                    background=background,
+                    context=f"status_position_slave_{slave}",
+                )
+            ),
+            "endstop": int(
+                self._read_register_locked(
+                    slave,
+                    ENDSTOP_REGISTER,
+                    background=background,
+                    context=f"status_endstop_slave_{slave}",
+                )
+            ),
+            "index": int(
+                self._read_register_locked(
+                    slave,
+                    INDEX_REGISTER,
+                    background=background,
+                    context=f"status_index_slave_{slave}",
+                )
+            ),
+            "alarm": int(
+                self._read_register_locked(
+                    slave,
+                    MOTOR_ALARM_REGISTER,
+                    background=background,
+                    context=f"status_alarm_slave_{slave}",
+                )
+            ),
         }
 
     async def _write_register(self, slave: int, register: int, value: int) -> tuple[int, int]:
@@ -272,6 +395,10 @@ class AxisDriverBackend(BaseAntennaBackend):
                 value=value,
                 accept_legacy_short_response=self.config.legacy_accept_short_fc6_response,
             ),
+            func_code=0x06,
+            timeout_s=float(getattr(self.config, "command_timeout_s", 0.5)),
+            background=False,
+            context=f"fc06_slave_{slave}_reg_{register}",
         )
 
     async def _write_axis_speed(self, slave: int, speed: float) -> None:
@@ -289,16 +416,17 @@ class AxisDriverBackend(BaseAntennaBackend):
         *,
         candidate_lengths: tuple[int, ...],
         parser: Callable[[bytes], object],
+        func_code: int,
+        timeout_s: float,
+        background: bool,
+        context: str,
     ):
         try:
             reset_input = getattr(self.serial_port, "reset_input_buffer", None)
             if callable(reset_input):
                 reset_input()
             self.serial_port.write(request)
-            deadline = time.monotonic() + max(
-                float(getattr(self.config, "command_timeout_s", 0.5)),
-                float(getattr(self.config, "serial_timeout_s", 0.15)),
-            )
+            deadline = time.monotonic() + max(float(timeout_s), float(getattr(self.config, "serial_timeout_s", 0.15)))
             max_frame_length = max(int(length) for length in candidate_lengths)
             max_buffer_length = len(request) + max_frame_length
             buffer = b""
@@ -311,6 +439,7 @@ class AxisDriverBackend(BaseAntennaBackend):
                     buffer += chunk
                 parsed, last_error = self._scan_for_valid_frame(buffer, candidate_lengths, parser)
                 if parsed is not None:
+                    self._record_modbus_success(func_code)
                     return parsed
                 if not chunk:
                     break
@@ -322,10 +451,7 @@ class AxisDriverBackend(BaseAntennaBackend):
                 f"Expected valid Modbus response ({candidate_lengths}), got {len(buffer)} bytes | raw={raw}"
             )
         except Exception as exc:
-            self.state = AntennaConnectionState.DEGRADED
-            self.last_error = str(exc)
-            self.telemetry.modbus_status_az = MODBUS_FAIL
-            self.telemetry.modbus_status_el = MODBUS_FAIL
+            self._record_modbus_failure(func_code, exc, background=background, context=context)
             raise
 
     @staticmethod
@@ -349,6 +475,126 @@ class AxisDriverBackend(BaseAntennaBackend):
     def _ensure_serial_open(self) -> None:
         if not self.is_connected():
             raise ConnectionError("AxisDriver serial port is not open")
+
+    def _request_timeout(self, *, background: bool) -> float:
+        if not background:
+            return float(getattr(self.config, "command_timeout_s", 0.5))
+        serial_timeout = float(getattr(self.config, "serial_timeout_s", 0.15))
+        command_timeout = float(getattr(self.config, "command_timeout_s", 0.5))
+        return max(serial_timeout, min(command_timeout, serial_timeout + 0.05))
+
+    def _status_read_mode(self) -> str:
+        mode = str(getattr(self.config, "status_read_mode", self.STATUS_READ_MODE_SINGLE_REGISTER)).strip().lower()
+        if mode not in {self.STATUS_READ_MODE_BLOCK, self.STATUS_READ_MODE_SINGLE_REGISTER}:
+            return self.STATUS_READ_MODE_SINGLE_REGISTER
+        return mode
+
+    def _record_modbus_success(self, func_code: int) -> None:
+        self._diag_requests += 1
+        if func_code == 0x03:
+            self._diag_fc03 += 1
+        elif func_code == 0x06:
+            self._diag_fc06 += 1
+        if self._consecutive_failures and self.state == AntennaConnectionState.DEGRADED:
+            self.logger.info("AxisDriver Modbus recovered after %d consecutive failures", self._consecutive_failures)
+        self._consecutive_failures = 0
+        if self.is_connected():
+            self.state = AntennaConnectionState.CONNECTED
+        self.last_error = None
+        self.telemetry.modbus_status_az = MODBUS_OK
+        self.telemetry.modbus_status_el = MODBUS_OK
+        self._maybe_log_diagnostics()
+
+    def _record_modbus_failure(self, func_code: int, exc: Exception, *, background: bool, context: str) -> None:
+        self._diag_requests += 1
+        if func_code == 0x03:
+            self._diag_fc03 += 1
+        elif func_code == 0x06:
+            self._diag_fc06 += 1
+        self._diag_failures += 1
+        if isinstance(exc, TimeoutError):
+            self._diag_timeouts += 1
+        self._diag_last_error = str(exc)
+        self.last_error = str(exc)
+        self.telemetry.modbus_status_az = MODBUS_FAIL
+        self.telemetry.modbus_status_el = MODBUS_FAIL
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._FAILURE_THRESHOLD:
+            self.state = AntennaConnectionState.DEGRADED
+            self.logger.warning(
+                "AxisDriver Modbus degraded after %d consecutive failures during %s: %s",
+                self._consecutive_failures,
+                context,
+                exc,
+            )
+        elif not background:
+            self.logger.warning(
+                "AxisDriver Modbus transient failure during %s (%d/%d): %s",
+                context,
+                self._consecutive_failures,
+                self._FAILURE_THRESHOLD,
+                exc,
+            )
+        self._maybe_log_diagnostics(force=not background)
+
+    def _maybe_log_diagnostics(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        elapsed = now - self._diag_window_started_monotonic
+        if not force and elapsed < self._DIAGNOSTIC_WINDOW_S:
+            return
+        if self._diag_requests <= 0:
+            self._diag_window_started_monotonic = now
+            return
+        self.logger.info(
+            "AxisDriver Modbus diag: window=%.1fs req=%d fc03=%d fc06=%d failures=%d timeouts=%d last_error=%s",
+            max(elapsed, 0.0),
+            self._diag_requests,
+            self._diag_fc03,
+            self._diag_fc06,
+            self._diag_failures,
+            self._diag_timeouts,
+            self._diag_last_error or "-",
+        )
+        self._diag_window_started_monotonic = now
+        self._diag_requests = 0
+        self._diag_fc03 = 0
+        self._diag_fc06 = 0
+        self._diag_failures = 0
+        self._diag_timeouts = 0
+
+    def _log_startup_config(self) -> None:
+        effective_position_interval = max(0.05, float(self.config.position_interval_s))
+        effective_status_interval = max(0.1, float(self.config.status_interval_s))
+        self.logger.info(
+            "AxisDriver startup: mode=axis_driver port=%s baudrate=%s az_slave=%s el_slave=%s "
+            "serial_timeout_s=%.3f command_timeout_s=%.3f position_interval_s=%.3f "
+            "status_interval_s=%.3f health_interval_s=%.3f status_read_mode=%s",
+            self.config.comport,
+            self.config.baudrate,
+            self.config.az_slave_address,
+            self.config.el_slave_address,
+            float(self.config.serial_timeout_s),
+            float(self.config.command_timeout_s),
+            effective_position_interval,
+            effective_status_interval,
+            float(self.config.health_interval_s),
+            self._status_read_mode(),
+        )
+
+    @staticmethod
+    def _empty_status_payload() -> dict[str, int | None]:
+        return {
+            "motion_az": None,
+            "motion_el": None,
+            "endstop_az": None,
+            "endstop_el": None,
+            "index_az": None,
+            "index_el": None,
+            "motor_alarm_az": None,
+            "motor_alarm_el": None,
+            "modbus_az": None,
+            "modbus_el": None,
+        }
 
     def _close_serial(self) -> None:
         if self.serial_port is None:

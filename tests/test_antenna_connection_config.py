@@ -19,6 +19,9 @@ def test_axis_driver_settings_are_parsed():
                 "baudrate": 38400,
                 "az_slave_address": 10,
                 "el_slave_address": 20,
+                "position_interval_s": 0.1,
+                "status_interval_s": 0.5,
+                "status_read_mode": "single_register",
             },
         }
     )
@@ -26,8 +29,19 @@ def test_axis_driver_settings_are_parsed():
     assert config.axis_driver.comport == "COM7"
     assert config.axis_driver.az_slave_address == 10
     assert config.axis_driver.el_slave_address == 20
-    assert config.axis_driver.position_interval_s == 0.5
-    assert config.axis_driver.status_interval_s == 2.0
+    assert config.axis_driver.position_interval_s == 0.1
+    assert config.axis_driver.status_interval_s == 0.5
+    assert config.axis_driver.status_read_mode == "single_register"
+
+
+def test_invalid_axis_driver_status_read_mode_raises_config_error():
+    with pytest.raises(AntennaConfigError):
+        load_antenna_connection_config(
+            {
+                "ANTENNA_CONNECTION": {"mode": "axis_driver"},
+                "AXIS_DRIVER": {"status_read_mode": "invalid"},
+            }
+        )
 
 
 def test_pst_rotator_settings_are_parsed():

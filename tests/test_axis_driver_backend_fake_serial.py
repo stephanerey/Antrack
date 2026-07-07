@@ -132,6 +132,14 @@ def test_axis_driver_timeout_sets_degraded_state():
     asyncio.run(backend.connect())
     fake_serial.responses.clear()
 
+    for _ in range(2):
+        try:
+            asyncio.run(backend.get_position())
+        except Exception:
+            pass
+
+    assert backend.get_connection_state() == AntennaConnectionState.CONNECTED
+
     try:
         asyncio.run(backend.get_position())
     except Exception:
@@ -155,3 +163,32 @@ def test_axis_driver_connect_tolerates_echoed_fc03_frames():
     assert backend.is_connected()
     assert backend.versions.driver_version_az == "1.50"
     assert backend.telemetry.az_raw == 32768
+
+
+def test_axis_driver_single_register_status_mode_issues_individual_fc03_reads():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.get_status())
+
+    assert build_fc03_request(10, MOTION_STATE_REGISTER, 7) not in fake_serial.writes
+    assert build_fc03_request(10, MOTION_STATE_REGISTER, 1) in fake_serial.writes
+    assert build_fc03_request(10, RAW_POSITION_REGISTER, 1) in fake_serial.writes
+
+
+def test_axis_driver_block_status_mode_issues_block_fc03_reads():
+    fake_serial = FakeSerial(_driver_responses())
+    config = AxisDriverConnectionConfig(
+        comport="COM7",
+        legacy_accept_short_fc6_response=False,
+        status_read_mode="block",
+    )
+    backend = AxisDriverBackend(config, serial_factory=lambda **_kwargs: fake_serial)
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.get_status())
+
+    assert build_fc03_request(10, MOTION_STATE_REGISTER, 7) in fake_serial.writes
+    assert build_fc03_request(10, MOTION_STATE_REGISTER, 1) not in fake_serial.writes
