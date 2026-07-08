@@ -22,6 +22,12 @@ from antrack.tracking.motion_constraints import (
     constrained_elevation_error,
     parse_forbidden_ranges,
 )
+from antrack.tracking.motion_refresh import (
+    configured_move_refresh_interval,
+    effective_motion_refresh_interval,
+    should_emit_move,
+    should_emit_stop,
+)
 
 
 # --- Utilitaires simples ---
@@ -302,7 +308,7 @@ class Tracker:
             "speed_requested": speed_requested,
             "az_setrate": getattr(antenna, "az_setrate", None),
             "el_setrate": getattr(antenna, "el_setrate", None),
-            "move_refresh_interval_s": self._move_refresh_interval,
+            "move_refresh_interval_s": self._effective_motion_refresh_interval(),
             "min_move_duration_s": self.get_loop_interval(),
             "command_start_monotonic_s": None if not command_record else command_record.get("command_start_monotonic_s"),
             "command_end_monotonic_s": None if not command_record else command_record.get("command_end_monotonic_s"),
@@ -338,10 +344,17 @@ class Tracker:
         }
 
     def _refresh_runtime_tuning(self) -> None:
-        perf = self._performance_settings()
-        if self._to_bool(perf.get("cpu_optimized", False)):
-            refresh = float(perf.get("move_refresh_interval", self._move_refresh_interval))
-            self._move_refresh_interval = float(max(0.1, refresh))
+        self._move_refresh_interval = configured_move_refresh_interval(
+            self.settings,
+            default_s=self._move_refresh_interval,
+        )
+
+    def _effective_motion_refresh_interval(self) -> float:
+        return effective_motion_refresh_interval(
+            self.axis_client_qt,
+            self.settings,
+            default_s=self._move_refresh_interval,
+        )
 
     def is_running(self) -> bool:
         """
@@ -388,7 +401,7 @@ class Tracker:
         finally:
             # Stop motors via the core
             try:
-                self._stop_motors()
+                self._stop_motors(force=True)
             except Exception:
                 pass
             try:
@@ -437,6 +450,7 @@ class Tracker:
         self._refresh_runtime_tuning()
         log = logging.getLogger("Tracker")
         step_started = time.monotonic()
+        move_refresh_interval_s = self._effective_motion_refresh_interval()
         expected_loop_interval_s = float(interval or self.get_loop_interval())
         loop_dt_s = None
         if self._last_step_started_monotonic is not None:
@@ -574,7 +588,7 @@ class Tracker:
             )
             if (
                 target != self._last_target_command
-                or (now_ts - self._last_target_command_ts) >= self._move_refresh_interval
+                or (now_ts - self._last_target_command_ts) >= move_refresh_interval_s
             ):
                 try:
                     if self._tracking_diag_enabled:
@@ -852,7 +866,15 @@ class Tracker:
                 now_ts = time.monotonic()
                 if need_az:
                     if self.tracked_object.az_error > 0:
-                        if self._last_az_cmd != "CCW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
+                        emit_move, hold_decision, hold_reason = should_emit_move(
+                            self.axis_client_qt,
+                            self.settings,
+                            last_cmd=self._last_az_cmd,
+                            desired_cmd="CCW",
+                            elapsed_s=max(0.0, now_ts - self._last_az_cmd_ts),
+                            default_refresh_interval_s=self._move_refresh_interval,
+                        )
+                        if emit_move:
                             _result, command_record = self._record_command("move_ccw", self.axis_client_qt.move_ccw)
                             self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_CCW
                             self._last_az_cmd = "CCW"
@@ -866,8 +888,26 @@ class Tracker:
                                     "command_record": command_record,
                                 }
                             )
+                        elif self._tracking_diag_enabled:
+                            az_events.append(
+                                {
+                                    "decision": hold_decision,
+                                    "command_to_send": "move_ccw",
+                                    "command_reason": hold_reason,
+                                    "speed_requested": rate_az if 'rate_az' in locals() else None,
+                                    "command_record": None,
+                                }
+                            )
                     else:
-                        if self._last_az_cmd != "CW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
+                        emit_move, hold_decision, hold_reason = should_emit_move(
+                            self.axis_client_qt,
+                            self.settings,
+                            last_cmd=self._last_az_cmd,
+                            desired_cmd="CW",
+                            elapsed_s=max(0.0, now_ts - self._last_az_cmd_ts),
+                            default_refresh_interval_s=self._move_refresh_interval,
+                        )
+                        if emit_move:
                             _result, command_record = self._record_command("move_cw", self.axis_client_qt.move_cw)
                             self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_CW
                             self._last_az_cmd = "CW"
@@ -881,20 +921,48 @@ class Tracker:
                                     "command_record": command_record,
                                 }
                             )
-                elif self._last_az_cmd != "STOP" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
-                    _result, command_record = self._record_command("stop_az", self.axis_client_qt.stop_az)
-                    self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_STOP
-                    self._last_az_cmd = "STOP"
-                    self._last_az_cmd_ts = now_ts
-                    az_events.append(
-                        {
-                            "decision": "STOP",
-                            "command_to_send": "stop_az",
-                            "command_reason": "within threshold or blocked",
-                            "speed_requested": None,
-                            "command_record": command_record,
-                        }
+                        elif self._tracking_diag_enabled:
+                            az_events.append(
+                                {
+                                    "decision": hold_decision,
+                                    "command_to_send": "move_cw",
+                                    "command_reason": hold_reason,
+                                    "speed_requested": rate_az if 'rate_az' in locals() else None,
+                                    "command_record": None,
+                                }
+                            )
+                else:
+                    emit_stop, stop_decision, stop_reason = should_emit_stop(
+                        self.axis_client_qt,
+                        self.settings,
+                        last_cmd=self._last_az_cmd,
+                        elapsed_s=max(0.0, now_ts - self._last_az_cmd_ts),
+                        default_refresh_interval_s=self._move_refresh_interval,
                     )
+                    if emit_stop:
+                        _result, command_record = self._record_command("stop_az", self.axis_client_qt.stop_az)
+                        self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_STOP
+                        self._last_az_cmd = "STOP"
+                        self._last_az_cmd_ts = now_ts
+                        az_events.append(
+                            {
+                                "decision": "STOP",
+                                "command_to_send": "stop_az",
+                                "command_reason": stop_reason,
+                                "speed_requested": None,
+                                "command_record": command_record,
+                            }
+                        )
+                    elif self._tracking_diag_enabled:
+                        az_events.append(
+                            {
+                                "decision": stop_decision,
+                                "command_to_send": "stop_az",
+                                "command_reason": stop_reason,
+                                "speed_requested": None,
+                                "command_record": None,
+                            }
+                        )
             except Exception as e:
                 if self._tracking_diag_enabled and "timed out" in str(e).lower():
                     self._repeated_command_timeouts += 1
@@ -913,7 +981,15 @@ class Tracker:
                 now_ts = time.monotonic()
                 if need_el:
                     if self.tracked_object.el_error > 0:
-                        if self._last_el_cmd != "DOWN" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
+                        emit_move, hold_decision, hold_reason = should_emit_move(
+                            self.axis_client_qt,
+                            self.settings,
+                            last_cmd=self._last_el_cmd,
+                            desired_cmd="DOWN",
+                            elapsed_s=max(0.0, now_ts - self._last_el_cmd_ts),
+                            default_refresh_interval_s=self._move_refresh_interval,
+                        )
+                        if emit_move:
                             _result, command_record = self._record_command("move_down", self.axis_client_qt.move_down)
                             self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_DOWN
                             self._last_el_cmd = "DOWN"
@@ -927,8 +1003,26 @@ class Tracker:
                                     "command_record": command_record,
                                 }
                             )
+                        elif self._tracking_diag_enabled:
+                            el_events.append(
+                                {
+                                    "decision": hold_decision,
+                                    "command_to_send": "move_down",
+                                    "command_reason": hold_reason,
+                                    "speed_requested": rate_el if 'rate_el' in locals() else None,
+                                    "command_record": None,
+                                }
+                            )
                     else:
-                        if self._last_el_cmd != "UP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
+                        emit_move, hold_decision, hold_reason = should_emit_move(
+                            self.axis_client_qt,
+                            self.settings,
+                            last_cmd=self._last_el_cmd,
+                            desired_cmd="UP",
+                            elapsed_s=max(0.0, now_ts - self._last_el_cmd_ts),
+                            default_refresh_interval_s=self._move_refresh_interval,
+                        )
+                        if emit_move:
                             _result, command_record = self._record_command("move_up", self.axis_client_qt.move_up)
                             self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_UP
                             self._last_el_cmd = "UP"
@@ -942,20 +1036,48 @@ class Tracker:
                                     "command_record": command_record,
                                 }
                             )
-                elif self._last_el_cmd != "STOP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
-                    _result, command_record = self._record_command("stop_el", self.axis_client_qt.stop_el)
-                    self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_STOP
-                    self._last_el_cmd = "STOP"
-                    self._last_el_cmd_ts = now_ts
-                    el_events.append(
-                        {
-                            "decision": "STOP",
-                            "command_to_send": "stop_el",
-                            "command_reason": "within threshold or blocked",
-                            "speed_requested": None,
-                            "command_record": command_record,
-                        }
+                        elif self._tracking_diag_enabled:
+                            el_events.append(
+                                {
+                                    "decision": hold_decision,
+                                    "command_to_send": "move_up",
+                                    "command_reason": hold_reason,
+                                    "speed_requested": rate_el if 'rate_el' in locals() else None,
+                                    "command_record": None,
+                                }
+                            )
+                else:
+                    emit_stop, stop_decision, stop_reason = should_emit_stop(
+                        self.axis_client_qt,
+                        self.settings,
+                        last_cmd=self._last_el_cmd,
+                        elapsed_s=max(0.0, now_ts - self._last_el_cmd_ts),
+                        default_refresh_interval_s=self._move_refresh_interval,
                     )
+                    if emit_stop:
+                        _result, command_record = self._record_command("stop_el", self.axis_client_qt.stop_el)
+                        self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_STOP
+                        self._last_el_cmd = "STOP"
+                        self._last_el_cmd_ts = now_ts
+                        el_events.append(
+                            {
+                                "decision": "STOP",
+                                "command_to_send": "stop_el",
+                                "command_reason": stop_reason,
+                                "speed_requested": None,
+                                "command_record": command_record,
+                            }
+                        )
+                    elif self._tracking_diag_enabled:
+                        el_events.append(
+                            {
+                                "decision": stop_decision,
+                                "command_to_send": "stop_el",
+                                "command_reason": stop_reason,
+                                "speed_requested": None,
+                                "command_record": None,
+                            }
+                        )
             except Exception as e:
                 if self._tracking_diag_enabled and "timed out" in str(e).lower():
                     self._repeated_command_timeouts += 1
@@ -971,7 +1093,7 @@ class Tracker:
                 )
         else:
             try:
-                stop_events = self._stop_motors()
+                stop_events = self._stop_motors(force=False)
                 az_events.extend(stop_events["AZ"] or [{
                     "decision": "STOP_ALL",
                     "command_to_send": "stop_az",
@@ -1192,33 +1314,59 @@ class Tracker:
             logger.warning("Tracker prime motion failed: %s", exc)
         return events
 
-    def _stop_motors(self):
+    def _stop_motors(self, *, force: bool = True):
         """Arrête AZ et EL proprement via le core."""
         events = {"AZ": [], "EL": []}
         try:
             logging.getLogger("Tracker").debug("FORCE STOP motors (Tracker._stop_motors)")
-            _result, az_record = self._record_command("stop_az", self.axis_client_qt.stop_az)
-            _result, el_record = self._record_command("stop_el", self.axis_client_qt.stop_el)
-            self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_STOP
-            self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_STOP
-            events["AZ"].append(
-                {
-                    "decision": "STOP_ALL",
-                    "command_to_send": "stop_az",
-                    "command_reason": "force stop motors",
-                    "speed_requested": None,
-                    "command_record": az_record,
-                }
-            )
-            events["EL"].append(
-                {
-                    "decision": "STOP_ALL",
-                    "command_to_send": "stop_el",
-                    "command_reason": "force stop motors",
-                    "speed_requested": None,
-                    "command_record": el_record,
-                }
-            )
+            now_ts = time.monotonic()
+            emit_az = force
+            emit_el = force
+            az_reason = "force stop motors"
+            el_reason = "force stop motors"
+            if not force:
+                emit_az, _decision, az_reason = should_emit_stop(
+                    self.axis_client_qt,
+                    self.settings,
+                    last_cmd=self._last_az_cmd,
+                    elapsed_s=max(0.0, now_ts - self._last_az_cmd_ts),
+                    default_refresh_interval_s=self._move_refresh_interval,
+                )
+                emit_el, _decision, el_reason = should_emit_stop(
+                    self.axis_client_qt,
+                    self.settings,
+                    last_cmd=self._last_el_cmd,
+                    elapsed_s=max(0.0, now_ts - self._last_el_cmd_ts),
+                    default_refresh_interval_s=self._move_refresh_interval,
+                )
+            if emit_az:
+                _result, az_record = self._record_command("stop_az", self.axis_client_qt.stop_az)
+                self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_STOP
+                self._last_az_cmd = "STOP"
+                self._last_az_cmd_ts = now_ts
+                events["AZ"].append(
+                    {
+                        "decision": "STOP_ALL",
+                        "command_to_send": "stop_az",
+                        "command_reason": az_reason,
+                        "speed_requested": None,
+                        "command_record": az_record,
+                    }
+                )
+            if emit_el:
+                _result, el_record = self._record_command("stop_el", self.axis_client_qt.stop_el)
+                self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_STOP
+                self._last_el_cmd = "STOP"
+                self._last_el_cmd_ts = now_ts
+                events["EL"].append(
+                    {
+                        "decision": "STOP_ALL",
+                        "command_to_send": "stop_el",
+                        "command_reason": el_reason,
+                        "speed_requested": None,
+                        "command_record": el_record,
+                    }
+                )
         except Exception as e:
             logging.getLogger("Tracker").debug(f"FORCE STOP motors error: {e}")
         return events

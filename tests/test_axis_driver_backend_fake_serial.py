@@ -22,8 +22,9 @@ def _fc03_block_response(slave: int, values: list[int]) -> bytes:
 
 
 class FakeSerial:
-    def __init__(self, responses):
+    def __init__(self, responses, **kwargs):
         self.responses = responses
+        self.kwargs = kwargs
         self.writes = []
         self.last_request = b""
         self.pending_response = b""
@@ -45,6 +46,29 @@ class FakeSerial:
 
     def close(self) -> None:
         self.is_open = False
+
+
+class SequenceSerial(FakeSerial):
+    def __init__(self, responses, read_sequences, **kwargs):
+        super().__init__(responses, **kwargs)
+        self.read_sequences = {key: list(value) for key, value in read_sequences.items()}
+
+    def write(self, data: bytes) -> int:
+        result = super().write(data)
+        if data in self.read_sequences:
+            self.pending_response = b""
+        return result
+
+    def read(self, size: int) -> bytes:
+        sequence = self.read_sequences.get(self.last_request)
+        if sequence:
+            chunk = sequence.pop(0)
+            if len(chunk) > size:
+                head, tail = chunk[:size], chunk[size:]
+                sequence.insert(0, tail)
+                return head
+            return chunk
+        return super().read(size)
 
 
 def _driver_responses():
@@ -77,7 +101,7 @@ def _backend_and_serial():
         comport="COM7",
         legacy_accept_short_fc6_response=False,
     )
-    backend = AxisDriverBackend(config, serial_factory=lambda **_kwargs: fake_serial)
+    backend = AxisDriverBackend(config, serial_factory=lambda **kwargs: fake_serial)
     return backend, fake_serial
 
 
@@ -87,11 +111,11 @@ def _backend_and_serial_with_responses(responses):
         comport="COM7",
         legacy_accept_short_fc6_response=False,
     )
-    backend = AxisDriverBackend(config, serial_factory=lambda **_kwargs: fake_serial)
+    backend = AxisDriverBackend(config, serial_factory=lambda **kwargs: fake_serial)
     return backend, fake_serial
 
 
-def test_axis_driver_connect_reads_versions_and_position():
+def test_axis_driver_connect_reads_versions_and_status():
     backend, fake_serial = _backend_and_serial()
 
     asyncio.run(backend.connect())
@@ -99,8 +123,8 @@ def test_axis_driver_connect_reads_versions_and_position():
     assert backend.is_connected()
     assert backend.versions.server_version == "AxisDriver"
     assert backend.versions.driver_version_az == "1.50"
-    assert backend.telemetry.az_raw == 32768
-    assert backend.telemetry.el_raw == 16384
+    assert backend.telemetry.index_az == 2
+    assert backend.telemetry.index_el == 2
     assert fake_serial.is_open is True
 
 
@@ -124,7 +148,23 @@ def test_axis_driver_set_speed_and_move_emit_expected_frames():
 
     assert fake_serial.writes == [
         build_fc06_request(10, SPEED_REGISTER, 25),
+        build_fc06_request(10, COMMAND_REGISTER, 10),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+    ]
+
+
+def test_axis_driver_set_speed_while_moving_preserves_motion_state():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    asyncio.run(backend.move_cw())
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.set_az_speed(25))
+
+    assert fake_serial.writes == [
+        build_fc06_request(10, SPEED_REGISTER, 25),
         build_fc06_request(10, COMMAND_REGISTER, 100),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
     ]
@@ -165,7 +205,7 @@ def test_axis_driver_connect_tolerates_echoed_fc03_frames():
 
     assert backend.is_connected()
     assert backend.versions.driver_version_az == "1.50"
-    assert backend.telemetry.az_raw == 32768
+    assert backend.telemetry.index_az == 2
 
 
 def test_axis_driver_single_register_status_mode_issues_individual_fc03_reads():
@@ -177,7 +217,34 @@ def test_axis_driver_single_register_status_mode_issues_individual_fc03_reads():
 
     assert build_fc03_request(10, MOTION_STATE_REGISTER, 7) not in fake_serial.writes
     assert build_fc03_request(10, MOTION_STATE_REGISTER, 1) in fake_serial.writes
+    assert build_fc03_request(10, RAW_POSITION_REGISTER, 1) not in fake_serial.writes
+
+
+def test_axis_driver_status_include_position_reads_raw_position_when_enabled():
+    fake_serial = FakeSerial(_driver_responses())
+    config = AxisDriverConnectionConfig(
+        comport="COM7",
+        legacy_accept_short_fc6_response=False,
+        status_read_mode="minimal_single_register",
+        status_include_position=True,
+    )
+    backend = AxisDriverBackend(config, serial_factory=lambda **kwargs: fake_serial)
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.get_status())
+
     assert build_fc03_request(10, RAW_POSITION_REGISTER, 1) in fake_serial.writes
+
+
+def test_axis_driver_minimal_status_does_not_refresh_global_position_timestamp():
+    backend, _fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    backend.telemetry.last_update_monotonic = 123.0
+
+    asyncio.run(backend.get_status())
+
+    assert backend.telemetry.last_update_monotonic == 123.0
 
 
 def test_axis_driver_block_status_mode_issues_block_fc03_reads():
@@ -202,7 +269,7 @@ def test_axis_driver_background_timeout_is_relaxed_but_below_command_timeout():
 
     timeout_s = backend._request_timeout(background=True)
 
-    assert timeout_s == 0.4
+    assert timeout_s == 0.2
 
 
 def test_axis_driver_success_clears_stale_diag_last_error():
@@ -220,7 +287,7 @@ def test_axis_driver_snapshot_exposes_configured_and_observed_intervals():
 
     snapshot = backend.get_diagnostics_snapshot()
 
-    assert snapshot["configured_position_interval_s"] == pytest.approx(0.2)
+    assert snapshot["configured_position_interval_s"] == pytest.approx(0.15)
     assert snapshot["configured_status_interval_s"] == pytest.approx(1.0)
     assert "position_interval_last_s" in snapshot
     assert "status_interval_last_s" in snapshot
@@ -238,7 +305,7 @@ def test_axis_driver_background_status_poll_skips_while_motion_active():
     assert fake_serial.writes == []
 
 
-def test_axis_driver_background_position_poll_is_not_skipped_by_command_priority():
+def test_axis_driver_background_position_poll_is_deferred_by_command_priority():
     backend, fake_serial = _backend_and_serial()
     asyncio.run(backend.connect())
     fake_serial.writes.clear()
@@ -247,8 +314,116 @@ def test_axis_driver_background_position_poll_is_not_skipped_by_command_priority
 
     payload = asyncio.run(backend.poll_position())
 
-    assert payload[0] is not None
-    assert payload[1] is not None
-    assert build_fc03_request(10, RAW_POSITION_REGISTER, 1) in fake_serial.writes
-    assert build_fc03_request(20, RAW_POSITION_REGISTER, 1) in fake_serial.writes
+    assert payload == (backend.telemetry.az, backend.telemetry.el)
+    assert fake_serial.writes == []
 
+
+def test_axis_driver_waits_until_command_deadline_when_first_read_is_empty():
+    responses = _driver_responses()
+    request = build_fc03_request(10, RELEASE_REGISTER, 1)
+    fake_serial = SequenceSerial(
+        responses,
+        read_sequences={
+            request: [b"", responses[request]],
+        },
+    )
+    backend = AxisDriverBackend(
+        AxisDriverConnectionConfig(
+            comport="COM7",
+            serial_timeout_s=0.01,
+            command_timeout_s=0.05,
+            legacy_accept_short_fc6_response=False,
+        ),
+        serial_factory=lambda **kwargs: fake_serial,
+    )
+
+    asyncio.run(backend.connect())
+
+    assert backend.versions.driver_version_az == "1.50"
+
+
+def test_axis_driver_raises_timeout_when_command_deadline_expires():
+    request = build_fc03_request(10, RELEASE_REGISTER, 1)
+    fake_serial = SequenceSerial(
+        _driver_responses(),
+        read_sequences={request: [b"", b"", b""]},
+    )
+    backend = AxisDriverBackend(
+        AxisDriverConnectionConfig(
+            comport="COM7",
+            serial_timeout_s=0.01,
+            command_timeout_s=0.03,
+            legacy_accept_short_fc6_response=False,
+        ),
+        serial_factory=lambda **kwargs: fake_serial,
+    )
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(backend.connect())
+
+
+def test_axis_driver_connect_passes_explicit_serial_8n1_and_flow_control():
+    captured = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        return FakeSerial(_driver_responses(), **kwargs)
+
+    backend = AxisDriverBackend(AxisDriverConnectionConfig(comport="COM8"), serial_factory=factory)
+
+    asyncio.run(backend.connect())
+
+    assert captured["bytesize"] == 8
+    assert captured["stopbits"] == 1
+    assert captured["xonxoff"] is False
+    assert captured["rtscts"] is False
+    assert captured["dsrdtr"] is False
+    assert captured["write_timeout"] == pytest.approx(0.25)
+
+
+def test_axis_driver_stop_reinforcement_sends_exactly_one_delayed_stop():
+    backend, fake_serial = _backend_and_serial()
+    backend.config.stop_reinforce_delay_s = 0.01
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    async def scenario():
+        await backend.move_cw()
+        await backend.stop_az()
+        await asyncio.sleep(0.03)
+
+    asyncio.run(scenario())
+
+    assert fake_serial.writes == [
+        build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        build_fc06_request(10, COMMAND_REGISTER, 10),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        build_fc06_request(10, COMMAND_REGISTER, 10),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+    ]
+
+
+def test_axis_driver_stop_reinforcement_is_canceled_by_new_move():
+    backend, fake_serial = _backend_and_serial()
+    backend.config.stop_reinforce_delay_s = 0.02
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    async def scenario():
+        await backend.move_cw()
+        await backend.stop_az()
+        await asyncio.sleep(0.005)
+        await backend.move_cw()
+        await asyncio.sleep(0.04)
+
+    asyncio.run(scenario())
+
+    assert fake_serial.writes == [
+        build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        build_fc06_request(10, COMMAND_REGISTER, 10),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+    ]

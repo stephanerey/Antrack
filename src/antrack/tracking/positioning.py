@@ -12,6 +12,12 @@ from antrack.tracking.motion_constraints import (
     constrained_elevation_error,
     parse_forbidden_ranges,
 )
+from antrack.tracking.motion_refresh import (
+    configured_move_refresh_interval,
+    effective_motion_refresh_interval,
+    should_emit_move,
+    should_emit_stop,
+)
 
 
 class PositioningController:
@@ -30,6 +36,19 @@ class PositioningController:
         self._last_el_cmd_ts = 0.0
         self._last_target_command = (None, None)
         self._last_target_command_ts = 0.0
+
+    def _refresh_runtime_tuning(self) -> None:
+        self._move_refresh_interval = configured_move_refresh_interval(
+            self.settings,
+            default_s=self._move_refresh_interval,
+        )
+
+    def _effective_motion_refresh_interval(self) -> float:
+        return effective_motion_refresh_interval(
+            self.axis_client_qt,
+            self.settings,
+            default_s=self._move_refresh_interval,
+        )
 
     def is_running(self) -> bool:
         if not self.thread_manager:
@@ -57,7 +76,7 @@ class PositioningController:
             self.thread_manager.stop_thread(self._thread_name)
         finally:
             try:
-                self._stop_motors()
+                self._stop_motors(force=True)
             except Exception:
                 pass
 
@@ -104,6 +123,8 @@ class PositioningController:
         log = logging.getLogger("Positioning")
 
         while worker and not worker.abort:
+            self._refresh_runtime_tuning()
+            move_refresh_interval_s = self._effective_motion_refresh_interval()
             az_cur = getattr(getattr(self.axis_client_qt, "antenna", None), "az", None)
             el_cur = getattr(getattr(self.axis_client_qt, "antenna", None), "el", None)
             az_set = getattr(self.tracked_object, "az_set", None)
@@ -118,7 +139,7 @@ class PositioningController:
                 now_ts = time.monotonic()
                 if (
                     target != self._last_target_command
-                    or (now_ts - self._last_target_command_ts) >= self._move_refresh_interval
+                    or (now_ts - self._last_target_command_ts) >= move_refresh_interval_s
                 ):
                     try:
                         self.axis_client_qt.set_target_position(az_set, el_set)
@@ -147,10 +168,10 @@ class PositioningController:
 
             if az_blocked or el_blocked:
                 stable_cycles = 0
-                self._stop_motors()
+                self._stop_motors(force=False)
             elif not need_az and not need_el:
                 stable_cycles += 1
-                self._stop_motors()
+                self._stop_motors(force=False)
                 if stable_cycles >= stable_cycles_required:
                     log.info(
                         "Position reached: az=%.3f el=%.3f set=(%.3f, %.3f)",
@@ -163,6 +184,7 @@ class PositioningController:
             else:
                 stable_cycles = 0
                 self._apply_axis_motion(
+                    move_refresh_interval_s=move_refresh_interval_s,
                     az_error=self.tracked_object.az_error,
                     el_error=self.tracked_object.el_error,
                     need_az=need_az,
@@ -185,6 +207,7 @@ class PositioningController:
     def _apply_axis_motion(
         self,
         *,
+        move_refresh_interval_s: float,
         az_error: float,
         el_error: float,
         need_az: bool,
@@ -229,19 +252,42 @@ class PositioningController:
         try:
             if need_az:
                 if az_error > 0:
-                    if self._last_az_cmd != "CCW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
+                    emit_move, _decision, _reason = should_emit_move(
+                        self.axis_client_qt,
+                        self.settings,
+                        last_cmd=self._last_az_cmd,
+                        desired_cmd="CCW",
+                        elapsed_s=max(0.0, now_ts - self._last_az_cmd_ts),
+                        default_refresh_interval_s=self._move_refresh_interval,
+                    )
+                    if emit_move:
                         self.axis_client_qt.move_ccw()
                         self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_CCW
                         self._last_az_cmd = "CCW"
                         self._last_az_cmd_ts = now_ts
                 else:
-                    if self._last_az_cmd != "CW" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
+                    emit_move, _decision, _reason = should_emit_move(
+                        self.axis_client_qt,
+                        self.settings,
+                        last_cmd=self._last_az_cmd,
+                        desired_cmd="CW",
+                        elapsed_s=max(0.0, now_ts - self._last_az_cmd_ts),
+                        default_refresh_interval_s=self._move_refresh_interval,
+                    )
+                    if emit_move:
                         self.axis_client_qt.move_cw()
                         self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_CW
                         self._last_az_cmd = "CW"
                         self._last_az_cmd_ts = now_ts
             else:
-                if self._last_az_cmd != "STOP" or (now_ts - self._last_az_cmd_ts) >= self._move_refresh_interval:
+                emit_stop, _decision, _reason = should_emit_stop(
+                    self.axis_client_qt,
+                    self.settings,
+                    last_cmd=self._last_az_cmd,
+                    elapsed_s=max(0.0, now_ts - self._last_az_cmd_ts),
+                    default_refresh_interval_s=self._move_refresh_interval,
+                )
+                if emit_stop:
                     self.axis_client_qt.stop_az()
                     self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
                     self._last_az_cmd = "STOP"
@@ -252,19 +298,42 @@ class PositioningController:
         try:
             if need_el:
                 if el_error > 0:
-                    if self._last_el_cmd != "DOWN" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
+                    emit_move, _decision, _reason = should_emit_move(
+                        self.axis_client_qt,
+                        self.settings,
+                        last_cmd=self._last_el_cmd,
+                        desired_cmd="DOWN",
+                        elapsed_s=max(0.0, now_ts - self._last_el_cmd_ts),
+                        default_refresh_interval_s=self._move_refresh_interval,
+                    )
+                    if emit_move:
                         self.axis_client_qt.move_down()
                         self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_DOWN
                         self._last_el_cmd = "DOWN"
                         self._last_el_cmd_ts = now_ts
                 else:
-                    if self._last_el_cmd != "UP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
+                    emit_move, _decision, _reason = should_emit_move(
+                        self.axis_client_qt,
+                        self.settings,
+                        last_cmd=self._last_el_cmd,
+                        desired_cmd="UP",
+                        elapsed_s=max(0.0, now_ts - self._last_el_cmd_ts),
+                        default_refresh_interval_s=self._move_refresh_interval,
+                    )
+                    if emit_move:
                         self.axis_client_qt.move_up()
                         self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_UP
                         self._last_el_cmd = "UP"
                         self._last_el_cmd_ts = now_ts
             else:
-                if self._last_el_cmd != "STOP" or (now_ts - self._last_el_cmd_ts) >= self._move_refresh_interval:
+                emit_stop, _decision, _reason = should_emit_stop(
+                    self.axis_client_qt,
+                    self.settings,
+                    last_cmd=self._last_el_cmd,
+                    elapsed_s=max(0.0, now_ts - self._last_el_cmd_ts),
+                    default_refresh_interval_s=self._move_refresh_interval,
+                )
+                if emit_stop:
                     self.axis_client_qt.stop_el()
                     self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
                     self._last_el_cmd = "STOP"
@@ -272,15 +341,35 @@ class PositioningController:
         except Exception:
             pass
 
-    def _stop_motors(self) -> None:
+    def _stop_motors(self, *, force: bool = True) -> None:
         try:
-            self.axis_client_qt.stop_az()
-            self.axis_client_qt.stop_el()
-            self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
-            self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
-            self._last_az_cmd = "STOP"
-            self._last_el_cmd = "STOP"
-            self._last_az_cmd_ts = time.monotonic()
-            self._last_el_cmd_ts = self._last_az_cmd_ts
+            now_ts = time.monotonic()
+            emit_az = force
+            emit_el = force
+            if not force:
+                emit_az, _decision, _reason = should_emit_stop(
+                    self.axis_client_qt,
+                    self.settings,
+                    last_cmd=self._last_az_cmd,
+                    elapsed_s=max(0.0, now_ts - self._last_az_cmd_ts),
+                    default_refresh_interval_s=self._move_refresh_interval,
+                )
+                emit_el, _decision, _reason = should_emit_stop(
+                    self.axis_client_qt,
+                    self.settings,
+                    last_cmd=self._last_el_cmd,
+                    elapsed_s=max(0.0, now_ts - self._last_el_cmd_ts),
+                    default_refresh_interval_s=self._move_refresh_interval,
+                )
+            if emit_az:
+                self.axis_client_qt.stop_az()
+                self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
+                self._last_az_cmd = "STOP"
+                self._last_az_cmd_ts = now_ts
+            if emit_el:
+                self.axis_client_qt.stop_el()
+                self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
+                self._last_el_cmd = "STOP"
+                self._last_el_cmd_ts = now_ts
         except Exception:
             pass

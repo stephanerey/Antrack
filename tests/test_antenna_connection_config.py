@@ -19,9 +19,12 @@ def test_axis_driver_settings_are_parsed():
                 "baudrate": 38400,
                 "az_slave_address": 10,
                 "el_slave_address": 20,
-                "position_interval_s": 0.1,
-                "status_interval_s": 0.5,
-                "status_read_mode": "single_register",
+                "position_interval_s": 0.15,
+                "status_interval_s": 1.0,
+                "status_read_mode": "minimal_single_register",
+                "status_include_position": False,
+                "move_refresh_mode": "edge_only",
+                "move_refresh_interval_s": 0.0,
             },
         }
     )
@@ -29,9 +32,12 @@ def test_axis_driver_settings_are_parsed():
     assert config.axis_driver.comport == "COM7"
     assert config.axis_driver.az_slave_address == 10
     assert config.axis_driver.el_slave_address == 20
-    assert config.axis_driver.position_interval_s == 0.1
-    assert config.axis_driver.status_interval_s == 0.5
-    assert config.axis_driver.status_read_mode == "single_register"
+    assert config.axis_driver.position_interval_s == 0.15
+    assert config.axis_driver.status_interval_s == 1.0
+    assert config.axis_driver.status_read_mode == "minimal_single_register"
+    assert config.axis_driver.status_include_position is False
+    assert config.axis_driver.move_refresh_mode == "edge_only"
+    assert config.axis_driver.move_refresh_interval_s == 0.0
 
 
 def test_invalid_axis_driver_status_read_mode_raises_config_error():

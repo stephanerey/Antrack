@@ -237,4 +237,4 @@ def test_axis_driver_polling_intervals_apply_only_busy_loop_floor():
 
     polling = _polling_intervals_for_config(wrapped)
 
-    assert polling == (0.05, 0.1)
+    assert polling == (0.1, 0.5)

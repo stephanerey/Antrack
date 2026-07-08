@@ -50,6 +50,7 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     STATUS_READ_MODE_BLOCK = "block"
     STATUS_READ_MODE_SINGLE_REGISTER = "single_register"
+    STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER = "minimal_single_register"
     _STATUS_BLOCK_LENGTH = 7
     _DIAGNOSTIC_WINDOW_S = 5.0
     _FAILURE_THRESHOLD = 3
@@ -111,6 +112,19 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._command_priority_until_monotonic = 0.0
         self._background_position_skips = 0
         self._background_status_skips = 0
+        self._last_request_completed_monotonic = 0.0
+        self._axis_motion_state = {
+            self.config.az_slave_address: MOTION_STOP,
+            self.config.el_slave_address: MOTION_STOP,
+        }
+        self._axis_speed_state = {
+            self.config.az_slave_address: None,
+            self.config.el_slave_address: None,
+        }
+        self._stop_reinforce_tasks: dict[int, asyncio.Task] = {}
+        self._stop_reinforce_sent = 0
+        self._stop_reinforce_scheduled = 0
+        self._stop_reinforce_canceled = 0
 
     async def _ensure_async_primitives(self) -> None:
         loop = asyncio.get_running_loop()
@@ -139,6 +153,13 @@ class AxisDriverBackend(BaseAntennaBackend):
                 port=self.config.comport,
                 baudrate=self.config.baudrate,
                 timeout=self.config.serial_timeout_s,
+                bytesize=getattr(serial, "EIGHTBITS", 8) if serial is not None else 8,
+                parity=getattr(serial, "PARITY_NONE", "N") if serial is not None else "N",
+                stopbits=getattr(serial, "STOPBITS_ONE", 1) if serial is not None else 1,
+                xonxoff=False,
+                rtscts=False,
+                dsrdtr=False,
+                write_timeout=float(self.config.command_timeout_s),
             )
             self.state = AntennaConnectionState.CONNECTED
             await self.get_versions()
@@ -153,6 +174,9 @@ class AxisDriverBackend(BaseAntennaBackend):
     async def poll_position(self) -> tuple[float | None, float | None]:
         try:
             return await self._get_position(background=True)
+        except _BackgroundPollDeferred:
+            self._background_position_skips += 1
+            return self.telemetry.az, self.telemetry.el
         except Exception as exc:
             self.logger.warning("AxisDriver background position poll failed: %s", exc)
             return self.telemetry.az, self.telemetry.el
@@ -168,6 +192,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         await self._ensure_async_primitives()
         self.state = AntennaConnectionState.DISCONNECTING
         try:
+            self._cancel_all_stop_reinforcements()
             if self.is_connected():
                 try:
                     await self.stop_all()
@@ -178,43 +203,45 @@ class AxisDriverBackend(BaseAntennaBackend):
             self.state = AntennaConnectionState.DISCONNECTED
 
     async def set_az_speed(self, speed: float) -> int | None:
-        await self._write_axis_speed(self.config.az_slave_address, speed)
+        await self._apply_axis_state(self.config.az_slave_address, speed=speed)
         self.telemetry.az_setrate = float(speed)
         return int(speed)
 
     async def set_el_speed(self, speed: float) -> int | None:
-        await self._write_axis_speed(self.config.el_slave_address, speed)
+        await self._apply_axis_state(self.config.el_slave_address, speed=speed)
         self.telemetry.el_setrate = float(speed)
         return int(speed)
 
     async def move_cw(self) -> int | None:
-        await self._write_motion(self.config.az_slave_address, MOTION_CW)
+        await self._apply_axis_state(self.config.az_slave_address, motion=MOTION_CW)
         self.axis_status["azimuth"] = "CW"
         return MOTION_CW
 
     async def move_ccw(self) -> int | None:
-        await self._write_motion(self.config.az_slave_address, MOTION_CCW)
+        await self._apply_axis_state(self.config.az_slave_address, motion=MOTION_CCW)
         self.axis_status["azimuth"] = "CCW"
         return MOTION_CCW
 
     async def move_up(self) -> int | None:
-        await self._write_motion(self.config.el_slave_address, MOTION_CW)
+        await self._apply_axis_state(self.config.el_slave_address, motion=MOTION_CW)
         self.axis_status["elevation"] = "UP"
         return MOTION_CW
 
     async def move_down(self) -> int | None:
-        await self._write_motion(self.config.el_slave_address, MOTION_CCW)
+        await self._apply_axis_state(self.config.el_slave_address, motion=MOTION_CCW)
         self.axis_status["elevation"] = "DOWN"
         return MOTION_CCW
 
     async def stop_az(self) -> int | None:
-        await self._write_motion(self.config.az_slave_address, MOTION_STOP)
+        await self._apply_axis_state(self.config.az_slave_address, motion=MOTION_STOP)
         self.axis_status["azimuth"] = "STOP"
+        self._schedule_stop_reinforcement(self.config.az_slave_address)
         return MOTION_STOP
 
     async def stop_el(self) -> int | None:
-        await self._write_motion(self.config.el_slave_address, MOTION_STOP)
+        await self._apply_axis_state(self.config.el_slave_address, motion=MOTION_STOP)
         self.axis_status["elevation"] = "STOP"
+        self._schedule_stop_reinforcement(self.config.el_slave_address)
         return MOTION_STOP
 
     async def get_position(self) -> tuple[float | None, float | None]:
@@ -227,14 +254,14 @@ class AxisDriverBackend(BaseAntennaBackend):
             RAW_POSITION_REGISTER,
             background=background,
             context="az_position",
-            defer_background=False,
+            defer_background=bool(getattr(self.config, "background_position_defer_commands", True)),
         )
         el_raw = await self._read_register(
             self.config.el_slave_address,
             RAW_POSITION_REGISTER,
             background=background,
             context="el_position",
-            defer_background=False,
+            defer_background=bool(getattr(self.config, "background_position_defer_commands", True)),
         )
         self.telemetry.az_raw = az_raw
         self.telemetry.el_raw = el_raw
@@ -254,21 +281,41 @@ class AxisDriverBackend(BaseAntennaBackend):
         if background and not await self._await_background_slot("status"):
             self._background_status_skips += 1
             return dict(self._last_status_payload)
-        if background and self._status_read_mode() == self.STATUS_READ_MODE_SINGLE_REGISTER:
+        status_mode = self._status_read_mode()
+        if background and status_mode in {
+            self.STATUS_READ_MODE_SINGLE_REGISTER,
+            self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER,
+        }:
             try:
-                az_status = await self._read_status_single_async(self.config.az_slave_address, background=True)
-                el_status = await self._read_status_single_async(self.config.el_slave_address, background=True)
+                az_status = await self._read_status_single_async(
+                    self.config.az_slave_address,
+                    background=True,
+                    mode=status_mode,
+                )
+                el_status = await self._read_status_single_async(
+                    self.config.el_slave_address,
+                    background=True,
+                    mode=status_mode,
+                )
             except _BackgroundPollDeferred:
                 self._background_status_skips += 1
                 return dict(self._last_status_payload)
         else:
             async with self._io_lock:
-                if self._status_read_mode() == self.STATUS_READ_MODE_BLOCK:
+                if status_mode == self.STATUS_READ_MODE_BLOCK:
                     az_status = self._read_status_block_locked(self.config.az_slave_address, background=background)
                     el_status = self._read_status_block_locked(self.config.el_slave_address, background=background)
                 else:
-                    az_status = self._read_status_single_locked(self.config.az_slave_address, background=background)
-                    el_status = self._read_status_single_locked(self.config.el_slave_address, background=background)
+                    az_status = self._read_status_single_locked(
+                        self.config.az_slave_address,
+                        background=background,
+                        mode=status_mode,
+                    )
+                    el_status = self._read_status_single_locked(
+                        self.config.el_slave_address,
+                        background=background,
+                        mode=status_mode,
+                    )
 
         az_motion = az_status["motion"]
         el_motion = el_status["motion"]
@@ -279,10 +326,12 @@ class AxisDriverBackend(BaseAntennaBackend):
         alarm_az = az_status["alarm"]
         alarm_el = el_status["alarm"]
 
-        self.telemetry.az_raw = az_status["raw_position"]
-        self.telemetry.el_raw = el_status["raw_position"]
-        self.telemetry.az = raw_az_to_deg(az_status["raw_position"])
-        self.telemetry.el = raw_el_to_deg(el_status["raw_position"])
+        include_position = bool(az_status.get("includes_position")) and bool(el_status.get("includes_position"))
+        if include_position:
+            self.telemetry.az_raw = az_status["raw_position"]
+            self.telemetry.el_raw = el_status["raw_position"]
+            self.telemetry.az = raw_az_to_deg(az_status["raw_position"])
+            self.telemetry.el = raw_el_to_deg(el_status["raw_position"])
 
         self.telemetry.endstop_az = endstop_az
         self.telemetry.endstop_el = endstop_el
@@ -294,7 +343,8 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.telemetry.modbus_status_el = MODBUS_OK
         now_monotonic = time.monotonic()
         self._record_update_interval(kind="status", previous_monotonic=self._status_last_update_monotonic, now_monotonic=now_monotonic)
-        self.telemetry.last_update_monotonic = now_monotonic
+        if include_position:
+            self.telemetry.last_update_monotonic = now_monotonic
         self._status_last_update_monotonic = now_monotonic
         payload = {
             "motion_az": az_motion,
@@ -392,10 +442,21 @@ class AxisDriverBackend(BaseAntennaBackend):
             "endstop": int(values[ENDSTOP_REGISTER - MOTION_STATE_REGISTER]),
             "index": int(values[INDEX_REGISTER - MOTION_STATE_REGISTER]),
             "alarm": int(values[MOTOR_ALARM_REGISTER - MOTION_STATE_REGISTER]),
+            "includes_position": True,
         }
 
-    def _read_status_single_locked(self, slave: int, *, background: bool = False) -> dict[str, int]:
-        return {
+    def _read_status_single_locked(
+        self,
+        slave: int,
+        *,
+        background: bool = False,
+        mode: str | None = None,
+    ) -> dict[str, int | bool | None]:
+        selected_mode = str(mode or self._status_read_mode()).strip().lower()
+        includes_position = selected_mode != self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER or bool(
+            getattr(self.config, "status_include_position", False)
+        )
+        payload: dict[str, int | bool | None] = {
             "motion": int(
                 self._read_register_locked(
                     slave,
@@ -404,14 +465,7 @@ class AxisDriverBackend(BaseAntennaBackend):
                     context=f"status_motion_slave_{slave}",
                 )
             ),
-            "raw_position": int(
-                self._read_register_locked(
-                    slave,
-                    RAW_POSITION_REGISTER,
-                    background=background,
-                    context=f"status_position_slave_{slave}",
-                )
-            ),
+            "raw_position": None,
             "endstop": int(
                 self._read_register_locked(
                     slave,
@@ -436,10 +490,31 @@ class AxisDriverBackend(BaseAntennaBackend):
                     context=f"status_alarm_slave_{slave}",
                 )
             ),
+            "includes_position": includes_position,
         }
+        if includes_position:
+            payload["raw_position"] = int(
+                self._read_register_locked(
+                    slave,
+                    RAW_POSITION_REGISTER,
+                    background=background,
+                    context=f"status_position_slave_{slave}",
+                )
+            )
+        return payload
 
-    async def _read_status_single_async(self, slave: int, *, background: bool) -> dict[str, int]:
-        return {
+    async def _read_status_single_async(
+        self,
+        slave: int,
+        *,
+        background: bool,
+        mode: str | None = None,
+    ) -> dict[str, int | bool | None]:
+        selected_mode = str(mode or self._status_read_mode()).strip().lower()
+        includes_position = selected_mode != self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER or bool(
+            getattr(self.config, "status_include_position", False)
+        )
+        payload: dict[str, int | bool | None] = {
             "motion": int(
                 await self._read_register(
                     slave,
@@ -448,14 +523,7 @@ class AxisDriverBackend(BaseAntennaBackend):
                     context=f"status_motion_slave_{slave}",
                 )
             ),
-            "raw_position": int(
-                await self._read_register(
-                    slave,
-                    RAW_POSITION_REGISTER,
-                    background=background,
-                    context=f"status_position_slave_{slave}",
-                )
-            ),
+            "raw_position": None,
             "endstop": int(
                 await self._read_register(
                     slave,
@@ -480,7 +548,18 @@ class AxisDriverBackend(BaseAntennaBackend):
                     context=f"status_alarm_slave_{slave}",
                 )
             ),
+            "includes_position": includes_position,
         }
+        if includes_position:
+            payload["raw_position"] = int(
+                await self._read_register(
+                    slave,
+                    RAW_POSITION_REGISTER,
+                    background=background,
+                    context=f"status_position_slave_{slave}",
+                )
+            )
+        return payload
 
     async def _write_register(self, slave: int, register: int, value: int) -> tuple[int, int]:
         await self._ensure_async_primitives()
@@ -512,13 +591,55 @@ class AxisDriverBackend(BaseAntennaBackend):
         )
 
     async def _write_axis_speed(self, slave: int, speed: float) -> None:
-        speed_value = int(max(0, round(float(speed))))
-        await self._write_register(slave, SPEED_REGISTER, speed_value)
-        await self._write_register(slave, COMMAND_TRIGGER_REGISTER, 1)
+        await self._apply_axis_state(slave, speed=speed)
 
     async def _write_motion(self, slave: int, motion_value: int) -> None:
-        await self._write_register(slave, COMMAND_REGISTER, motion_value)
-        await self._write_register(slave, COMMAND_TRIGGER_REGISTER, 1)
+        await self._apply_axis_state(slave, motion=motion_value)
+
+    async def _apply_axis_state(
+        self,
+        slave: int,
+        *,
+        motion: int | None = None,
+        speed: float | None = None,
+        cancel_reinforce: bool = True,
+        force_trigger: bool = False,
+    ) -> None:
+        await self._ensure_async_primitives()
+        if motion is not None and cancel_reinforce:
+            self._cancel_stop_reinforcement(slave)
+        self._mark_command_priority()
+        try:
+            async with self._io_lock:
+                self._apply_axis_state_locked(slave, motion=motion, speed=speed, force_trigger=force_trigger)
+        finally:
+            self._release_command_priority()
+
+    def _apply_axis_state_locked(
+        self,
+        slave: int,
+        *,
+        motion: int | None = None,
+        speed: float | None = None,
+        force_trigger: bool = False,
+    ) -> None:
+        desired_motion = int(self._axis_motion_state.get(slave, MOTION_STOP) if motion is None else motion)
+        current_speed = self._axis_speed_state.get(slave)
+        desired_speed = current_speed
+        if speed is not None:
+            desired_speed = int(max(0, round(float(speed))))
+
+        speed_changed = desired_speed is not None and desired_speed != current_speed
+        motion_changed = desired_motion != self._axis_motion_state.get(slave, MOTION_STOP)
+
+        if speed_changed:
+            self._write_register_locked(slave, SPEED_REGISTER, int(desired_speed))
+        if speed_changed or motion_changed or force_trigger:
+            self._write_register_locked(slave, COMMAND_REGISTER, int(desired_motion))
+            self._write_register_locked(slave, COMMAND_TRIGGER_REGISTER, 1)
+
+        self._axis_motion_state[slave] = int(desired_motion)
+        self._axis_speed_state[slave] = desired_speed
 
     def _exchange_and_parse(
         self,
@@ -533,11 +654,12 @@ class AxisDriverBackend(BaseAntennaBackend):
     ):
         started = time.monotonic()
         try:
+            self._wait_inter_request_gap_locked()
             reset_input = getattr(self.serial_port, "reset_input_buffer", None)
             if callable(reset_input):
                 reset_input()
             self.serial_port.write(request)
-            deadline = time.monotonic() + max(float(timeout_s), float(getattr(self.config, "serial_timeout_s", 0.15)))
+            deadline = time.monotonic() + max(0.0, float(timeout_s))
             max_frame_length = max(int(length) for length in candidate_lengths)
             max_buffer_length = len(request) + max_frame_length
             buffer = b""
@@ -550,10 +672,13 @@ class AxisDriverBackend(BaseAntennaBackend):
                     buffer += chunk
                 parsed, last_error = self._scan_for_valid_frame(buffer, candidate_lengths, parser)
                 if parsed is not None:
+                    self._last_request_completed_monotonic = time.monotonic()
                     self._record_modbus_success(func_code, latency_s=max(0.0, time.monotonic() - started))
                     return parsed
                 if not chunk:
-                    break
+                    remaining_time_s = deadline - time.monotonic()
+                    if remaining_time_s > 0:
+                        time.sleep(min(0.002, remaining_time_s))
 
             raw = buffer.hex(" ") if buffer else "<empty>"
             if last_error is not None:
@@ -562,6 +687,7 @@ class AxisDriverBackend(BaseAntennaBackend):
                 f"Expected valid Modbus response ({candidate_lengths}), got {len(buffer)} bytes | raw={raw}"
             )
         except Exception as exc:
+            self._last_request_completed_monotonic = time.monotonic()
             self._record_modbus_failure(
                 func_code,
                 exc,
@@ -592,6 +718,15 @@ class AxisDriverBackend(BaseAntennaBackend):
     def _ensure_serial_open(self) -> None:
         if not self.is_connected():
             raise ConnectionError("AxisDriver serial port is not open")
+
+    def _wait_inter_request_gap_locked(self) -> None:
+        gap_s = max(0.0, float(getattr(self.config, "inter_request_gap_s", 0.0)))
+        if gap_s <= 0.0:
+            return
+        elapsed_s = time.monotonic() - float(self._last_request_completed_monotonic)
+        remaining_s = gap_s - elapsed_s
+        if remaining_s > 0.0:
+            time.sleep(remaining_s)
 
     def _request_timeout(self, *, background: bool) -> float:
         if not background:
@@ -646,9 +781,15 @@ class AxisDriverBackend(BaseAntennaBackend):
         return True
 
     def _status_read_mode(self) -> str:
-        mode = str(getattr(self.config, "status_read_mode", self.STATUS_READ_MODE_SINGLE_REGISTER)).strip().lower()
-        if mode not in {self.STATUS_READ_MODE_BLOCK, self.STATUS_READ_MODE_SINGLE_REGISTER}:
-            return self.STATUS_READ_MODE_SINGLE_REGISTER
+        mode = str(
+            getattr(self.config, "status_read_mode", self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER)
+        ).strip().lower()
+        if mode not in {
+            self.STATUS_READ_MODE_BLOCK,
+            self.STATUS_READ_MODE_SINGLE_REGISTER,
+            self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER,
+        }:
+            return self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER
         return mode
 
     def _record_modbus_success(self, func_code: int, *, latency_s: float) -> None:
@@ -785,12 +926,28 @@ class AxisDriverBackend(BaseAntennaBackend):
         )
 
     def _log_startup_config(self) -> None:
-        effective_position_interval = max(0.05, float(self.config.position_interval_s))
-        effective_status_interval = max(0.1, float(self.config.status_interval_s))
+        requested_position_interval = float(self.config.position_interval_s)
+        requested_status_interval = float(self.config.status_interval_s)
+        effective_position_interval = max(0.10, requested_position_interval)
+        effective_status_interval = max(0.5, requested_status_interval)
+        if requested_position_interval < 0.10:
+            self.logger.warning(
+                "AxisDriver position interval %.3fs is too fast for current firmware; clamped to %.3fs",
+                requested_position_interval,
+                effective_position_interval,
+            )
+        if requested_status_interval < 0.5:
+            self.logger.warning(
+                "AxisDriver status interval %.3fs is too fast for current firmware; clamped to %.3fs",
+                requested_status_interval,
+                effective_status_interval,
+            )
         self.logger.info(
             "AxisDriver startup: mode=axis_driver port=%s baudrate=%s az_slave=%s el_slave=%s "
             "serial_timeout_s=%.3f command_timeout_s=%.3f position_interval_s=%.3f "
-            "status_interval_s=%.3f health_interval_s=%.3f status_read_mode=%s",
+            "status_interval_s=%.3f health_interval_s=%.3f status_read_mode=%s "
+            "status_include_position=%s inter_request_gap_s=%.3f move_refresh_mode=%s "
+            "move_refresh_interval_s=%.3f stop_reinforce_enabled=%s stop_reinforce_delay_s=%.3f",
             self.config.comport,
             self.config.baudrate,
             self.config.az_slave_address,
@@ -801,6 +958,12 @@ class AxisDriverBackend(BaseAntennaBackend):
             effective_status_interval,
             float(self.config.health_interval_s),
             self._status_read_mode(),
+            bool(getattr(self.config, "status_include_position", False)),
+            float(getattr(self.config, "inter_request_gap_s", 0.0)),
+            str(getattr(self.config, "move_refresh_mode", "edge_only")).strip().lower(),
+            float(getattr(self.config, "move_refresh_interval_s", 0.0)),
+            bool(getattr(self.config, "stop_reinforce_enabled", True)),
+            float(getattr(self.config, "stop_reinforce_delay_s", 0.12)),
         )
 
     @staticmethod
@@ -817,6 +980,44 @@ class AxisDriverBackend(BaseAntennaBackend):
             "modbus_az": None,
             "modbus_el": None,
         }
+
+    def _cancel_stop_reinforcement(self, slave: int) -> None:
+        task = self._stop_reinforce_tasks.pop(int(slave), None)
+        if task is not None and not task.done():
+            task.cancel()
+            self._stop_reinforce_canceled += 1
+
+    def _cancel_all_stop_reinforcements(self) -> None:
+        for slave in list(self._stop_reinforce_tasks):
+            self._cancel_stop_reinforcement(slave)
+
+    def _schedule_stop_reinforcement(self, slave: int) -> None:
+        if not bool(getattr(self.config, "stop_reinforce_enabled", True)):
+            return
+        if int(getattr(self.config, "stop_reinforce_count", 1)) <= 0:
+            return
+        self._cancel_stop_reinforcement(slave)
+        if self._async_loop is None:
+            return
+        self._stop_reinforce_scheduled += 1
+        task = self._async_loop.create_task(self._stop_reinforce_task(int(slave)))
+        self._stop_reinforce_tasks[int(slave)] = task
+
+    async def _stop_reinforce_task(self, slave: int) -> None:
+        try:
+            await asyncio.sleep(max(0.0, float(getattr(self.config, "stop_reinforce_delay_s", 0.12))))
+            if self._axis_motion_state.get(slave, MOTION_STOP) != MOTION_STOP:
+                self._stop_reinforce_canceled += 1
+                return
+            await self._apply_axis_state(slave, motion=MOTION_STOP, cancel_reinforce=False, force_trigger=True)
+            self._stop_reinforce_sent += 1
+            self.logger.debug("AxisDriver STOP reinforcement sent for slave=%s", slave)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.debug("AxisDriver STOP reinforcement failed for slave=%s: %s", slave, exc)
+        finally:
+            self._stop_reinforce_tasks.pop(slave, None)
 
     def get_diagnostics_snapshot(self) -> dict:
         latency_avg = (
@@ -835,12 +1036,21 @@ class AxisDriverBackend(BaseAntennaBackend):
             else None
         )
         return {
-            "configured_position_interval_s": max(0.05, float(self.config.position_interval_s)),
-            "configured_status_interval_s": max(0.1, float(self.config.status_interval_s)),
+            "configured_position_interval_s": max(0.10, float(self.config.position_interval_s)),
+            "configured_status_interval_s": max(0.5, float(self.config.status_interval_s)),
             "position_last_update_monotonic_s": self._position_last_update_monotonic,
             "status_last_update_monotonic_s": self._status_last_update_monotonic,
             "backend_state": self.state.value if hasattr(self.state, "value") else str(self.state),
             "last_error": self.last_error,
+            "status_read_mode": self._status_read_mode(),
+            "status_include_position": bool(getattr(self.config, "status_include_position", False)),
+            "modbus_inter_request_gap_s": float(getattr(self.config, "inter_request_gap_s", 0.0)),
+            "background_position_skips": self._background_position_skips,
+            "background_status_skips": self._background_status_skips,
+            "stop_reinforce_enabled": bool(getattr(self.config, "stop_reinforce_enabled", True)),
+            "stop_reinforce_scheduled": self._stop_reinforce_scheduled,
+            "stop_reinforce_sent": self._stop_reinforce_sent,
+            "stop_reinforce_canceled": self._stop_reinforce_canceled,
             "modbus_requests": self._diag_total_requests,
             "modbus_fc03": self._diag_total_fc03,
             "modbus_fc06": self._diag_total_fc06,
@@ -864,6 +1074,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         }
 
     def _close_serial(self) -> None:
+        self._cancel_all_stop_reinforcements()
         if self.serial_port is None:
             return
         try:
