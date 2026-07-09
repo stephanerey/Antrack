@@ -6,7 +6,7 @@ import pytest
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.types import AntennaConnectionState
 from antrack.core.axis.axis_driver_backend import AxisDriverBackend
-from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, MOTION_STATE_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
+from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, ENDSTOP_REGISTER, MOTION_STATE_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
 from antrack.core.axis.modbus_rtu import append_crc, build_fc03_request, build_fc06_request
 
 
@@ -301,20 +301,51 @@ def test_axis_driver_background_status_poll_skips_while_motion_active():
     backend.axis_status["azimuth"] = "CW"
     payload = asyncio.run(backend.poll_status())
 
-    assert payload == backend._last_status_payload
-    assert fake_serial.writes == []
+    assert payload["endstop_az"] == 1
+    assert build_fc03_request(10, ENDSTOP_REGISTER, 1) in fake_serial.writes
+    assert build_fc03_request(10, RAW_POSITION_REGISTER, 1) not in fake_serial.writes
 
 
-def test_axis_driver_background_position_poll_is_deferred_by_command_priority():
+def test_axis_driver_background_position_poll_continues_during_motion_priority_window():
     backend, fake_serial = _backend_and_serial()
     asyncio.run(backend.connect())
     fake_serial.writes.clear()
 
+    backend.axis_status["azimuth"] = "CW"
     backend._command_priority_until_monotonic = time.monotonic() + 1.0
 
     payload = asyncio.run(backend.poll_position())
 
+    assert payload[0] is not None
+    assert payload[1] is not None
+    assert build_fc03_request(10, RAW_POSITION_REGISTER, 1) in fake_serial.writes
+    assert build_fc03_request(20, RAW_POSITION_REGISTER, 1) in fake_serial.writes
+
+
+def test_axis_driver_background_position_poll_defer_only_while_command_active_when_enabled():
+    backend, fake_serial = _backend_and_serial()
+    backend.config.background_position_defer_commands = True
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    backend._command_pending_count = 1
+
+    payload = asyncio.run(backend.poll_position())
+
     assert payload == (backend.telemetry.az, backend.telemetry.el)
+    assert fake_serial.writes == []
+
+
+def test_axis_driver_background_status_poll_defer_only_while_command_active():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    backend._command_pending_count = 1
+
+    payload = asyncio.run(backend.poll_status())
+
+    assert payload == backend._last_status_payload
     assert fake_serial.writes == []
 
 

@@ -6,6 +6,7 @@ import logging
 import time
 from typing import Optional
 
+from antrack.core.antenna.types import AntennaConnectionMode
 from antrack.core.axis.axis_client import AxisStatus
 from antrack.tracking.motion_constraints import (
     constrained_azimuth_error,
@@ -36,6 +37,25 @@ class PositioningController:
         self._last_el_cmd_ts = 0.0
         self._last_target_command = (None, None)
         self._last_target_command_ts = 0.0
+
+    def _is_axis_driver_mode(self) -> bool:
+        getter = getattr(self.axis_client_qt, "current_mode", None)
+        if not callable(getter):
+            return False
+        try:
+            mode = getter()
+        except Exception:
+            return False
+        return str(getattr(mode, "value", mode)).strip().lower() == AntennaConnectionMode.AXIS_DRIVER.value
+
+    @staticmethod
+    def _endstop_active(value) -> bool:
+        return isinstance(value, (int, float)) and int(value) != 0
+
+    def _axis_is_moving(self, axis: str) -> bool:
+        if axis == "azimuth":
+            return str(self._last_az_cmd).upper() != "STOP"
+        return str(self._last_el_cmd).upper() != "STOP"
 
     def _refresh_runtime_tuning(self) -> None:
         self._move_refresh_interval = configured_move_refresh_interval(
@@ -129,6 +149,10 @@ class PositioningController:
             el_cur = getattr(getattr(self.axis_client_qt, "antenna", None), "el", None)
             az_set = getattr(self.tracked_object, "az_set", None)
             el_set = getattr(self.tracked_object, "el_set", None)
+            antenna_state = getattr(self.axis_client_qt, "antenna", None)
+            last_update = getattr(antenna_state, "last_update_monotonic", None)
+            telemetry_age_s = None if last_update is None else max(0.0, time.monotonic() - float(last_update))
+            axis_driver_mode = self._is_axis_driver_mode()
 
             if not isinstance(az_set, (int, float)) or not isinstance(el_set, (int, float)):
                 time.sleep(interval)
@@ -155,6 +179,25 @@ class PositioningController:
                 worker = self.thread_manager.get_worker(self._thread_name)
                 continue
 
+            polling_intervals = getattr(self.axis_client_qt, "polling_intervals", (None, None))
+            position_interval_s = polling_intervals[0] if isinstance(polling_intervals, tuple) else None
+            stale_threshold_s = max(0.5, 3.0 * float(position_interval_s)) if isinstance(position_interval_s, (int, float)) else max(0.5, 3.0 * float(interval))
+            if (
+                axis_driver_mode
+                and telemetry_age_s is not None
+                and telemetry_age_s > stale_threshold_s
+                and (self._axis_is_moving("azimuth") or self._axis_is_moving("elevation"))
+            ):
+                log.warning(
+                    "AxisDriver safety stop: stale position telemetry while moving (age=%.3fs threshold=%.3fs)",
+                    telemetry_age_s,
+                    stale_threshold_s,
+                )
+                self._stop_motors(force=False)
+                time.sleep(interval)
+                worker = self.thread_manager.get_worker(self._thread_name)
+                continue
+
             az_route_error = constrained_azimuth_error(az_cur, az_set, az_forbidden)
             el_route_error = constrained_elevation_error(el_cur, el_set, el_forbidden)
             az_blocked = az_route_error is None
@@ -165,6 +208,23 @@ class PositioningController:
 
             need_az = (not az_blocked) and abs(self.tracked_object.az_error) > az_err_th
             need_el = (not el_blocked) and abs(self.tracked_object.el_error) > el_err_th
+
+            endstop_az = getattr(antenna_state, "endstop_az", None)
+            endstop_el = getattr(antenna_state, "endstop_el", None)
+            if axis_driver_mode and self._endstop_active(endstop_az) and self._axis_is_moving("azimuth"):
+                log.warning("AxisDriver endstop active while moving: stopping AZ")
+                self.axis_client_qt.stop_az()
+                self.axis_client_qt.axis_status["azimuth"] = AxisStatus.MOTION_AZ_STOP
+                self._last_az_cmd = "STOP"
+                self._last_az_cmd_ts = time.monotonic()
+                need_az = False
+            if axis_driver_mode and self._endstop_active(endstop_el) and self._axis_is_moving("elevation"):
+                log.warning("AxisDriver endstop active while moving: stopping EL")
+                self.axis_client_qt.stop_el()
+                self.axis_client_qt.axis_status["elevation"] = AxisStatus.MOTION_EL_STOP
+                self._last_el_cmd = "STOP"
+                self._last_el_cmd_ts = time.monotonic()
+                need_el = False
 
             if az_blocked or el_blocked:
                 stable_cycles = 0

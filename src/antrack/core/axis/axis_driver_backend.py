@@ -57,7 +57,6 @@ class AxisDriverBackend(BaseAntennaBackend):
     _BACKGROUND_DEFER_STEP_S = 0.005
     _BACKGROUND_DEFER_MAX_S = 0.05
     _COMMAND_PRIORITY_WINDOW_S = 0.15
-    _MOTION_STATUS_MIN_INTERVAL_S = 1.0
 
     def __init__(
         self,
@@ -112,6 +111,12 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._command_priority_until_monotonic = 0.0
         self._background_position_skips = 0
         self._background_status_skips = 0
+        self._background_position_skip_reason: str | None = None
+        self._background_status_skip_reason: str | None = None
+        self._position_poll_started_monotonic: float | None = None
+        self._position_poll_finished_monotonic: float | None = None
+        self._safety_status_poll_started_monotonic: float | None = None
+        self._safety_status_poll_finished_monotonic: float | None = None
         self._last_request_completed_monotonic = 0.0
         self._axis_motion_state = {
             self.config.az_slave_address: MOTION_STOP,
@@ -176,6 +181,9 @@ class AxisDriverBackend(BaseAntennaBackend):
             return await self._get_position(background=True)
         except _BackgroundPollDeferred:
             self._background_position_skips += 1
+            self._background_position_skip_reason = "active_command"
+            if self._motion_active():
+                self.logger.warning("AxisDriver position poll skipped during active motion: reason=active_command")
             return self.telemetry.az, self.telemetry.el
         except Exception as exc:
             self.logger.warning("AxisDriver background position poll failed: %s", exc)
@@ -184,6 +192,10 @@ class AxisDriverBackend(BaseAntennaBackend):
     async def poll_status(self) -> dict:
         try:
             return await self._get_status(background=True)
+        except _BackgroundPollDeferred:
+            self._background_status_skips += 1
+            self._background_status_skip_reason = "active_command"
+            return dict(self._last_status_payload)
         except Exception as exc:
             self.logger.warning("AxisDriver background status poll failed: %s", exc)
             return dict(self._last_status_payload)
@@ -249,19 +261,23 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _get_position(self, *, background: bool) -> tuple[float | None, float | None]:
         await self._ensure_async_primitives()
+        position_poll_started = time.monotonic()
+        self._position_poll_started_monotonic = position_poll_started
         az_raw = await self._read_register(
             self.config.az_slave_address,
             RAW_POSITION_REGISTER,
             background=background,
             context="az_position",
-            defer_background=bool(getattr(self.config, "background_position_defer_commands", True)),
+            defer_background=bool(getattr(self.config, "background_position_defer_commands", False)),
+            defer_kind="position",
         )
         el_raw = await self._read_register(
             self.config.el_slave_address,
             RAW_POSITION_REGISTER,
             background=background,
             context="el_position",
-            defer_background=bool(getattr(self.config, "background_position_defer_commands", True)),
+            defer_background=bool(getattr(self.config, "background_position_defer_commands", False)),
+            defer_kind="position",
         )
         self.telemetry.az_raw = az_raw
         self.telemetry.el_raw = el_raw
@@ -271,6 +287,8 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._record_update_interval(kind="position", previous_monotonic=self._position_last_update_monotonic, now_monotonic=now_monotonic)
         self.telemetry.last_update_monotonic = now_monotonic
         self._position_last_update_monotonic = now_monotonic
+        self._position_poll_finished_monotonic = now_monotonic
+        self._background_position_skip_reason = None
         return self.telemetry.az, self.telemetry.el
 
     async def get_status(self) -> dict:
@@ -278,9 +296,9 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     async def _get_status(self, *, background: bool) -> dict:
         await self._ensure_async_primitives()
-        if background and not await self._await_background_slot("status"):
-            self._background_status_skips += 1
-            return dict(self._last_status_payload)
+        self._safety_status_poll_started_monotonic = time.monotonic()
+        if background and not await self._await_background_slot("safety_status"):
+            raise _BackgroundPollDeferred("Background safety status deferred for active command")
         status_mode = self._status_read_mode()
         if background and status_mode in {
             self.STATUS_READ_MODE_SINGLE_REGISTER,
@@ -321,8 +339,8 @@ class AxisDriverBackend(BaseAntennaBackend):
         el_motion = el_status["motion"]
         endstop_az = az_status["endstop"]
         endstop_el = el_status["endstop"]
-        index_az = az_status["index"]
-        index_el = el_status["index"]
+        index_az = az_status.get("index")
+        index_el = el_status.get("index")
         alarm_az = az_status["alarm"]
         alarm_el = el_status["alarm"]
 
@@ -346,6 +364,8 @@ class AxisDriverBackend(BaseAntennaBackend):
         if include_position:
             self.telemetry.last_update_monotonic = now_monotonic
         self._status_last_update_monotonic = now_monotonic
+        self._safety_status_poll_finished_monotonic = now_monotonic
+        self._background_status_skip_reason = None
         payload = {
             "motion_az": az_motion,
             "motion_el": el_motion,
@@ -379,9 +399,10 @@ class AxisDriverBackend(BaseAntennaBackend):
         background: bool = False,
         context: str = "fc03_read",
         defer_background: bool = True,
+        defer_kind: str = "safety_status",
     ) -> int:
         await self._ensure_async_primitives()
-        if background and defer_background and not await self._await_background_slot("status"):
+        if background and defer_background and not await self._await_background_slot(defer_kind):
             raise _BackgroundPollDeferred("Background poll deferred for pending motion command")
         async with self._io_lock:
             return self._read_register_locked(slave, register, background=background, context=context)
@@ -456,6 +477,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         includes_position = selected_mode != self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER or bool(
             getattr(self.config, "status_include_position", False)
         )
+        include_index = not (background and selected_mode == self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER)
         payload: dict[str, int | bool | None] = {
             "motion": int(
                 self._read_register_locked(
@@ -474,14 +496,7 @@ class AxisDriverBackend(BaseAntennaBackend):
                     context=f"status_endstop_slave_{slave}",
                 )
             ),
-            "index": int(
-                self._read_register_locked(
-                    slave,
-                    INDEX_REGISTER,
-                    background=background,
-                    context=f"status_index_slave_{slave}",
-                )
-            ),
+            "index": None,
             "alarm": int(
                 self._read_register_locked(
                     slave,
@@ -492,6 +507,15 @@ class AxisDriverBackend(BaseAntennaBackend):
             ),
             "includes_position": includes_position,
         }
+        if include_index:
+            payload["index"] = int(
+                self._read_register_locked(
+                    slave,
+                    INDEX_REGISTER,
+                    background=background,
+                    context=f"status_index_slave_{slave}",
+                )
+            )
         if includes_position:
             payload["raw_position"] = int(
                 self._read_register_locked(
@@ -514,6 +538,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         includes_position = selected_mode != self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER or bool(
             getattr(self.config, "status_include_position", False)
         )
+        include_index = not (background and selected_mode == self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER)
         payload: dict[str, int | bool | None] = {
             "motion": int(
                 await self._read_register(
@@ -532,14 +557,7 @@ class AxisDriverBackend(BaseAntennaBackend):
                     context=f"status_endstop_slave_{slave}",
                 )
             ),
-            "index": int(
-                await self._read_register(
-                    slave,
-                    INDEX_REGISTER,
-                    background=background,
-                    context=f"status_index_slave_{slave}",
-                )
-            ),
+            "index": None,
             "alarm": int(
                 await self._read_register(
                     slave,
@@ -550,6 +568,15 @@ class AxisDriverBackend(BaseAntennaBackend):
             ),
             "includes_position": includes_position,
         }
+        if include_index:
+            payload["index"] = int(
+                await self._read_register(
+                    slave,
+                    INDEX_REGISTER,
+                    background=background,
+                    context=f"status_index_slave_{slave}",
+                )
+            )
         if includes_position:
             payload["raw_position"] = int(
                 await self._read_register(
@@ -760,16 +787,12 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     def _should_defer_background_poll(self, kind: str) -> bool:
         now = time.monotonic()
+        if kind == "position":
+            return self._command_pending_count > 0
+        if kind == "safety_status":
+            return self._command_pending_count > 0
         if self._command_pending_count > 0 or now < self._command_priority_until_monotonic:
             return True
-        if kind == "status" and self._motion_active():
-            last_status = self._status_last_update_monotonic
-            min_interval = max(
-                float(getattr(self.config, "status_interval_s", 1.0)),
-                self._MOTION_STATUS_MIN_INTERVAL_S,
-            )
-            if last_status is not None and (now - float(last_status)) < min_interval:
-                return True
         return False
 
     async def _await_background_slot(self, kind: str) -> bool:
@@ -1047,6 +1070,22 @@ class AxisDriverBackend(BaseAntennaBackend):
             "modbus_inter_request_gap_s": float(getattr(self.config, "inter_request_gap_s", 0.0)),
             "background_position_skips": self._background_position_skips,
             "background_status_skips": self._background_status_skips,
+            "background_position_skip_reason": self._background_position_skip_reason,
+            "background_status_skip_reason": self._background_status_skip_reason,
+            "position_poll_started_s": self._position_poll_started_monotonic,
+            "position_poll_finished_s": self._position_poll_finished_monotonic,
+            "position_poll_latency_s": (
+                None
+                if self._position_poll_started_monotonic is None or self._position_poll_finished_monotonic is None
+                else max(0.0, self._position_poll_finished_monotonic - self._position_poll_started_monotonic)
+            ),
+            "safety_status_poll_started_s": self._safety_status_poll_started_monotonic,
+            "safety_status_poll_finished_s": self._safety_status_poll_finished_monotonic,
+            "safety_status_poll_latency_s": (
+                None
+                if self._safety_status_poll_started_monotonic is None or self._safety_status_poll_finished_monotonic is None
+                else max(0.0, self._safety_status_poll_finished_monotonic - self._safety_status_poll_started_monotonic)
+            ),
             "stop_reinforce_enabled": bool(getattr(self.config, "stop_reinforce_enabled", True)),
             "stop_reinforce_scheduled": self._stop_reinforce_scheduled,
             "stop_reinforce_sent": self._stop_reinforce_sent,

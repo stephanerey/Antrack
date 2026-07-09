@@ -35,7 +35,7 @@ class AxisDriverConnectionConfig:
     status_interval_s: float = 1.0
     health_interval_s: float = 2.0
     inter_request_gap_s: float = 0.005
-    background_position_defer_commands: bool = True
+    background_position_defer_commands: bool = False
     status_read_mode: str = "minimal_single_register"
     status_include_position: bool = False
     move_refresh_mode: str = "edge_only"
@@ -146,8 +146,8 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
             health_interval_s=float(_get(axis_driver_section, "health_interval_s", 2.0)),
             inter_request_gap_s=float(_get(axis_driver_section, "inter_request_gap_s", 0.005)),
             background_position_defer_commands=_as_bool(
-                _get(axis_driver_section, "background_position_defer_commands", True),
-                True,
+                _get(axis_driver_section, "background_position_defer_commands", False),
+                False,
             ),
             status_read_mode=_axis_driver_status_read_mode(
                 _get(axis_driver_section, "status_read_mode", "minimal_single_register"),

@@ -28,6 +28,7 @@ from antrack.tracking.motion_refresh import (
     should_emit_move,
     should_emit_stop,
 )
+from antrack.core.antenna.types import AntennaConnectionMode
 
 
 # --- Utilitaires simples ---
@@ -167,6 +168,25 @@ class Tracker:
         if not isinstance(self.settings, dict):
             return {}
         return self.settings.get("PERFORMANCE", self.settings.get("performance", {})) or {}
+
+    def _is_axis_driver_mode(self) -> bool:
+        getter = getattr(self.axis_client_qt, "current_mode", None)
+        if not callable(getter):
+            return False
+        try:
+            mode = getter()
+        except Exception:
+            return False
+        return str(getattr(mode, "value", mode)).strip().lower() == AntennaConnectionMode.AXIS_DRIVER.value
+
+    @staticmethod
+    def _endstop_active(value) -> bool:
+        return isinstance(value, (int, float)) and int(value) != 0
+
+    def _axis_is_moving(self, axis: str) -> bool:
+        if axis == "azimuth":
+            return str(self._last_az_cmd).upper() != "STOP"
+        return str(self._last_el_cmd).upper() != "STOP"
 
     def _effective_tracking_interval(self) -> float:
         antenna = self._antenna_settings()
@@ -506,6 +526,90 @@ class Tracker:
         el_cur = getattr(getattr(self.axis_client_qt, 'antenna', None), 'el', None)
         az_events: list[dict] = []
         el_events: list[dict] = []
+        axis_driver_mode = self._is_axis_driver_mode()
+        stale_threshold_s = max(
+            0.5,
+            3.0 * float(position_interval_s),
+        ) if isinstance(position_interval_s, (int, float)) else 0.5
+        if (
+            axis_driver_mode
+            and telemetry_age_s is not None
+            and telemetry_age_s > stale_threshold_s
+            and (self._axis_is_moving("azimuth") or self._axis_is_moving("elevation"))
+        ):
+            log.warning(
+                "AxisDriver safety stop: stale position telemetry while moving (age=%.3fs threshold=%.3fs)",
+                telemetry_age_s,
+                stale_threshold_s,
+            )
+            stop_events = self._stop_motors(force=False)
+            az_events.extend(
+                stop_events["AZ"] or [{
+                    "decision": "STALE_TELEMETRY_STOP",
+                    "command_to_send": "stop_az",
+                    "command_reason": "AxisDriver stale position telemetry while moving",
+                    "speed_requested": None,
+                    "command_record": None,
+                }]
+            )
+            el_events.extend(
+                stop_events["EL"] or [{
+                    "decision": "STALE_TELEMETRY_STOP",
+                    "command_to_send": "stop_el",
+                    "command_reason": "AxisDriver stale position telemetry while moving",
+                    "speed_requested": None,
+                    "command_record": None,
+                }]
+            )
+            if self._tracking_diag_enabled:
+                backend_snapshot = self._backend_snapshot()
+                self._emit_diag_rows([
+                    self._axis_diag_row(
+                        axis="AZ",
+                        step_started=step_started,
+                        loop_dt_s=loop_dt_s,
+                        expected_loop_interval_s=expected_loop_interval_s,
+                        telemetry_age_s=telemetry_age_s,
+                        target_deg=self._safe_float(self.tracked_object.az_set),
+                        actual_deg=self._safe_float(az_cur),
+                        error_deg=None,
+                        threshold_deg=az_err_th,
+                        approach_deg=approach_deg,
+                        close_deg=close_deg,
+                        current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("azimuth"),
+                        last_axis_command=self._last_az_cmd,
+                        decision=az_events[0]["decision"],
+                        command_to_send=az_events[0]["command_to_send"],
+                        command_reason=az_events[0]["command_reason"],
+                        speed_requested=None,
+                        command_record=az_events[0]["command_record"],
+                        backend_snapshot=backend_snapshot,
+                        worker_abort=worker_abort,
+                    ),
+                    self._axis_diag_row(
+                        axis="EL",
+                        step_started=step_started,
+                        loop_dt_s=loop_dt_s,
+                        expected_loop_interval_s=expected_loop_interval_s,
+                        telemetry_age_s=telemetry_age_s,
+                        target_deg=self._safe_float(self.tracked_object.el_set),
+                        actual_deg=self._safe_float(el_cur),
+                        error_deg=None,
+                        threshold_deg=el_err_th,
+                        approach_deg=approach_deg,
+                        close_deg=close_deg,
+                        current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("elevation"),
+                        last_axis_command=self._last_el_cmd,
+                        decision=el_events[0]["decision"],
+                        command_to_send=el_events[0]["command_to_send"],
+                        command_reason=el_events[0]["command_reason"],
+                        speed_requested=None,
+                        command_record=el_events[0]["command_record"],
+                        backend_snapshot=backend_snapshot,
+                        worker_abort=worker_abort,
+                    ),
+                ])
+            return
 
         if self.tracked_object.az_set is None or self.tracked_object.el_set is None:
             self._none_set_streak += 1
@@ -773,6 +877,41 @@ class Tracker:
 
         need_az = (not az_blocked) and abs(self.tracked_object.az_error) > az_err_th
         need_el = (not el_blocked) and abs(self.tracked_object.el_error) > el_err_th
+
+        endstop_az = getattr(getattr(self.axis_client_qt, "antenna", None), "endstop_az", None)
+        endstop_el = getattr(getattr(self.axis_client_qt, "antenna", None), "endstop_el", None)
+        if axis_driver_mode and self._endstop_active(endstop_az) and self._axis_is_moving("azimuth"):
+            log.warning("AxisDriver endstop active while moving: stopping AZ")
+            _result, command_record = self._record_command("stop_az", self.axis_client_qt.stop_az)
+            self.axis_client_qt.axis_status['azimuth'] = AxisStatus.MOTION_AZ_STOP
+            self._last_az_cmd = "STOP"
+            self._last_az_cmd_ts = time.monotonic()
+            az_events.append(
+                {
+                    "decision": "ENDSTOP_STOP",
+                    "command_to_send": "stop_az",
+                    "command_reason": "AxisDriver endstop active while moving",
+                    "speed_requested": None,
+                    "command_record": command_record,
+                }
+            )
+            need_az = False
+        if axis_driver_mode and self._endstop_active(endstop_el) and self._axis_is_moving("elevation"):
+            log.warning("AxisDriver endstop active while moving: stopping EL")
+            _result, command_record = self._record_command("stop_el", self.axis_client_qt.stop_el)
+            self.axis_client_qt.axis_status['elevation'] = AxisStatus.MOTION_EL_STOP
+            self._last_el_cmd = "STOP"
+            self._last_el_cmd_ts = time.monotonic()
+            el_events.append(
+                {
+                    "decision": "ENDSTOP_STOP",
+                    "command_to_send": "stop_el",
+                    "command_reason": "AxisDriver endstop active while moving",
+                    "speed_requested": None,
+                    "command_record": command_record,
+                }
+            )
+            need_el = False
 
         if self._kickstart_pending or self._must_apply_speeds:
             prime_events = self._prime_motion(
