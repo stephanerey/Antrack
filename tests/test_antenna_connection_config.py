@@ -25,6 +25,7 @@ def test_axis_driver_settings_are_parsed():
                 "status_include_position": False,
                 "move_refresh_mode": "edge_only",
                 "move_refresh_interval_s": 0.0,
+                "speed_readback_enabled": True,
             },
         }
     )
@@ -38,6 +39,7 @@ def test_axis_driver_settings_are_parsed():
     assert config.axis_driver.status_include_position is False
     assert config.axis_driver.move_refresh_mode == "edge_only"
     assert config.axis_driver.move_refresh_interval_s == 0.0
+    assert config.axis_driver.speed_readback_enabled is True
 
 
 def test_invalid_axis_driver_status_read_mode_raises_config_error():

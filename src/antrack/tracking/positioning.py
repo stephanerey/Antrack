@@ -109,17 +109,19 @@ class PositioningController:
         az_err_th = float(
             ant.get(
                 "positioning_az_error_threshold",
-                ant.get("az_error_threshold", 0.05),
+                ant.get("az_tracking_error_threshold", ant.get("az_error_threshold", 0.05)),
             )
         )
         el_err_th = float(
             ant.get(
                 "positioning_el_error_threshold",
-                ant.get("el_error_threshold", 0.05),
+                ant.get("el_tracking_error_threshold", ant.get("el_error_threshold", 0.05)),
             )
         )
-        approach_deg = float(ant.get("approach_tracking_degrees", 5))
-        close_deg = float(ant.get("close_tracking_degrees", 1))
+        az_approach_deg = float(ant.get("az_approach_error_threshold", ant.get("approach_tracking_degrees", 10)))
+        el_approach_deg = float(ant.get("el_approach_error_threshold", ant.get("approach_tracking_degrees", 10)))
+        az_close_deg = float(ant.get("az_close_error_threshold", ant.get("close_tracking_degrees", 2)))
+        el_close_deg = float(ant.get("el_close_error_threshold", ant.get("close_tracking_degrees", 2)))
         min_move_duration = float(ant.get("min_move_duration", 0.1))
         stable_cycles_required = max(2, int(ant.get("positioning_stable_cycles", 3)))
 
@@ -249,8 +251,10 @@ class PositioningController:
                     el_error=self.tracked_object.el_error,
                     need_az=need_az,
                     need_el=need_el,
-                    approach_deg=approach_deg,
-                    close_deg=close_deg,
+                    az_approach_deg=az_approach_deg,
+                    az_close_deg=az_close_deg,
+                    el_approach_deg=el_approach_deg,
+                    el_close_deg=el_close_deg,
                     az_speed_far=az_speed_far,
                     az_speed_approach=az_speed_approach,
                     az_speed_close=az_speed_close,
@@ -272,8 +276,10 @@ class PositioningController:
         el_error: float,
         need_az: bool,
         need_el: bool,
-        approach_deg: float,
-        close_deg: float,
+        az_approach_deg: float,
+        az_close_deg: float,
+        el_approach_deg: float,
+        el_close_deg: float,
         az_speed_far: float,
         az_speed_approach: float,
         az_speed_close: float,
@@ -284,9 +290,9 @@ class PositioningController:
         now_ts = time.monotonic()
 
         try:
-            if abs(az_error) > approach_deg:
+            if abs(az_error) > az_approach_deg:
                 rate_az = az_speed_far
-            elif abs(az_error) > close_deg:
+            elif abs(az_error) > az_close_deg:
                 rate_az = az_speed_approach
             else:
                 rate_az = az_speed_close
@@ -297,9 +303,9 @@ class PositioningController:
             pass
 
         try:
-            if abs(el_error) > approach_deg:
+            if abs(el_error) > el_approach_deg:
                 rate_el = el_speed_far
-            elif abs(el_error) > close_deg:
+            elif abs(el_error) > el_close_deg:
                 rate_el = el_speed_approach
             else:
                 rate_el = el_speed_close

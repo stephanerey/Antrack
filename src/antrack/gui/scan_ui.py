@@ -1113,12 +1113,22 @@ EL +1  o--o--o--o--o
         config = dict(config or {})
         tracking_relative = self._scan_uses_tracking_relative(config)
         antenna = self.settings.get("ANTENNA", self.settings.get("antenna", {})) if isinstance(self.settings, dict) else {}
-        az_err_th = float(antenna.get("positioning_az_error_threshold", antenna.get("az_error_threshold", 0.05)))
-        el_err_th = float(antenna.get("positioning_el_error_threshold", antenna.get("el_error_threshold", 0.05)))
+        az_err_th = float(
+            antenna.get(
+                "positioning_az_error_threshold",
+                antenna.get("az_tracking_error_threshold", antenna.get("az_error_threshold", 0.05)),
+            )
+        )
+        el_err_th = float(
+            antenna.get(
+                "positioning_el_error_threshold",
+                antenna.get("el_tracking_error_threshold", antenna.get("el_error_threshold", 0.05)),
+            )
+        )
         stable_cycles_required = max(2, int(antenna.get("positioning_stable_cycles", 3)))
         if tracking_relative:
-            az_err_th = float(antenna.get("az_error_threshold", az_err_th))
-            el_err_th = float(antenna.get("el_error_threshold", el_err_th))
+            az_err_th = float(antenna.get("az_tracking_error_threshold", antenna.get("az_error_threshold", az_err_th)))
+            el_err_th = float(antenna.get("el_tracking_error_threshold", antenna.get("el_error_threshold", el_err_th)))
             stable_cycles_required = max(2, int(antenna.get("positioning_stable_cycles", 3)))
         az_forbidden = parse_forbidden_ranges(antenna.get("az_forbidden_ranges"), default=[(45.0, 90.0), (270.0, 300.0)])
         el_forbidden = parse_forbidden_ranges(antenna.get("el_forbidden_ranges"), default=[(-10.0, 0.0), (95.0, 100.0)])

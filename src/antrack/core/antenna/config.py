@@ -44,6 +44,7 @@ class AxisDriverConnectionConfig:
     stop_reinforce_delay_s: float = 0.12
     stop_reinforce_count: int = 1
     legacy_accept_short_fc6_response: bool = True
+    speed_readback_enabled: bool = False
 
 
 @dataclass
@@ -171,6 +172,10 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
             legacy_accept_short_fc6_response=_as_bool(
                 _get(axis_driver_section, "legacy_accept_short_fc6_response", True),
                 True,
+            ),
+            speed_readback_enabled=_as_bool(
+                _get(axis_driver_section, "speed_readback_enabled", False),
+                False,
             ),
         ),
         pst_rotator=PstRotatorConnectionConfig(

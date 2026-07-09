@@ -79,17 +79,57 @@ def _tracked_object():
     return tracked
 
 
+def _tracking_settings():
+    return {
+        "ANTENNA": {
+            "az_tracking_error_threshold": 0.05,
+            "el_tracking_error_threshold": 0.05,
+            "az_approach_error_threshold": 5,
+            "el_approach_error_threshold": 5,
+            "az_close_error_threshold": 1,
+            "el_close_error_threshold": 1,
+            "az_speed_far_tracking": 500,
+            "az_speed_approach_tracking": 100,
+            "az_speed_close_tracking": 10,
+            "el_speed_far_tracking": 500,
+            "el_speed_approach_tracking": 100,
+            "el_speed_close_tracking": 10,
+            "az_forbidden_ranges": "",
+            "el_forbidden_ranges": "",
+        }
+    }
+
+
 def test_tracker_axis_driver_stale_telemetry_safety_stop():
     client = AxisDriverClient()
-    client.antenna.last_update_monotonic = time.monotonic() - 1.0
+    client.antenna.last_update_monotonic = time.monotonic() - 2.0
+    client.axis_status["azimuth"] = "CW"
+    client.axis_status["elevation"] = "UP"
     tracker = Tracker(client, settings={}, thread_manager=DummyThreadManager(), tracked_object=_tracked_object())
     tracker._last_az_cmd = "CW"
     tracker._last_el_cmd = "UP"
+    tracker._stop_motors = lambda force=False: client.commands.append("stale_stop") or {"AZ": [], "EL": []}
 
     tracker.step()
 
-    assert "stop_az" in client.commands
-    assert "stop_el" in client.commands
+    assert "stale_stop" in client.commands
+
+
+def test_tracker_axis_driver_tolerates_short_position_poll_delay_while_moving():
+    client = AxisDriverClient()
+    client.antenna.last_update_monotonic = time.monotonic() - 0.6
+    client.axis_status["azimuth"] = "CW"
+    client.axis_status["elevation"] = "UP"
+    tracker = Tracker(client, settings=_tracking_settings(), thread_manager=DummyThreadManager(), tracked_object=_tracked_object())
+    tracker._kickstart_pending = False
+    tracker._must_apply_speeds = False
+    tracker._last_az_cmd = "CW"
+    tracker._last_el_cmd = "UP"
+    tracker._stop_motors = lambda force=False: client.commands.append("stale_stop") or {"AZ": [], "EL": []}
+
+    tracker.step()
+
+    assert "stale_stop" not in client.commands
 
 
 def test_tracker_axis_driver_endstop_stop_on_affected_axis():
@@ -103,3 +143,85 @@ def test_tracker_axis_driver_endstop_stop_on_affected_axis():
 
     assert "stop_az" in client.commands
     assert "move_cw" not in client.commands
+
+
+def test_tracker_reapplies_far_speed_when_internal_rate_bucket_changes_from_close():
+    client = AxisDriverClient()
+    client.antenna.az = 0.0
+    client.antenna.el = 0.0
+    client.antenna.az_setrate = 500.0
+    client.antenna.el_setrate = 500.0
+    tracked = TrackedObject()
+    tracked.az_set = 20.0
+    tracked.el_set = 20.0
+    tracker = Tracker(client, settings=_tracking_settings(), thread_manager=DummyThreadManager(), tracked_object=tracked)
+    tracker._kickstart_pending = False
+    tracker._must_apply_speeds = False
+    tracker._last_az_speed_requested = 10.0
+    tracker._last_el_speed_requested = 10.0
+
+    tracker.step()
+
+    assert ("set_az_speed", 500.0) in client.commands
+    assert ("set_el_speed", 500.0) in client.commands
+
+
+def test_tracker_reapplies_far_speed_after_large_target_jump_even_when_rate_cached():
+    client = AxisDriverClient()
+    client.antenna.az = 0.0
+    client.antenna.el = 0.0
+    client.antenna.az_setrate = 500.0
+    client.antenna.el_setrate = 500.0
+    tracked = TrackedObject()
+    tracked.az_set = 20.0
+    tracked.el_set = 20.0
+    tracker = Tracker(client, settings=_tracking_settings(), thread_manager=DummyThreadManager(), tracked_object=tracked)
+    tracker._kickstart_pending = False
+    tracker._must_apply_speeds = False
+    tracker._last_az_speed_requested = 500.0
+    tracker._last_el_speed_requested = 500.0
+    tracker._last_rate_target = (0.0, 0.0)
+
+    tracker.step()
+
+    assert ("set_az_speed", 500.0) in client.commands
+    assert ("set_el_speed", 500.0) in client.commands
+
+
+def test_tracker_does_not_rewrite_speed_for_axis_already_on_target():
+    client = AxisDriverClient()
+    client.antenna.az = 50.0
+    client.antenna.el = 0.0
+    tracked = TrackedObject()
+    tracked.az_set = 50.01
+    tracked.el_set = 20.0
+    tracker = Tracker(client, settings=_tracking_settings(), thread_manager=DummyThreadManager(), tracked_object=tracked)
+    tracker._kickstart_pending = False
+    tracker._must_apply_speeds = False
+
+    tracker.step()
+
+    assert not any(command[0] == "set_az_speed" for command in client.commands if isinstance(command, tuple))
+    assert ("set_el_speed", 500.0) in client.commands
+
+
+def test_tracker_uses_axis_specific_approach_thresholds():
+    client = AxisDriverClient()
+    client.antenna.az = 0.0
+    client.antenna.el = 0.0
+    tracked = TrackedObject()
+    tracked.az_set = 20.0
+    tracked.el_set = 20.0
+    settings = _tracking_settings()
+    settings["ANTENNA"]["az_approach_error_threshold"] = 10
+    settings["ANTENNA"]["el_approach_error_threshold"] = 30
+    settings["ANTENNA"]["az_close_error_threshold"] = 2
+    settings["ANTENNA"]["el_close_error_threshold"] = 2
+    tracker = Tracker(client, settings=settings, thread_manager=DummyThreadManager(), tracked_object=tracked)
+    tracker._kickstart_pending = False
+    tracker._must_apply_speeds = False
+
+    tracker.step()
+
+    assert ("set_az_speed", 500.0) in client.commands
+    assert ("set_el_speed", 100.0) in client.commands

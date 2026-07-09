@@ -58,6 +58,10 @@ class AntennaStatus:
         self.endstop_el = None
         self.modbus_status_az = None
         self.modbus_status_el = None
+        self.index_az = None
+        self.index_el = None
+        self.motor_alarm_az = None
+        self.motor_alarm_el = None
         self.signal = None
         self.last_update = None
 
@@ -86,6 +90,12 @@ class TelemetrySnapshot:
             'endstop_el': antenna.endstop_el,
             'modbus_az': antenna.modbus_status_az,
             'modbus_el': antenna.modbus_status_el,
+            'az_setrate': antenna.az_setrate,
+            'el_setrate': antenna.el_setrate,
+            'index_az': antenna.index_az,
+            'index_el': antenna.index_el,
+            'motor_alarm_az': antenna.motor_alarm_az,
+            'motor_alarm_el': antenna.motor_alarm_el,
             'signal': antenna.signal,
             'last_update': antenna.last_update,
         }
@@ -133,6 +143,7 @@ class Axis:
         self._keep_alive_task = None
         # Callbacks de notification en cas de déconnexion détectée côté core
         self._disconnect_callbacks = []
+        self._status_extended_poll_index = 0
 
     async def _ensure_async_primitives(self):
         """
@@ -414,6 +425,7 @@ class Axis:
             if ack is None:
                 self.logger.error(f"set_az_speed({speed}) -> ACK=None")
             else:
+                self.antenna.az_setrate = float(speed)
                 self.logger.debug(f"set_az_speed({speed}) -> ACK={ack}")
         except Exception:
             pass
@@ -425,6 +437,7 @@ class Axis:
             if ack is None:
                 self.logger.error(f"set_el_speed({speed}) -> ACK=None")
             else:
+                self.antenna.el_setrate = float(speed)
                 self.logger.debug(f"set_el_speed({speed}) -> ACK={ack}")
         except Exception:
             pass
@@ -577,33 +590,78 @@ class Axis:
         Récupère les statuts endstop/modbus/signal et retourne un dict:
         {'endstop_az': int|None, 'endstop_el': int|None, 'modbus_az': int|None, 'modbus_el': int|None, 'signal': int|None}
         """
-        status = {'endstop_az': None, 'endstop_el': None, 'modbus_az': None, 'modbus_el': None, 'signal': None}
-        try:
-            endstop_az = await self.send_command(AxisCommand.QUERY_ENDSTOP_AZ)
-            endstop_el = await self.send_command(AxisCommand.QUERY_ENDSTOP_EL)
-            modbus_az = await self.send_command(AxisCommand.QUERY_MODBUS_STATUS_AZ)
-            modbus_el = await self.send_command(AxisCommand.QUERY_MODBUS_STATUS_EL)
-            signal = await self.send_command(AxisCommand.QUERY_SIGNAL)
+        status = {
+            'endstop_az': None,
+            'endstop_el': None,
+            'modbus_az': None,
+            'modbus_el': None,
+            'signal': None,
+            'az_setrate': None,
+            'el_setrate': None,
+            'index_az': None,
+            'index_el': None,
+            'motor_alarm_az': None,
+            'motor_alarm_el': None,
+        }
 
-            if endstop_az is not None:
-                self.antenna.endstop_az = endstop_az
-            if endstop_el is not None:
-                self.antenna.endstop_el = endstop_el
-            if modbus_az is not None:
-                self.antenna.modbus_status_az = modbus_az
-            if modbus_el is not None:
-                self.antenna.modbus_status_el = modbus_el
-            if signal is not None:
-                self.antenna.signal = signal
+        async def query(command):
+            try:
+                return await self.send_command(command)
+            except Exception:
+                return None
 
-            status['endstop_az'] = self.antenna.endstop_az
-            status['endstop_el'] = self.antenna.endstop_el
-            status['modbus_az'] = self.antenna.modbus_status_az
-            status['modbus_el'] = self.antenna.modbus_status_el
-            status['signal'] = self.antenna.signal
+        endstop_az = await query(AxisCommand.QUERY_ENDSTOP_AZ)
+        endstop_el = await query(AxisCommand.QUERY_ENDSTOP_EL)
+        modbus_az = await query(AxisCommand.QUERY_MODBUS_STATUS_AZ)
+        modbus_el = await query(AxisCommand.QUERY_MODBUS_STATUS_EL)
+        signal = await query(AxisCommand.QUERY_SIGNAL)
+        extended_poll_index = int(getattr(self, "_status_extended_poll_index", 0))
+        self._status_extended_poll_index = (extended_poll_index + 1) % 4
+        speed_az = speed_el = index_az = index_el = alarm_az = alarm_el = None
+        if extended_poll_index == 0:
+            speed_az = await query(AxisCommand.QUERY_SPEED_AZ)
+            speed_el = await query(AxisCommand.QUERY_SPEED_EL)
+        elif extended_poll_index == 1:
+            index_az = await query(AxisCommand.QUERY_AXIS_INDEX_AZ)
+            index_el = await query(AxisCommand.QUERY_AXIS_INDEX_EL)
+        elif extended_poll_index == 2:
+            alarm_az = await query(AxisCommand.QUERY_AXIS_MOTOR_ALARM_AZ)
+            alarm_el = await query(AxisCommand.QUERY_AXIS_MOTOR_ALARM_EL)
 
-        except Exception:
-            pass
+        if endstop_az is not None:
+            self.antenna.endstop_az = endstop_az
+        if endstop_el is not None:
+            self.antenna.endstop_el = endstop_el
+        if modbus_az is not None:
+            self.antenna.modbus_status_az = modbus_az
+        if modbus_el is not None:
+            self.antenna.modbus_status_el = modbus_el
+        if signal is not None:
+            self.antenna.signal = signal
+        if speed_az is not None:
+            self.antenna.az_setrate = float(speed_az)
+        if speed_el is not None:
+            self.antenna.el_setrate = float(speed_el)
+        if index_az is not None:
+            self.antenna.index_az = index_az
+        if index_el is not None:
+            self.antenna.index_el = index_el
+        if alarm_az is not None:
+            self.antenna.motor_alarm_az = alarm_az
+        if alarm_el is not None:
+            self.antenna.motor_alarm_el = alarm_el
+
+        status['endstop_az'] = self.antenna.endstop_az
+        status['endstop_el'] = self.antenna.endstop_el
+        status['modbus_az'] = self.antenna.modbus_status_az
+        status['modbus_el'] = self.antenna.modbus_status_el
+        status['signal'] = self.antenna.signal
+        status['az_setrate'] = self.antenna.az_setrate
+        status['el_setrate'] = self.antenna.el_setrate
+        status['index_az'] = self.antenna.index_az
+        status['index_el'] = self.antenna.index_el
+        status['motor_alarm_az'] = self.antenna.motor_alarm_az
+        status['motor_alarm_el'] = self.antenna.motor_alarm_el
         return status
 
 

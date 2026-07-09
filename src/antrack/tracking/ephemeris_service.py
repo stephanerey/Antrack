@@ -85,6 +85,7 @@ class EphemerisService:
         tle_dir: Optional[str] = None,
         tle_groups: Optional[List[str]] = None,
         tle_refresh_hours: float = 6.0,
+        tle_download_timeout_s: float = 8.0,
         radiosrc_dir: Optional[str] = None,
         spacecraft_dir: Optional[str] = None,
     ):
@@ -120,6 +121,7 @@ class EphemerisService:
                 tle_dir=tle_dir,
                 groups=tle_groups or DEFAULT_TLE_GROUPS,
                 refresh_hours=tle_refresh_hours,
+                download_timeout_s=tle_download_timeout_s,
                 logger=self.logger
             )
         except Exception as e:

@@ -6,7 +6,7 @@ import pytest
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.types import AntennaConnectionState
 from antrack.core.axis.axis_driver_backend import AxisDriverBackend
-from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, ENDSTOP_REGISTER, MOTION_STATE_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
+from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, ENDSTOP_REGISTER, MOTION_STATE_REGISTER, PARAMETER_TRIGGER_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
 from antrack.core.axis.modbus_rtu import append_crc, build_fc03_request, build_fc06_request
 
 
@@ -85,6 +85,9 @@ def _driver_responses():
             responses[build_fc03_request(slave, register, 1)] = _fc03_response(slave, value)
     for request in (
         build_fc06_request(10, SPEED_REGISTER, 25),
+        build_fc06_request(10, SPEED_REGISTER, 300),
+        build_fc06_request(10, SPEED_REGISTER, 500),
+        build_fc06_request(10, PARAMETER_TRIGGER_REGISTER, 1),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
         build_fc06_request(10, COMMAND_REGISTER, 100),
         build_fc06_request(20, COMMAND_REGISTER, 100),
@@ -148,9 +151,9 @@ def test_axis_driver_set_speed_and_move_emit_expected_frames():
 
     assert fake_serial.writes == [
         build_fc06_request(10, SPEED_REGISTER, 25),
-        build_fc06_request(10, COMMAND_REGISTER, 10),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
         build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, SPEED_REGISTER, 25),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
     ]
 
@@ -164,8 +167,53 @@ def test_axis_driver_set_speed_while_moving_preserves_motion_state():
     asyncio.run(backend.set_az_speed(25))
 
     assert fake_serial.writes == [
-        build_fc06_request(10, SPEED_REGISTER, 25),
         build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, SPEED_REGISTER, 25),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+    ]
+
+
+def test_axis_driver_explicit_set_speed_rewrites_even_when_cached():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    asyncio.run(backend.set_az_speed(25))
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.set_az_speed(25))
+
+    assert fake_serial.writes == [
+        build_fc06_request(10, SPEED_REGISTER, 25),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+    ]
+
+
+def test_axis_driver_set_speed_uses_requested_settings_value():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    ack = asyncio.run(backend.set_az_speed(500))
+
+    assert ack == 500
+    assert backend.telemetry.az_setrate == 500.0
+    assert fake_serial.writes == [
+        build_fc06_request(10, SPEED_REGISTER, 500),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+    ]
+
+
+def test_axis_driver_explicit_set_speed_retriggers_motion_even_when_cached():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    asyncio.run(backend.set_az_speed(25))
+    asyncio.run(backend.move_cw())
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.set_az_speed(25))
+
+    assert fake_serial.writes == [
+        build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, SPEED_REGISTER, 25),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
     ]
 

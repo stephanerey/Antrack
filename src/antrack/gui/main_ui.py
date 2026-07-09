@@ -75,14 +75,14 @@ class MainUi(
         )
         az_error_threshold = float(
             antenna_settings.get(
-                "az_error_threshold",
-                antenna_settings.get("AZ_ERROR_THRESHOLD", 0.05),
+                "az_tracking_error_threshold",
+                antenna_settings.get("az_error_threshold", antenna_settings.get("AZ_ERROR_THRESHOLD", 0.05)),
             )
         )
         el_error_threshold = float(
             antenna_settings.get(
-                "el_error_threshold",
-                antenna_settings.get("EL_ERROR_THRESHOLD", 0.05),
+                "el_tracking_error_threshold",
+                antenna_settings.get("el_error_threshold", antenna_settings.get("EL_ERROR_THRESHOLD", 0.05)),
             )
         )
 
@@ -193,8 +193,14 @@ class MainUi(
             self.logger.error(f"Impossible d'initialiser l'observateur: {exc}")
 
         tle_groups = None
+        tle_refresh_hours = 6.0
+        tle_download_timeout_s = 8.0
         try:
             tle_groups = self.settings.get("TLE_GROUPS", None) if isinstance(self.settings, dict) else None
+            tle_settings = self.settings.get("TLE", self.settings.get("tle", {})) if isinstance(self.settings, dict) else {}
+            if isinstance(tle_settings, dict):
+                tle_refresh_hours = float(tle_settings.get("refresh_hours", tle_refresh_hours))
+                tle_download_timeout_s = float(tle_settings.get("download_timeout_s", tle_download_timeout_s))
         except Exception:
             pass
 
@@ -205,7 +211,8 @@ class MainUi(
             logger=self.logger,
             tle_dir=self.tle_dir,
             tle_groups=tle_groups,
-            tle_refresh_hours=6.0,
+            tle_refresh_hours=tle_refresh_hours,
+            tle_download_timeout_s=tle_download_timeout_s,
         )
         self.ephem = EphemerisQtAdapter(base_ephem)
         self.ephem.pose_updated.connect(self._on_pose_updated)

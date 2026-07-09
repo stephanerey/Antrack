@@ -1377,7 +1377,10 @@ class TrackingUiMixin:
                     self.tracked_object.az_error = az_err
                     if hasattr(self, "label_antenna_az_error"):
                         self.label_antenna_az_error.setText(f"{az_err:.2f} °")
-                        threshold = self.settings.get("ANTENNA", {}).get("az_error_threshold", 0.05)
+                        threshold = self.settings.get("ANTENNA", {}).get(
+                            "az_tracking_error_threshold",
+                            self.settings.get("ANTENNA", {}).get("az_error_threshold", 0.05),
+                        )
                         color = green_label_color if abs(az_err) <= float(threshold) else red_label_color
                         self.label_antenna_az_error.setStyleSheet(color)
                     self.g1.set_error(az_err)
@@ -1386,7 +1389,10 @@ class TrackingUiMixin:
                     self.tracked_object.el_error = el_err
                     if hasattr(self, "label_antenna_el_error"):
                         self.label_antenna_el_error.setText(f"{el_err:.2f} °")
-                        threshold = self.settings.get("ANTENNA", {}).get("el_error_threshold", 0.05)
+                        threshold = self.settings.get("ANTENNA", {}).get(
+                            "el_tracking_error_threshold",
+                            self.settings.get("ANTENNA", {}).get("el_error_threshold", 0.05),
+                        )
                         color = green_label_color if abs(el_err) <= float(threshold) else red_label_color
                         self.label_antenna_el_error.setStyleSheet(color)
                     self.g2.set_error(el_err)

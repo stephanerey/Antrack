@@ -124,6 +124,9 @@ class Tracker:
         self._move_refresh_interval = 1.0  # seconds
         self._last_target_command_ts = 0.0
         self._last_target_command = (None, None)
+        self._last_az_speed_requested = None
+        self._last_el_speed_requested = None
+        self._last_rate_target = None
 
         # Diagnostics: remember telemetry/setpoints state transitions
         self._last_tel_ok = None
@@ -146,6 +149,9 @@ class Tracker:
         """Request re-applying AZ/EL speeds on the next cycle."""
         self._must_apply_speeds = True
         self._kickstart_pending = True
+        self._last_az_speed_requested = None
+        self._last_el_speed_requested = None
+        self._last_rate_target = None
 
     @property
     def diagnostics_enabled(self) -> bool:
@@ -449,10 +455,12 @@ class Tracker:
     def step(self, interval: Optional[float] = None) -> None:
         """Run one cooperative tracking iteration."""
         ant = self._antenna_settings()
-        az_err_th = float(ant.get('az_error_threshold', 0.05))
-        el_err_th = float(ant.get('el_error_threshold', 0.05))
-        approach_deg = float(ant.get('approach_tracking_degrees', 5))
-        close_deg = float(ant.get('close_tracking_degrees', 1))
+        az_err_th = float(ant.get('az_tracking_error_threshold', ant.get('az_error_threshold', 0.05)))
+        el_err_th = float(ant.get('el_tracking_error_threshold', ant.get('el_error_threshold', 0.05)))
+        az_approach_deg = float(ant.get('az_approach_error_threshold', ant.get('approach_tracking_degrees', 10)))
+        el_approach_deg = float(ant.get('el_approach_error_threshold', ant.get('approach_tracking_degrees', 10)))
+        az_close_deg = float(ant.get('az_close_error_threshold', ant.get('close_tracking_degrees', 2)))
+        el_close_deg = float(ant.get('el_close_error_threshold', ant.get('close_tracking_degrees', 2)))
         az_speed_far = float(ant.get('az_speed_far_tracking', 500))
         az_speed_approach = float(ant.get('az_speed_approach_tracking', 100))
         az_speed_close = float(ant.get('az_speed_close_tracking', 20))
@@ -527,10 +535,13 @@ class Tracker:
         az_events: list[dict] = []
         el_events: list[dict] = []
         axis_driver_mode = self._is_axis_driver_mode()
-        stale_threshold_s = max(
-            0.5,
-            3.0 * float(position_interval_s),
-        ) if isinstance(position_interval_s, (int, float)) else 0.5
+        status_interval_s = polling_intervals[1] if isinstance(polling_intervals, tuple) and len(polling_intervals) > 1 else None
+        stale_threshold_candidates = [1.5]
+        if isinstance(position_interval_s, (int, float)):
+            stale_threshold_candidates.append(6.0 * float(position_interval_s))
+        if isinstance(status_interval_s, (int, float)):
+            stale_threshold_candidates.append(2.5 * float(status_interval_s))
+        stale_threshold_s = max(stale_threshold_candidates)
         if (
             axis_driver_mode
             and telemetry_age_s is not None
@@ -574,8 +585,8 @@ class Tracker:
                         actual_deg=self._safe_float(az_cur),
                         error_deg=None,
                         threshold_deg=az_err_th,
-                        approach_deg=approach_deg,
-                        close_deg=close_deg,
+                        approach_deg=az_approach_deg,
+                        close_deg=az_close_deg,
                         current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("azimuth"),
                         last_axis_command=self._last_az_cmd,
                         decision=az_events[0]["decision"],
@@ -596,8 +607,8 @@ class Tracker:
                         actual_deg=self._safe_float(el_cur),
                         error_deg=None,
                         threshold_deg=el_err_th,
-                        approach_deg=approach_deg,
-                        close_deg=close_deg,
+                        approach_deg=el_approach_deg,
+                        close_deg=el_close_deg,
                         current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("elevation"),
                         last_axis_command=self._last_el_cmd,
                         decision=el_events[0]["decision"],
@@ -633,8 +644,8 @@ class Tracker:
                             actual_deg=self._safe_float(az_cur),
                             error_deg=None,
                             threshold_deg=az_err_th,
-                            approach_deg=approach_deg,
-                            close_deg=close_deg,
+                            approach_deg=az_approach_deg,
+                            close_deg=az_close_deg,
                             current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("azimuth"),
                             last_axis_command=self._last_az_cmd,
                             decision="MISSING_SETPOINT",
@@ -655,8 +666,8 @@ class Tracker:
                             actual_deg=self._safe_float(el_cur),
                             error_deg=None,
                             threshold_deg=el_err_th,
-                            approach_deg=approach_deg,
-                            close_deg=close_deg,
+                            approach_deg=el_approach_deg,
+                            close_deg=el_close_deg,
                             current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("elevation"),
                             last_axis_command=self._last_el_cmd,
                             decision="MISSING_SETPOINT",
@@ -675,6 +686,25 @@ class Tracker:
             log.info("SET_STATE change -> set_ok=True (az_set=%.3f, el_set=%.3f)", self.tracked_object.az_set, self.tracked_object.el_set)
             self._set_state_prev = True
         self._none_set_streak = 0
+        current_rate_target = (
+            round(float(self.tracked_object.az_set), 3),
+            round(float(self.tracked_object.el_set), 3),
+        )
+        if self._last_rate_target is None:
+            self._last_rate_target = current_rate_target
+        else:
+            target_jump_deg = max(
+                abs(current_rate_target[0] - self._last_rate_target[0]),
+                abs(current_rate_target[1] - self._last_rate_target[1]),
+            )
+            if target_jump_deg >= max(0.5, az_close_deg, el_close_deg):
+                log.info(
+                    "Tracking target jump %.3f deg detected; forcing AZ/EL speed reapply",
+                    target_jump_deg,
+                )
+                self._last_az_speed_requested = None
+                self._last_el_speed_requested = None
+            self._last_rate_target = current_rate_target
 
         if getattr(self.axis_client_qt, "supports_absolute_targets", lambda: False)():
             if self._kickstart_pending or self._must_apply_speeds:
@@ -751,8 +781,8 @@ class Tracker:
                             actual_deg=self._safe_float(az_cur),
                             error_deg=None,
                             threshold_deg=az_err_th,
-                            approach_deg=approach_deg,
-                            close_deg=close_deg,
+                            approach_deg=az_approach_deg,
+                            close_deg=az_close_deg,
                             current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("azimuth"),
                             last_axis_command=self._last_az_cmd,
                             decision=az_events[0]["decision"] if az_events else "ABSOLUTE_TARGET_HOLD",
@@ -773,8 +803,8 @@ class Tracker:
                             actual_deg=self._safe_float(el_cur),
                             error_deg=None,
                             threshold_deg=el_err_th,
-                            approach_deg=approach_deg,
-                            close_deg=close_deg,
+                            approach_deg=el_approach_deg,
+                            close_deg=el_close_deg,
                             current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("elevation"),
                             last_axis_command=self._last_el_cmd,
                             decision=el_events[0]["decision"] if el_events else "ABSOLUTE_TARGET_HOLD",
@@ -811,8 +841,8 @@ class Tracker:
                             actual_deg=None,
                             error_deg=None,
                             threshold_deg=az_err_th,
-                            approach_deg=approach_deg,
-                            close_deg=close_deg,
+                            approach_deg=az_approach_deg,
+                            close_deg=az_close_deg,
                             current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("azimuth"),
                             last_axis_command=self._last_az_cmd,
                             decision="MISSING_TELEMETRY",
@@ -833,8 +863,8 @@ class Tracker:
                             actual_deg=None,
                             error_deg=None,
                             threshold_deg=el_err_th,
-                            approach_deg=approach_deg,
-                            close_deg=close_deg,
+                            approach_deg=el_approach_deg,
+                            close_deg=el_close_deg,
                             current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("elevation"),
                             last_axis_command=self._last_el_cmd,
                             decision="MISSING_TELEMETRY",
@@ -932,27 +962,38 @@ class Tracker:
         prev_last_el_cmd = self._last_el_cmd
 
         if need_az or need_el or az_blocked or el_blocked:
+            if abs(self.tracked_object.az_error) > az_approach_deg:
+                rate_az = az_speed_far
+            elif abs(self.tracked_object.az_error) > az_close_deg:
+                rate_az = az_speed_approach
+            else:
+                rate_az = az_speed_close
+
+            if abs(self.tracked_object.el_error) > el_approach_deg:
+                rate_el = el_speed_far
+            elif abs(self.tracked_object.el_error) > el_close_deg:
+                rate_el = el_speed_approach
+            else:
+                rate_el = el_speed_close
+
             try:
-                if abs(self.tracked_object.az_error) > approach_deg:
-                    rate_az = az_speed_far
-                elif abs(self.tracked_object.az_error) > close_deg:
-                    rate_az = az_speed_approach
-                else:
-                    rate_az = az_speed_close
-                if getattr(self.axis_client_qt.antenna, 'az_setrate', None) != rate_az:
-                    log.debug("CMD set_az_speed -> %.1f", rate_az)
-                    ack, command_record = self._record_command("set_az_speed", lambda: self.axis_client_qt.set_az_speed(rate_az))
-                    if ack is not None:
-                        self.axis_client_qt.antenna.az_setrate = rate_az
-                    az_events.append(
-                        {
-                            "decision": "SET_SPEED",
-                            "command_to_send": "set_az_speed",
-                            "command_reason": "tracking speed bucket update",
-                            "speed_requested": rate_az,
-                            "command_record": command_record,
-                        }
-                    )
+                if need_az:
+                    current_az_setrate = getattr(self.axis_client_qt.antenna, 'az_setrate', None)
+                    if current_az_setrate != rate_az or self._last_az_speed_requested != rate_az:
+                        log.debug("CMD set_az_speed -> %.1f", rate_az)
+                        ack, command_record = self._record_command("set_az_speed", lambda: self.axis_client_qt.set_az_speed(rate_az))
+                        if ack is not None:
+                            self.axis_client_qt.antenna.az_setrate = rate_az
+                            self._last_az_speed_requested = rate_az
+                        az_events.append(
+                            {
+                                "decision": "SET_SPEED",
+                                "command_to_send": "set_az_speed",
+                                "command_reason": "tracking speed bucket update",
+                                "speed_requested": rate_az,
+                                "command_record": command_record,
+                            }
+                        )
             except Exception as e:
                 if self._tracking_diag_enabled and "timed out" in str(e).lower():
                     self._repeated_command_timeouts += 1
@@ -968,25 +1009,22 @@ class Tracker:
                 )
 
             try:
-                if abs(self.tracked_object.el_error) > approach_deg:
-                    rate_el = el_speed_far
-                elif abs(self.tracked_object.el_error) > close_deg:
-                    rate_el = el_speed_approach
-                else:
-                    rate_el = el_speed_close
-                if getattr(self.axis_client_qt.antenna, 'el_setrate', None) != rate_el:
-                    ack, command_record = self._record_command("set_el_speed", lambda: self.axis_client_qt.set_el_speed(rate_el))
-                    if ack is not None:
-                        self.axis_client_qt.antenna.el_setrate = rate_el
-                    el_events.append(
-                        {
-                            "decision": "SET_SPEED",
-                            "command_to_send": "set_el_speed",
-                            "command_reason": "tracking speed bucket update",
-                            "speed_requested": rate_el,
-                            "command_record": command_record,
-                        }
-                    )
+                if need_el:
+                    current_el_setrate = getattr(self.axis_client_qt.antenna, 'el_setrate', None)
+                    if current_el_setrate != rate_el or self._last_el_speed_requested != rate_el:
+                        ack, command_record = self._record_command("set_el_speed", lambda: self.axis_client_qt.set_el_speed(rate_el))
+                        if ack is not None:
+                            self.axis_client_qt.antenna.el_setrate = rate_el
+                            self._last_el_speed_requested = rate_el
+                        el_events.append(
+                            {
+                                "decision": "SET_SPEED",
+                                "command_to_send": "set_el_speed",
+                                "command_reason": "tracking speed bucket update",
+                                "speed_requested": rate_el,
+                                "command_record": command_record,
+                            }
+                        )
             except Exception as e:
                 if self._tracking_diag_enabled and "timed out" in str(e).lower():
                     self._repeated_command_timeouts += 1
@@ -1350,8 +1388,8 @@ class Tracker:
                         actual_deg=self._safe_float(az_cur),
                         error_deg=self._safe_float(self.tracked_object.az_error),
                         threshold_deg=az_err_th,
-                        approach_deg=approach_deg,
-                        close_deg=close_deg,
+                        approach_deg=az_approach_deg,
+                        close_deg=az_close_deg,
                         current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("azimuth"),
                         last_axis_command=prev_last_az_cmd,
                         decision=event["decision"],
@@ -1375,8 +1413,8 @@ class Tracker:
                         actual_deg=self._safe_float(el_cur),
                         error_deg=self._safe_float(self.tracked_object.el_error),
                         threshold_deg=el_err_th,
-                        approach_deg=approach_deg,
-                        close_deg=close_deg,
+                        approach_deg=el_approach_deg,
+                        close_deg=el_close_deg,
                         current_axis_state=getattr(self.axis_client_qt, "axis_status", {}).get("elevation"),
                         last_axis_command=prev_last_el_cmd,
                         decision=event["decision"],
@@ -1427,9 +1465,11 @@ class Tracker:
                 ack, az_record = self._record_command("set_az_speed", lambda: self.axis_client_qt.set_az_speed(az_speed_far))
                 if ack is not None:
                     self.axis_client_qt.antenna.az_setrate = az_speed_far
+                    self._last_az_speed_requested = az_speed_far
                 ack, el_record = self._record_command("set_el_speed", lambda: self.axis_client_qt.set_el_speed(el_speed_far))
                 if ack is not None:
                     self.axis_client_qt.antenna.el_setrate = el_speed_far
+                    self._last_el_speed_requested = el_speed_far
                 self._must_apply_speeds = False
                 events["AZ"].append(
                     {

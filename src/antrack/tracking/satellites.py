@@ -2,13 +2,21 @@
 import os
 import re
 import threading
+import ssl
+import tempfile
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Iterable, List, Tuple
+from urllib.request import urlopen
 
 from skyfield.api import Loader, EarthSatellite
+try:
+    import certifi
+except Exception:  # pragma: no cover - certifi is normally provided with skyfield
+    certifi = None
 
 DEFAULT_GROUPS = ["stations", "active", "amateur", "weather"]
-CELESTRAK_URL_TMPL = "https://celestrak.org/NORAD/elements/gp.php?GROUP={grp}&FORMAT=tle"
+CELESTRAK_URL_TMPL = "https://celestrak.org/NORAD/elements/gp.php?GROUP={grp}&FORMAT=TLE"
 
 def _ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
@@ -29,6 +37,7 @@ class TLERepository:
         tle_dir: str,
         groups: Optional[Iterable[str]] = None,
         refresh_hours: float = 6.0,
+        download_timeout_s: float = 8.0,
         logger=None
     ):
         self.tle_dir = os.path.abspath(os.path.expanduser(tle_dir))
@@ -36,6 +45,7 @@ class TLERepository:
         self.loader = Loader(self.tle_dir)
         self.groups = list(groups or DEFAULT_GROUPS)
         self.refresh_delta = timedelta(hours=float(refresh_hours))
+        self.download_timeout_s = max(1.0, float(download_timeout_s))
         self.logger = logger
 
         self.by_name: Dict[str, EarthSatellite] = {}
@@ -64,15 +74,17 @@ class TLERepository:
             any_loaded = False
 
             for grp in self.groups:
-                url = CELESTRAK_URL_TMPL.format(grp=grp)
+                url = CELESTRAK_URL_TMPL.format(grp=str(grp).upper())
+                filename = f"celestrak_{grp}.tle"
                 sats = None
                 try:
-                    sats = self.loader.tle_file(url, filename=f"celestrak_{grp}.tle", reload=True)
+                    self._download_group(url, filename)
+                    sats = self.loader.tle_file(filename, reload=False)
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"[TLE] refresh failed for group={grp}: {e}")
                     try:
-                        sats = self.loader.tle_file(url, filename=f"celestrak_{grp}.tle", reload=False)
+                        sats = self.loader.tle_file(filename, reload=False)
                         if self.logger:
                             self.logger.info(f"[TLE] fallback cache used for group={grp}")
                     except Exception as e2:
@@ -105,6 +117,33 @@ class TLERepository:
                 if self.logger:
                     self.logger.error("[TLE] refresh failed for all groups")
                 self._next_refresh = datetime.utcnow() + timedelta(hours=1)
+
+    def _download_group(self, url: str, filename: str) -> Path:
+        destination = Path(self.loader.path_to(filename))
+        context = None
+        if certifi is not None:
+            context = ssl.create_default_context(cafile=certifi.where())
+        with urlopen(url, timeout=self.download_timeout_s, context=context) as response:
+            payload = response.read()
+        if not payload:
+            raise IOError(f"empty TLE response from {url}")
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f"{filename}.",
+            suffix=".download",
+            dir=str(destination.parent),
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+            os.replace(temp_path, destination)
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+        return destination
 
     # ----- resolve -----
     def resolve(self, query: str) -> Optional[EarthSatellite]:

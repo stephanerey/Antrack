@@ -172,6 +172,10 @@ class AxisServerBackend(BaseAntennaBackend):
             self.telemetry.endstop_el = getattr(antenna, "endstop_el", None)
             self.telemetry.modbus_status_az = getattr(antenna, "modbus_status_az", None)
             self.telemetry.modbus_status_el = getattr(antenna, "modbus_status_el", None)
+            self.telemetry.index_az = getattr(antenna, "index_az", None)
+            self.telemetry.index_el = getattr(antenna, "index_el", None)
+            self.telemetry.motor_alarm_az = getattr(antenna, "motor_alarm_az", None)
+            self.telemetry.motor_alarm_el = getattr(antenna, "motor_alarm_el", None)
             self.telemetry.signal = getattr(antenna, "signal", None)
             self.telemetry.last_update_monotonic = time.monotonic()
 

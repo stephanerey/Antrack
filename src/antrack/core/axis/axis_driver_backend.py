@@ -22,6 +22,7 @@ from antrack.core.axis.axis_driver_constants import (
     MOTION_CW,
     MOTION_STATE_REGISTER,
     MOTION_STOP,
+    PARAMETER_TRIGGER_REGISTER,
     RAW_POSITION_REGISTER,
     RELEASE_REGISTER,
     SPEED_REGISTER,
@@ -215,14 +216,16 @@ class AxisDriverBackend(BaseAntennaBackend):
             self.state = AntennaConnectionState.DISCONNECTED
 
     async def set_az_speed(self, speed: float) -> int | None:
-        await self._apply_axis_state(self.config.az_slave_address, speed=speed)
-        self.telemetry.az_setrate = float(speed)
-        return int(speed)
+        applied_speed = self._coerce_speed(speed)
+        await self._apply_axis_state(self.config.az_slave_address, speed=applied_speed, force_speed_write=True)
+        self.telemetry.az_setrate = float(applied_speed)
+        return int(applied_speed)
 
     async def set_el_speed(self, speed: float) -> int | None:
-        await self._apply_axis_state(self.config.el_slave_address, speed=speed)
-        self.telemetry.el_setrate = float(speed)
-        return int(speed)
+        applied_speed = self._coerce_speed(speed)
+        await self._apply_axis_state(self.config.el_slave_address, speed=applied_speed, force_speed_write=True)
+        self.telemetry.el_setrate = float(applied_speed)
+        return int(applied_speed)
 
     async def move_cw(self) -> int | None:
         await self._apply_axis_state(self.config.az_slave_address, motion=MOTION_CW)
@@ -599,6 +602,8 @@ class AxisDriverBackend(BaseAntennaBackend):
 
     def _write_register_locked(self, slave: int, register: int, value: int) -> tuple[int, int]:
         self._ensure_serial_open()
+        if register in {SPEED_REGISTER, PARAMETER_TRIGGER_REGISTER, COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER}:
+            self.logger.info("AxisDriver FC06 write: slave=%s register=%s value=%s", slave, register, value)
         request = build_fc06_request(slave, register, value)
         candidate_lengths = (7, 8) if self.config.legacy_accept_short_fc6_response else (8,)
         return self._exchange_and_parse(
@@ -631,6 +636,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         speed: float | None = None,
         cancel_reinforce: bool = True,
         force_trigger: bool = False,
+        force_speed_write: bool = False,
     ) -> None:
         await self._ensure_async_primitives()
         if motion is not None and cancel_reinforce:
@@ -638,7 +644,13 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._mark_command_priority()
         try:
             async with self._io_lock:
-                self._apply_axis_state_locked(slave, motion=motion, speed=speed, force_trigger=force_trigger)
+                self._apply_axis_state_locked(
+                    slave,
+                    motion=motion,
+                    speed=speed,
+                    force_trigger=force_trigger,
+                    force_speed_write=force_speed_write,
+                )
         finally:
             self._release_command_priority()
 
@@ -649,24 +661,76 @@ class AxisDriverBackend(BaseAntennaBackend):
         motion: int | None = None,
         speed: float | None = None,
         force_trigger: bool = False,
+        force_speed_write: bool = False,
     ) -> None:
         desired_motion = int(self._axis_motion_state.get(slave, MOTION_STOP) if motion is None else motion)
         current_speed = self._axis_speed_state.get(slave)
         desired_speed = current_speed
         if speed is not None:
-            desired_speed = int(max(0, round(float(speed))))
+            desired_speed = self._coerce_speed(speed)
 
         speed_changed = desired_speed is not None and desired_speed != current_speed
+        explicit_speed_write = speed is not None and desired_speed is not None
+        moving_command = motion is not None and desired_motion != MOTION_STOP
+        current_motion_is_active = motion is None and desired_motion != MOTION_STOP
+        should_write_speed = (
+            (explicit_speed_write and (speed_changed or force_speed_write))
+            or (moving_command and desired_speed is not None)
+        )
         motion_changed = desired_motion != self._axis_motion_state.get(slave, MOTION_STOP)
+        should_write_motion = motion is not None or force_trigger
+        should_retrigger_active_motion = (
+            should_write_speed
+            and explicit_speed_write
+            and current_motion_is_active
+        )
+        should_reinforce_speed_before_motion = should_write_speed and moving_command
 
-        if speed_changed:
-            self._write_register_locked(slave, SPEED_REGISTER, int(desired_speed))
-        if speed_changed or motion_changed or force_trigger:
+        motion_write_needed = (
+            (should_write_motion and (motion_changed or force_trigger or should_write_speed))
+            or should_retrigger_active_motion
+        )
+
+        if motion_write_needed:
             self._write_register_locked(slave, COMMAND_REGISTER, int(desired_motion))
+        if should_write_speed:
+            self._write_register_locked(slave, SPEED_REGISTER, int(desired_speed))
+        if motion_write_needed or should_write_speed:
             self._write_register_locked(slave, COMMAND_TRIGGER_REGISTER, 1)
+        if (
+            should_write_speed
+            and (explicit_speed_write or moving_command)
+            and bool(getattr(self.config, "speed_readback_enabled", False))
+        ):
+            try:
+                readback = self._read_register_locked(
+                    slave,
+                    SPEED_REGISTER,
+                    background=False,
+                    context=f"speed_readback_slave_{slave}",
+                )
+                log_method = self.logger.info if int(readback) == int(desired_speed) else self.logger.warning
+                log_method(
+                    "AxisDriver speed readback: slave=%s requested=%s readback=%s motion=%s",
+                    slave,
+                    int(desired_speed),
+                    int(readback),
+                    int(desired_motion),
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "AxisDriver speed readback failed: slave=%s requested=%s error=%s",
+                    slave,
+                    int(desired_speed),
+                    exc,
+                )
 
         self._axis_motion_state[slave] = int(desired_motion)
         self._axis_speed_state[slave] = desired_speed
+
+    @classmethod
+    def _coerce_speed(cls, speed: float) -> int:
+        return int(round(float(speed)))
 
     def _exchange_and_parse(
         self,
