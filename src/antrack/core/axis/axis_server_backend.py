@@ -6,6 +6,7 @@ import time
 
 from antrack.core.antenna.backend import BaseAntennaBackend
 from antrack.core.antenna.config import AxisServerConnectionConfig
+from antrack.core.antenna.rate_estimator import PositionRateEstimator
 from antrack.core.antenna.types import AntennaConnectionState, AntennaVersions
 from antrack.core.axis.axis_client import Axis, ServerStatus
 
@@ -24,6 +25,10 @@ class AxisServerBackend(BaseAntennaBackend):
         self._diag_total_latency_s: dict[str, float] = {}
         self._diag_min_latency_s: dict[str, float | None] = {}
         self._diag_max_latency_s: dict[str, float | None] = {}
+        self._rate_estimator = PositionRateEstimator(
+            window_s=float(getattr(config, "rate_estimation_window_s", 2.0)),
+            smoothing_alpha=float(getattr(config, "rate_estimation_smoothing_alpha", 0.35)),
+        )
 
     async def _measure_call(self, name: str, func):
         start = time.monotonic()
@@ -123,8 +128,10 @@ class AxisServerBackend(BaseAntennaBackend):
 
     async def get_position(self) -> tuple[float | None, float | None]:
         result = await self._measure_call("get_position", self.axis.get_position)
-        self._position_last_update_monotonic = time.monotonic()
+        now_monotonic = time.monotonic()
+        self._position_last_update_monotonic = now_monotonic
         self._sync_from_axis()
+        self._update_rate_estimate(now_monotonic)
         return result
 
     async def get_status(self) -> dict:
@@ -164,8 +171,6 @@ class AxisServerBackend(BaseAntennaBackend):
         if antenna is not None:
             self.telemetry.az = getattr(antenna, "az", None)
             self.telemetry.el = getattr(antenna, "el", None)
-            self.telemetry.az_rate = float(getattr(antenna, "az_rate", 0.0) or 0.0)
-            self.telemetry.el_rate = float(getattr(antenna, "el_rate", 0.0) or 0.0)
             self.telemetry.az_setrate = float(getattr(antenna, "az_setrate", 0.0) or 0.0)
             self.telemetry.el_setrate = float(getattr(antenna, "el_setrate", 0.0) or 0.0)
             self.telemetry.endstop_az = getattr(antenna, "endstop_az", None)
@@ -197,3 +202,8 @@ class AxisServerBackend(BaseAntennaBackend):
             self.state = AntennaConnectionState.ERROR
         else:
             self.state = AntennaConnectionState.DISCONNECTED
+
+    def _update_rate_estimate(self, timestamp_s: float) -> None:
+        az_rate, el_rate = self._rate_estimator.add(timestamp_s, self.telemetry.az, self.telemetry.el)
+        self.telemetry.az_rate = float(az_rate)
+        self.telemetry.el_rate = float(el_rate)

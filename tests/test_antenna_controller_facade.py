@@ -204,7 +204,7 @@ def test_axis_driver_polling_intervals_are_clamped_for_slow_rs485():
     config = AxisDriverConnectionConfig(
         comport="COM7",
         position_interval_s=0.1,
-        status_interval_s=0.5,
+        status_interval_s=0.25,
     )
     wrapped = type(
         "Cfg",
@@ -217,7 +217,7 @@ def test_axis_driver_polling_intervals_are_clamped_for_slow_rs485():
 
     polling = _polling_intervals_for_config(wrapped)
 
-    assert polling == (0.1, 0.5)
+    assert polling == (0.1, 0.25)
 
 
 def test_axis_driver_polling_intervals_apply_only_busy_loop_floor():
@@ -237,4 +237,4 @@ def test_axis_driver_polling_intervals_apply_only_busy_loop_floor():
 
     polling = _polling_intervals_for_config(wrapped)
 
-    assert polling == (0.1, 0.5)
+    assert polling == (0.1, 0.1)

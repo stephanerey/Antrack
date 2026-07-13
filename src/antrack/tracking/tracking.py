@@ -1309,7 +1309,7 @@ class Tracker:
                 az_rate = getattr(getattr(self.axis_client_qt, 'antenna', None), 'az_rate', None)
                 el_rate = getattr(getattr(self.axis_client_qt, 'antenna', None), 'el_rate', None)
                 server_st = getattr(self.axis_client_qt, 'server_status', None)
-                log.debug(
+                log.info(
                     "DECIDE tel_ok=%s set_ok=%s | az_cur=%.3f el_cur=%.3f | az_set=%.3f el_set=%.3f | "
                     "err=(%.2f, %.2f) blocked=(%s,%s) thr=(%.2f, %.2f) need=(%s,%s) desired=(%s,%s) | "
                     "endstop=(%s,%s) setrate=(%s,%s) rate=(%s,%s) server=%s",

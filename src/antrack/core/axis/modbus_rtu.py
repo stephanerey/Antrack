@@ -91,3 +91,32 @@ def parse_fc06_response(
             raise ModbusFrameError("Legacy short FC06 response header mismatch")
         return register, value
     raise ModbusFrameError(f"Unexpected FC06 response length: {len(frame)}")
+
+
+def build_fc16_request(slave: int, start_register: int, values: list[int] | tuple[int, ...]) -> bytes:
+    register_values = [int(value) for value in values]
+    byte_count = 2 * len(register_values)
+    payload = struct.pack(">BBHHB", int(slave), 0x10, int(start_register), len(register_values), byte_count)
+    for value in register_values:
+        payload += struct.pack(">H", value)
+    return append_crc(payload)
+
+
+def parse_fc16_response(
+    frame: bytes,
+    *,
+    slave: int,
+    start_register: int,
+    quantity: int,
+) -> tuple[int, int]:
+    if len(frame) != 8:
+        raise ModbusFrameError(f"Unexpected FC16 response length: {len(frame)}")
+    validate_crc(frame)
+    if frame[0] != int(slave):
+        raise ModbusFrameError(f"Unexpected FC16 slave address: {frame[0]}")
+    if frame[1] != 0x10:
+        raise ModbusFrameError(f"Unexpected FC16 function code: {frame[1]}")
+    echoed_start, echoed_quantity = struct.unpack(">HH", frame[2:6])
+    if echoed_start != int(start_register) or echoed_quantity != int(quantity):
+        raise ModbusFrameError("FC16 echoed response does not match request")
+    return echoed_start, echoed_quantity

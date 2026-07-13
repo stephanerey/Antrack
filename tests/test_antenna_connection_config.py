@@ -14,6 +14,10 @@ def test_axis_driver_settings_are_parsed():
     config = load_antenna_connection_config(
         {
             "ANTENNA_CONNECTION": {"mode": "axis_driver"},
+            "ANTENNA": {
+                "rate_estimation_window_s": 3.0,
+                "rate_estimation_smoothing_alpha": 0.5,
+            },
             "AXIS_DRIVER": {
                 "comport": "COM7",
                 "baudrate": 38400,
@@ -26,6 +30,17 @@ def test_axis_driver_settings_are_parsed():
                 "move_refresh_mode": "edge_only",
                 "move_refresh_interval_s": 0.0,
                 "speed_readback_enabled": True,
+                "command_apply_confirmation_enabled": True,
+                "command_max_transmissions": 3,
+                "command_apply_confirmation_delay_s": 0.05,
+                "command_apply_confirmation_timeout_s": 0.25,
+                "confirm_update1_reset": True,
+                "confirm_move_by_motion_state": True,
+                "confirm_stop_by_motion_state": True,
+                "use_fc16_for_motion_speed": True,
+                "command_confirm_status_read_mode": "block_101_107",
+                "command_confirm_status_block_start": 101,
+                "command_confirm_status_block_length": 7,
             },
         }
     )
@@ -40,6 +55,19 @@ def test_axis_driver_settings_are_parsed():
     assert config.axis_driver.move_refresh_mode == "edge_only"
     assert config.axis_driver.move_refresh_interval_s == 0.0
     assert config.axis_driver.speed_readback_enabled is True
+    assert config.axis_driver.command_apply_confirmation_enabled is True
+    assert config.axis_driver.command_max_transmissions == 3
+    assert config.axis_driver.command_apply_confirmation_delay_s == 0.05
+    assert config.axis_driver.command_apply_confirmation_timeout_s == 0.25
+    assert config.axis_driver.confirm_update1_reset is True
+    assert config.axis_driver.confirm_move_by_motion_state is True
+    assert config.axis_driver.confirm_stop_by_motion_state is True
+    assert config.axis_driver.use_fc16_for_motion_speed is True
+    assert config.axis_driver.command_confirm_status_read_mode == "block"
+    assert config.axis_driver.command_confirm_status_block_start == 101
+    assert config.axis_driver.command_confirm_status_block_length == 7
+    assert config.axis_driver.rate_estimation_window_s == 3.0
+    assert config.axis_driver.rate_estimation_smoothing_alpha == 0.5
 
 
 def test_invalid_axis_driver_status_read_mode_raises_config_error():

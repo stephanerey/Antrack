@@ -7,7 +7,7 @@ from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.types import AntennaConnectionState
 from antrack.core.axis.axis_driver_backend import AxisDriverBackend
 from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, ENDSTOP_REGISTER, MOTION_STATE_REGISTER, PARAMETER_TRIGGER_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
-from antrack.core.axis.modbus_rtu import append_crc, build_fc03_request, build_fc06_request
+from antrack.core.axis.modbus_rtu import append_crc, build_fc03_request, build_fc06_request, build_fc16_request
 
 
 def _fc03_response(slave: int, value: int) -> bytes:
@@ -19,6 +19,21 @@ def _fc03_block_response(slave: int, values: list[int]) -> bytes:
     for value in values:
         payload += bytes(((value >> 8) & 0xFF, value & 0xFF))
     return append_crc(payload)
+
+
+def _fc16_response(slave: int, start_register: int, quantity: int) -> bytes:
+    return append_crc(
+        bytes(
+            (
+                slave,
+                0x10,
+                (start_register >> 8) & 0xFF,
+                start_register & 0xFF,
+                (quantity >> 8) & 0xFF,
+                quantity & 0xFF,
+            )
+        )
+    )
 
 
 class FakeSerial:
@@ -77,8 +92,15 @@ def _driver_responses():
         build_fc03_request(20, RELEASE_REGISTER, 1): _fc03_response(20, 151),
         build_fc03_request(10, RAW_POSITION_REGISTER, 1): _fc03_response(10, 32768),
         build_fc03_request(20, RAW_POSITION_REGISTER, 1): _fc03_response(20, 16384),
-        build_fc03_request(10, MOTION_STATE_REGISTER, 7): _fc03_block_response(10, [30, 0, 32768, 1, 150, 2, 0]),
-        build_fc03_request(20, MOTION_STATE_REGISTER, 7): _fc03_block_response(20, [30, 0, 16384, 1, 151, 2, 0]),
+        build_fc03_request(10, MOTION_STATE_REGISTER, 7): _fc03_block_response(10, [30, 1, 32768, 1, 150, 2, 0]),
+        build_fc03_request(20, MOTION_STATE_REGISTER, 7): _fc03_block_response(20, [30, 1, 16384, 1, 151, 2, 0]),
+        build_fc03_request(10, COMMAND_TRIGGER_REGISTER, 1): _fc03_response(10, 0),
+        build_fc03_request(20, COMMAND_TRIGGER_REGISTER, 1): _fc03_response(20, 0),
+        build_fc16_request(10, COMMAND_REGISTER, [10, 25]): _fc16_response(10, COMMAND_REGISTER, 2),
+        build_fc16_request(10, COMMAND_REGISTER, [10, 500]): _fc16_response(10, COMMAND_REGISTER, 2),
+        build_fc16_request(10, COMMAND_REGISTER, [100, 25]): _fc16_response(10, COMMAND_REGISTER, 2),
+        build_fc16_request(10, COMMAND_REGISTER, [100, 300]): _fc16_response(10, COMMAND_REGISTER, 2),
+        build_fc16_request(20, COMMAND_REGISTER, [100, 300]): _fc16_response(20, COMMAND_REGISTER, 2),
     }
     for slave in (10, 20):
         for register, value in ((101, 30), (104, 1), (106, 2), (107, 0)):
@@ -93,6 +115,7 @@ def _driver_responses():
         build_fc06_request(20, COMMAND_REGISTER, 100),
         build_fc06_request(10, COMMAND_REGISTER, 10),
         build_fc06_request(20, COMMAND_TRIGGER_REGISTER, 1),
+        build_fc06_request(20, COMMAND_REGISTER, 10),
     ):
         responses[request] = request
     return responses
@@ -116,6 +139,23 @@ def _backend_and_serial_with_responses(responses):
     )
     backend = AxisDriverBackend(config, serial_factory=lambda **kwargs: fake_serial)
     return backend, fake_serial
+
+
+def _backend_and_sequence_serial(responses, read_sequences):
+    fake_serial = SequenceSerial(responses, read_sequences)
+    config = AxisDriverConnectionConfig(
+        comport="COM7",
+        legacy_accept_short_fc6_response=False,
+    )
+    backend = AxisDriverBackend(config, serial_factory=lambda **kwargs: fake_serial)
+    return backend, fake_serial
+
+
+def _confirm_frames(slave: int) -> list[bytes]:
+    return [
+        build_fc03_request(slave, COMMAND_TRIGGER_REGISTER, 1),
+        build_fc03_request(slave, MOTION_STATE_REGISTER, 7),
+    ]
 
 
 def test_axis_driver_connect_reads_versions_and_status():
@@ -150,11 +190,12 @@ def test_axis_driver_set_speed_and_move_emit_expected_frames():
     asyncio.run(backend.move_cw())
 
     assert fake_serial.writes == [
-        build_fc06_request(10, SPEED_REGISTER, 25),
+        build_fc16_request(10, COMMAND_REGISTER, [10, 25]),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
-        build_fc06_request(10, COMMAND_REGISTER, 100),
-        build_fc06_request(10, SPEED_REGISTER, 25),
+        *_confirm_frames(10),
+        build_fc16_request(10, COMMAND_REGISTER, [100, 25]),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
     ]
 
 
@@ -167,9 +208,9 @@ def test_axis_driver_set_speed_while_moving_preserves_motion_state():
     asyncio.run(backend.set_az_speed(25))
 
     assert fake_serial.writes == [
-        build_fc06_request(10, COMMAND_REGISTER, 100),
-        build_fc06_request(10, SPEED_REGISTER, 25),
+        build_fc16_request(10, COMMAND_REGISTER, [100, 25]),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
     ]
 
 
@@ -182,8 +223,9 @@ def test_axis_driver_explicit_set_speed_rewrites_even_when_cached():
     asyncio.run(backend.set_az_speed(25))
 
     assert fake_serial.writes == [
-        build_fc06_request(10, SPEED_REGISTER, 25),
+        build_fc16_request(10, COMMAND_REGISTER, [10, 25]),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
     ]
 
 
@@ -197,8 +239,9 @@ def test_axis_driver_set_speed_uses_requested_settings_value():
     assert ack == 500
     assert backend.telemetry.az_setrate == 500.0
     assert fake_serial.writes == [
-        build_fc06_request(10, SPEED_REGISTER, 500),
+        build_fc16_request(10, COMMAND_REGISTER, [10, 500]),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
     ]
 
 
@@ -212,10 +255,89 @@ def test_axis_driver_explicit_set_speed_retriggers_motion_even_when_cached():
     asyncio.run(backend.set_az_speed(25))
 
     assert fake_serial.writes == [
+        build_fc16_request(10, COMMAND_REGISTER, [100, 25]),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
+    ]
+
+
+def test_axis_driver_move_retries_when_update1_is_not_consumed():
+    responses = _driver_responses()
+    update_request = build_fc03_request(10, COMMAND_TRIGGER_REGISTER, 1)
+    backend, fake_serial = _backend_and_sequence_serial(
+        responses,
+        read_sequences={
+            update_request: [_fc03_response(10, 1), _fc03_response(10, 0)],
+        },
+    )
+    backend.config.command_apply_confirmation_timeout_s = 0.0
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.move_cw())
+
+    assert fake_serial.writes == [
+        build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
+        build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
+    ]
+    assert backend._last_command_diagnostics[10]["confirmation_attempt"] == 2
+    assert backend._last_command_diagnostics[10]["command_final_status"] == "confirmed"
+
+
+def test_axis_driver_move_retry_falls_back_to_fc06_after_unconfirmed_fc16():
+    responses = _driver_responses()
+    update_request = build_fc03_request(10, COMMAND_TRIGGER_REGISTER, 1)
+    status_request = build_fc03_request(10, MOTION_STATE_REGISTER, 7)
+    backend, fake_serial = _backend_and_sequence_serial(
+        responses,
+        read_sequences={
+            update_request: [_fc03_response(10, 0), _fc03_response(10, 0), _fc03_response(10, 0)],
+            status_request: [
+                _fc03_block_response(10, [0, 1, 32768, 1, 150, 2, 0]),
+                _fc03_block_response(10, [0, 1, 32768, 1, 150, 2, 0]),
+                _fc03_block_response(10, [30, 1, 32768, 1, 150, 2, 0]),
+            ],
+        },
+    )
+    backend.config.command_apply_confirmation_timeout_s = 0.0
+    asyncio.run(backend.connect())
+    asyncio.run(backend.set_az_speed(25))
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.move_cw())
+
+    assert fake_serial.writes == [
+        build_fc16_request(10, COMMAND_REGISTER, [100, 25]),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
         build_fc06_request(10, COMMAND_REGISTER, 100),
         build_fc06_request(10, SPEED_REGISTER, 25),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
     ]
+    assert backend._last_command_diagnostics[10]["confirmation_attempt"] == 2
+    assert backend._last_command_diagnostics[10]["command_final_status"] == "confirmed"
+
+
+def test_axis_driver_stop_consumed_but_still_moving_does_not_spam_immediately():
+    backend, fake_serial = _backend_and_serial()
+    backend.config.stop_reinforce_delay_s = 10.0
+    asyncio.run(backend.connect())
+    asyncio.run(backend.move_cw())
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.stop_az())
+
+    assert fake_serial.writes == [
+        build_fc06_request(10, COMMAND_REGISTER, 10),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
+    ]
+    assert backend._last_command_diagnostics[10]["command_final_status"] == "accepted_pending_stop_effect"
 
 
 def test_axis_driver_timeout_sets_degraded_state():
@@ -476,10 +598,13 @@ def test_axis_driver_stop_reinforcement_sends_exactly_one_delayed_stop():
     assert fake_serial.writes == [
         build_fc06_request(10, COMMAND_REGISTER, 100),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
         build_fc06_request(10, COMMAND_REGISTER, 10),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
         build_fc06_request(10, COMMAND_REGISTER, 10),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
     ]
 
 
@@ -501,8 +626,11 @@ def test_axis_driver_stop_reinforcement_is_canceled_by_new_move():
     assert fake_serial.writes == [
         build_fc06_request(10, COMMAND_REGISTER, 100),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
         build_fc06_request(10, COMMAND_REGISTER, 10),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
         build_fc06_request(10, COMMAND_REGISTER, 100),
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
     ]

@@ -21,6 +21,8 @@ class AxisServerConnectionConfig:
     keepalive_interval_s: float = 1.0
     position_interval_s: float = 0.2
     status_interval_s: float = 1.0
+    rate_estimation_window_s: float = 2.0
+    rate_estimation_smoothing_alpha: float = 0.35
 
 
 @dataclass
@@ -45,6 +47,19 @@ class AxisDriverConnectionConfig:
     stop_reinforce_count: int = 1
     legacy_accept_short_fc6_response: bool = True
     speed_readback_enabled: bool = False
+    command_apply_confirmation_enabled: bool = True
+    command_max_transmissions: int = 3
+    command_apply_confirmation_delay_s: float = 0.05
+    command_apply_confirmation_timeout_s: float = 0.25
+    confirm_update1_reset: bool = True
+    confirm_move_by_motion_state: bool = True
+    confirm_stop_by_motion_state: bool = True
+    use_fc16_for_motion_speed: bool = True
+    command_confirm_status_read_mode: str = "block"
+    command_confirm_status_block_start: int = 101
+    command_confirm_status_block_length: int = 7
+    rate_estimation_window_s: float = 2.0
+    rate_estimation_smoothing_alpha: float = 0.35
 
 
 @dataclass
@@ -55,6 +70,8 @@ class PstRotatorConnectionConfig:
     command_timeout_s: float = 0.5
     position_interval_s: float = 0.5
     status_interval_s: float = 1.0
+    rate_estimation_window_s: float = 2.0
+    rate_estimation_smoothing_alpha: float = 0.35
 
 
 @dataclass
@@ -97,6 +114,8 @@ def _as_bool(value: Any, default: bool) -> bool:
 
 def _axis_driver_status_read_mode(value: Any, default: str = "minimal_single_register") -> str:
     mode = str(value if value is not None else default).strip().lower()
+    if mode == "block_101_107":
+        return "block"
     if mode in {"block", "single_register", "minimal_single_register"}:
         return mode
     raise AntennaConfigError(
@@ -123,6 +142,9 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
     axis_server_section = _section(settings, "AXIS_SERVER")
     axis_driver_section = _section(settings, "AXIS_DRIVER")
     pst_section = _section(settings, "PST_ROTATOR")
+    antenna_settings = _section(settings, "ANTENNA")
+    rate_estimation_window_s = float(_get(antenna_settings, "rate_estimation_window_s", 2.0))
+    rate_estimation_smoothing_alpha = float(_get(antenna_settings, "rate_estimation_smoothing_alpha", 0.35))
 
     return AntennaConnectionConfig(
         mode=mode,
@@ -134,6 +156,8 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
             keepalive_interval_s=float(_get(axis_server_section, "keepalive_interval_s", 1.0)),
             position_interval_s=float(_get(axis_server_section, "position_interval_s", 0.2)),
             status_interval_s=float(_get(axis_server_section, "status_interval_s", 1.0)),
+            rate_estimation_window_s=rate_estimation_window_s,
+            rate_estimation_smoothing_alpha=rate_estimation_smoothing_alpha,
         ),
         axis_driver=AxisDriverConnectionConfig(
             comport=str(_get(axis_driver_section, "comport", "COM11")),
@@ -177,6 +201,40 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
                 _get(axis_driver_section, "speed_readback_enabled", False),
                 False,
             ),
+            command_apply_confirmation_enabled=_as_bool(
+                _get(axis_driver_section, "command_apply_confirmation_enabled", True),
+                True,
+            ),
+            command_max_transmissions=max(1, int(_get(axis_driver_section, "command_max_transmissions", 3))),
+            command_apply_confirmation_delay_s=float(
+                _get(axis_driver_section, "command_apply_confirmation_delay_s", 0.05)
+            ),
+            command_apply_confirmation_timeout_s=float(
+                _get(axis_driver_section, "command_apply_confirmation_timeout_s", 0.25)
+            ),
+            confirm_update1_reset=_as_bool(_get(axis_driver_section, "confirm_update1_reset", True), True),
+            confirm_move_by_motion_state=_as_bool(
+                _get(axis_driver_section, "confirm_move_by_motion_state", True),
+                True,
+            ),
+            confirm_stop_by_motion_state=_as_bool(
+                _get(axis_driver_section, "confirm_stop_by_motion_state", True),
+                True,
+            ),
+            use_fc16_for_motion_speed=_as_bool(_get(axis_driver_section, "use_fc16_for_motion_speed", True), True),
+            command_confirm_status_read_mode=_axis_driver_status_read_mode(
+                _get(axis_driver_section, "command_confirm_status_read_mode", "block"),
+                "block",
+            ),
+            command_confirm_status_block_start=int(
+                _get(axis_driver_section, "command_confirm_status_block_start", 101)
+            ),
+            command_confirm_status_block_length=max(
+                2,
+                int(_get(axis_driver_section, "command_confirm_status_block_length", 7)),
+            ),
+            rate_estimation_window_s=rate_estimation_window_s,
+            rate_estimation_smoothing_alpha=rate_estimation_smoothing_alpha,
         ),
         pst_rotator=PstRotatorConnectionConfig(
             host=str(_get(pst_section, "host", "127.0.0.1")),
@@ -185,5 +243,7 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
             command_timeout_s=float(_get(pst_section, "command_timeout_s", 0.5)),
             position_interval_s=float(_get(pst_section, "position_interval_s", 0.5)),
             status_interval_s=float(_get(pst_section, "status_interval_s", 1.0)),
+            rate_estimation_window_s=rate_estimation_window_s,
+            rate_estimation_smoothing_alpha=rate_estimation_smoothing_alpha,
         ),
     )

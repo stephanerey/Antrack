@@ -898,11 +898,13 @@ class ConnectionUiMixin:
 
             az_rate = data.get("az_rate")
             el_rate = data.get("el_rate")
+            antenna_settings = self.settings.get("ANTENNA", self.settings.get("antenna", {})) if isinstance(self.settings, dict) else {}
+            rate_decimals = max(0, min(5, int(antenna_settings.get("rate_display_decimals", 3))))
             self.label_antenna_az_rate.setText(
-                f"{az_rate:.2f} °/s" if isinstance(az_rate, (int, float)) else "0.00 °/s"
+                f"{az_rate:.{rate_decimals}f} °/s" if isinstance(az_rate, (int, float)) else f"{0.0:.{rate_decimals}f} °/s"
             )
             self.label_antenna_el_rate.setText(
-                f"{el_rate:.2f} °/s" if isinstance(el_rate, (int, float)) else "0.00 °/s"
+                f"{el_rate:.{rate_decimals}f} °/s" if isinstance(el_rate, (int, float)) else f"{0.0:.{rate_decimals}f} °/s"
             )
 
             self.label_antenna_az_setrate.setText(f"{data.get('az_setrate'):.0f}")

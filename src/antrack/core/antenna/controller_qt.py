@@ -357,5 +357,5 @@ def _polling_intervals_for_config(config: AntennaConnectionConfig) -> tuple[floa
     status_interval = float(getattr(selected, "status_interval_s", 1.0))
     if config.mode == AntennaConnectionMode.AXIS_DRIVER:
         position_interval = max(0.10, position_interval)
-        status_interval = max(0.5, status_interval)
+        status_interval = max(0.10, status_interval)
     return position_interval, status_interval

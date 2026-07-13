@@ -9,6 +9,7 @@ from typing import Callable
 
 from antrack.core.antenna.backend import BaseAntennaBackend
 from antrack.core.antenna.config import AxisDriverConnectionConfig
+from antrack.core.antenna.rate_estimator import PositionRateEstimator
 from antrack.core.antenna.types import AntennaConnectionState, AntennaVersions
 from antrack.core.axis.axis_driver_constants import (
     COMMAND_REGISTER,
@@ -18,6 +19,7 @@ from antrack.core.axis.axis_driver_constants import (
     MODBUS_FAIL,
     MODBUS_OK,
     MOTOR_ALARM_REGISTER,
+    MOTION_DIRECTION_REGISTER,
     MOTION_CCW,
     MOTION_CW,
     MOTION_STATE_REGISTER,
@@ -32,8 +34,10 @@ from antrack.core.axis.axis_protocol import raw_az_to_deg, raw_el_to_deg
 from antrack.core.axis.modbus_rtu import (
     build_fc03_request,
     build_fc06_request,
+    build_fc16_request,
     parse_fc03_response,
     parse_fc06_response,
+    parse_fc16_response,
 )
 
 try:
@@ -123,14 +127,27 @@ class AxisDriverBackend(BaseAntennaBackend):
             self.config.az_slave_address: MOTION_STOP,
             self.config.el_slave_address: MOTION_STOP,
         }
+        self._axis_requested_motion_state = {
+            self.config.az_slave_address: MOTION_STOP,
+            self.config.el_slave_address: MOTION_STOP,
+        }
+        self._axis_requested_speed_state = {
+            self.config.az_slave_address: None,
+            self.config.el_slave_address: None,
+        }
         self._axis_speed_state = {
             self.config.az_slave_address: None,
             self.config.el_slave_address: None,
         }
+        self._last_command_diagnostics: dict[int, dict[str, object]] = {}
         self._stop_reinforce_tasks: dict[int, asyncio.Task] = {}
         self._stop_reinforce_sent = 0
         self._stop_reinforce_scheduled = 0
         self._stop_reinforce_canceled = 0
+        self._rate_estimator = PositionRateEstimator(
+            window_s=float(getattr(config, "rate_estimation_window_s", 2.0)),
+            smoothing_alpha=float(getattr(config, "rate_estimation_smoothing_alpha", 0.35)),
+        )
 
     async def _ensure_async_primitives(self) -> None:
         loop = asyncio.get_running_loop()
@@ -287,6 +304,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.telemetry.az = raw_az_to_deg(az_raw)
         self.telemetry.el = raw_el_to_deg(el_raw)
         now_monotonic = time.monotonic()
+        self._update_rate_estimate(now_monotonic)
         self._record_update_interval(kind="position", previous_monotonic=self._position_last_update_monotonic, now_monotonic=now_monotonic)
         self.telemetry.last_update_monotonic = now_monotonic
         self._position_last_update_monotonic = now_monotonic
@@ -365,6 +383,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         now_monotonic = time.monotonic()
         self._record_update_interval(kind="status", previous_monotonic=self._status_last_update_monotonic, now_monotonic=now_monotonic)
         if include_position:
+            self._update_rate_estimate(now_monotonic)
             self.telemetry.last_update_monotonic = now_monotonic
         self._status_last_update_monotonic = now_monotonic
         self._safety_status_poll_finished_monotonic = now_monotonic
@@ -383,6 +402,11 @@ class AxisDriverBackend(BaseAntennaBackend):
         }
         self._last_status_payload = dict(payload)
         return payload
+
+    def _update_rate_estimate(self, timestamp_s: float) -> None:
+        az_rate, el_rate = self._rate_estimator.add(timestamp_s, self.telemetry.az, self.telemetry.el)
+        self.telemetry.az_rate = float(az_rate)
+        self.telemetry.el_rate = float(el_rate)
 
     async def get_versions(self) -> AntennaVersions:
         await self._ensure_async_primitives()
@@ -622,6 +646,30 @@ class AxisDriverBackend(BaseAntennaBackend):
             context=f"fc06_slave_{slave}_reg_{register}",
         )
 
+    def _write_registers_locked(self, slave: int, start_register: int, values: list[int]) -> tuple[int, int]:
+        self._ensure_serial_open()
+        self.logger.info(
+            "AxisDriver FC16 write: slave=%s start_register=%s values=%s",
+            slave,
+            start_register,
+            values,
+        )
+        request = build_fc16_request(slave, start_register, values)
+        return self._exchange_and_parse(
+            request,
+            candidate_lengths=(8,),
+            parser=lambda frame: parse_fc16_response(
+                frame,
+                slave=slave,
+                start_register=start_register,
+                quantity=len(values),
+            ),
+            func_code=0x10,
+            timeout_s=float(getattr(self.config, "command_timeout_s", 0.5)),
+            background=False,
+            context=f"fc16_slave_{slave}_reg_{start_register}",
+        )
+
     async def _write_axis_speed(self, slave: int, speed: float) -> None:
         await self._apply_axis_state(slave, speed=speed)
 
@@ -663,40 +711,94 @@ class AxisDriverBackend(BaseAntennaBackend):
         force_trigger: bool = False,
         force_speed_write: bool = False,
     ) -> None:
-        desired_motion = int(self._axis_motion_state.get(slave, MOTION_STOP) if motion is None else motion)
+        desired_motion = int(self._axis_requested_motion_state.get(slave, MOTION_STOP) if motion is None else motion)
         current_speed = self._axis_speed_state.get(slave)
-        desired_speed = current_speed
+        desired_speed = self._axis_requested_speed_state.get(slave, current_speed)
         if speed is not None:
             desired_speed = self._coerce_speed(speed)
 
         speed_changed = desired_speed is not None and desired_speed != current_speed
         explicit_speed_write = speed is not None and desired_speed is not None
         moving_command = motion is not None and desired_motion != MOTION_STOP
-        current_motion_is_active = motion is None and desired_motion != MOTION_STOP
         should_write_speed = (
             (explicit_speed_write and (speed_changed or force_speed_write))
             or (moving_command and desired_speed is not None)
         )
         motion_changed = desired_motion != self._axis_motion_state.get(slave, MOTION_STOP)
         should_write_motion = motion is not None or force_trigger
-        should_retrigger_active_motion = (
-            should_write_speed
-            and explicit_speed_write
-            and current_motion_is_active
-        )
-        should_reinforce_speed_before_motion = should_write_speed and moving_command
-
         motion_write_needed = (
-            (should_write_motion and (motion_changed or force_trigger or should_write_speed))
-            or should_retrigger_active_motion
-        )
+            should_write_motion
+            and (motion_changed or force_trigger or should_write_speed)
+        ) or should_write_speed
 
-        if motion_write_needed:
-            self._write_register_locked(slave, COMMAND_REGISTER, int(desired_motion))
-        if should_write_speed:
-            self._write_register_locked(slave, SPEED_REGISTER, int(desired_speed))
-        if motion_write_needed or should_write_speed:
-            self._write_register_locked(slave, COMMAND_TRIGGER_REGISTER, 1)
+        if not motion_write_needed and not should_write_speed:
+            return
+
+        self._axis_requested_motion_state[slave] = int(desired_motion)
+        if desired_speed is not None:
+            self._axis_requested_speed_state[slave] = int(desired_speed)
+
+        command_name = self._command_name(desired_motion)
+        max_attempts = self._command_max_transmissions()
+        final_diag: dict[str, object] = {}
+        confirmed = False
+        for attempt in range(1, max_attempts + 1):
+            modbus_write_ack = False
+            retry_reason = ""
+            try:
+                self._transmit_axis_command_locked(
+                    slave,
+                    motion=int(desired_motion),
+                    speed=int(desired_speed) if should_write_speed and desired_speed is not None else None,
+                    write_motion=motion_write_needed,
+                    use_fc16=attempt == 1,
+                )
+                modbus_write_ack = True
+                diag = self._confirm_axis_command_locked(
+                    slave,
+                    motion=int(desired_motion),
+                    command_name=command_name,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    modbus_write_ack=modbus_write_ack,
+                )
+                final_diag = diag
+                confirmed = bool(diag["command_final_status"] in {"confirmed", "accepted_pending_stop_effect"})
+                retry_reason = str(diag.get("command_retry_reason") or "")
+            except Exception as exc:
+                retry_reason = str(exc)
+                final_diag = self._command_diag(
+                    slave,
+                    command_name=command_name,
+                    motion=int(desired_motion),
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    modbus_write_ack=modbus_write_ack,
+                    command_final_status="failed",
+                    command_retry_reason=retry_reason,
+                )
+                if attempt >= max_attempts:
+                    self._last_command_diagnostics[int(slave)] = final_diag
+                    raise
+
+            self._last_command_diagnostics[int(slave)] = final_diag
+            if confirmed:
+                break
+            if attempt < max_attempts:
+                self.logger.warning(
+                    "AxisDriver %s %s: %s, retry %d/%d",
+                    self._axis_name(slave),
+                    command_name,
+                    retry_reason or "not confirmed",
+                    attempt + 1,
+                    max_attempts,
+                )
+
+        if not confirmed:
+            raise TimeoutError(
+                f"AxisDriver {self._axis_name(slave)} {command_name} not confirmed after {max_attempts} attempts"
+            )
+
         if (
             should_write_speed
             and (explicit_speed_write or moving_command)
@@ -726,7 +828,272 @@ class AxisDriverBackend(BaseAntennaBackend):
                 )
 
         self._axis_motion_state[slave] = int(desired_motion)
-        self._axis_speed_state[slave] = desired_speed
+        if desired_speed is not None:
+            self._axis_speed_state[slave] = int(desired_speed)
+
+    def _transmit_axis_command_locked(
+        self,
+        slave: int,
+        *,
+        motion: int,
+        speed: int | None,
+        write_motion: bool,
+        use_fc16: bool,
+    ) -> None:
+        if write_motion and speed is not None:
+            if use_fc16 and bool(getattr(self.config, "use_fc16_for_motion_speed", True)):
+                try:
+                    self._write_registers_locked(slave, COMMAND_REGISTER, [int(motion), int(speed)])
+                except Exception as exc:
+                    self.logger.warning("AxisDriver FC16 motion/speed failed, falling back to FC06: %s", exc)
+                    self._write_register_locked(slave, COMMAND_REGISTER, int(motion))
+                    self._write_register_locked(slave, SPEED_REGISTER, int(speed))
+            else:
+                self._write_register_locked(slave, COMMAND_REGISTER, int(motion))
+                self._write_register_locked(slave, SPEED_REGISTER, int(speed))
+        else:
+            if write_motion:
+                self._write_register_locked(slave, COMMAND_REGISTER, int(motion))
+            if speed is not None:
+                self._write_register_locked(slave, SPEED_REGISTER, int(speed))
+        self._write_register_locked(slave, COMMAND_TRIGGER_REGISTER, 1)
+
+    def _confirm_axis_command_locked(
+        self,
+        slave: int,
+        *,
+        motion: int,
+        command_name: str,
+        attempt: int,
+        max_attempts: int,
+        modbus_write_ack: bool,
+    ) -> dict[str, object]:
+        if not bool(getattr(self.config, "command_apply_confirmation_enabled", True)):
+            return self._command_diag(
+                slave,
+                command_name=command_name,
+                motion=motion,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                modbus_write_ack=modbus_write_ack,
+                update1_consumed=True,
+                motion_state_confirmed=True,
+                command_final_status="confirmed",
+            )
+
+        delay_s = max(0.0, float(getattr(self.config, "command_apply_confirmation_delay_s", 0.05)))
+        if delay_s > 0.0:
+            time.sleep(delay_s)
+
+        timeout_s = max(0.0, float(getattr(self.config, "command_apply_confirmation_timeout_s", 0.25)))
+        deadline = time.monotonic() + timeout_s
+        diag: dict[str, object] = {}
+        while True:
+            update1 = self._read_register_locked(
+                slave,
+                COMMAND_TRIGGER_REGISTER,
+                background=False,
+                context=f"confirm_update1_slave_{slave}",
+            )
+            status = self._read_confirmation_status_locked(slave, command_name=command_name)
+            update1_consumed = int(update1) == 0 or not bool(getattr(self.config, "confirm_update1_reset", True))
+            motion_state_confirmed = self._motion_confirmation_matches(command_name, motion, status)
+            final_status = "confirmed" if update1_consumed and motion_state_confirmed else "retry"
+            retry_reason = ""
+            if not update1_consumed:
+                retry_reason = f"UPDATE1 still {update1}"
+            elif not motion_state_confirmed:
+                retry_reason = self._motion_retry_reason(command_name, motion, status)
+                if command_name == "stop" and int(status.get("motion", -1)) == 30:
+                    final_status = "accepted_pending_stop_effect"
+                    retry_reason = "stop update consumed, motion still MOVE"
+                    motion_state_confirmed = True
+
+            diag = self._command_diag(
+                slave,
+                command_name=command_name,
+                motion=motion,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                modbus_write_ack=modbus_write_ack,
+                update1_consumed=update1_consumed,
+                motion_state_confirmed=motion_state_confirmed,
+                confirmation_301_value=int(update1),
+                confirmation_motion_state_101=status.get("motion"),
+                confirmation_direction_102=status.get("direction"),
+                confirmation_position_103=status.get("raw_position"),
+                confirmation_endstop_104=status.get("endstop"),
+                confirmation_alarm_107=status.get("alarm"),
+                command_final_status=final_status,
+                command_retry_reason=retry_reason,
+            )
+            if final_status in {"confirmed", "accepted_pending_stop_effect"}:
+                self._log_command_confirmation(diag)
+                return diag
+            if time.monotonic() >= deadline:
+                self._log_command_confirmation(diag)
+                return diag
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+
+    def _read_confirmation_status_locked(self, slave: int, *, command_name: str) -> dict[str, int | None]:
+        mode = str(getattr(self.config, "command_confirm_status_read_mode", "block")).strip().lower()
+        if mode == "block_101_107":
+            mode = self.STATUS_READ_MODE_BLOCK
+        if mode == self.STATUS_READ_MODE_BLOCK:
+            start = int(getattr(self.config, "command_confirm_status_block_start", MOTION_STATE_REGISTER))
+            length = int(getattr(self.config, "command_confirm_status_block_length", self._STATUS_BLOCK_LENGTH))
+            try:
+                values = self._read_registers_locked(
+                    slave,
+                    start,
+                    length,
+                    background=False,
+                    context=f"confirm_status_block_slave_{slave}",
+                )
+                return self._status_from_block(start, values)
+            except Exception as exc:
+                self.logger.warning("AxisDriver confirmation block read failed, falling back to singles: %s", exc)
+        payload: dict[str, int | None] = {
+            "motion": self._read_register_locked(
+                slave,
+                MOTION_STATE_REGISTER,
+                background=False,
+                context=f"confirm_motion_slave_{slave}",
+            ),
+            "direction": None,
+            "raw_position": None,
+            "endstop": None,
+            "alarm": None,
+        }
+        if command_name != "stop":
+            payload["direction"] = self._read_register_locked(
+                slave,
+                MOTION_DIRECTION_REGISTER,
+                background=False,
+                context=f"confirm_direction_slave_{slave}",
+            )
+        return payload
+
+    @staticmethod
+    def _status_from_block(start: int, values: list[int]) -> dict[str, int | None]:
+        def value_at(register: int) -> int | None:
+            index = int(register) - int(start)
+            if 0 <= index < len(values):
+                return int(values[index])
+            return None
+
+        return {
+            "motion": value_at(MOTION_STATE_REGISTER),
+            "direction": value_at(MOTION_DIRECTION_REGISTER),
+            "raw_position": value_at(RAW_POSITION_REGISTER),
+            "endstop": value_at(ENDSTOP_REGISTER),
+            "alarm": value_at(MOTOR_ALARM_REGISTER),
+        }
+
+    def _motion_confirmation_matches(self, command_name: str, motion: int, status: dict[str, int | None]) -> bool:
+        motion_state = status.get("motion")
+        if motion_state is None:
+            return False
+        if command_name == "stop":
+            if not bool(getattr(self.config, "confirm_stop_by_motion_state", True)):
+                return True
+            return int(motion_state) in {0, 1, 10}
+        if not bool(getattr(self.config, "confirm_move_by_motion_state", True)):
+            return True
+        expected_direction = self._direction_for_motion(motion)
+        return int(motion_state) in {20, 30} and int(status.get("direction", -1)) == expected_direction
+
+    def _motion_retry_reason(self, command_name: str, motion: int, status: dict[str, int | None]) -> str:
+        if command_name == "stop":
+            return f"state={status.get('motion')} not stopped"
+        return (
+            f"state={status.get('motion')} direction={status.get('direction')} "
+            f"expected_direction={self._direction_for_motion(motion)}"
+        )
+
+    def _command_diag(
+        self,
+        slave: int,
+        *,
+        command_name: str,
+        motion: int,
+        attempt: int,
+        max_attempts: int,
+        modbus_write_ack: bool,
+        update1_consumed: bool = False,
+        motion_state_confirmed: bool = False,
+        confirmation_301_value: int | None = None,
+        confirmation_motion_state_101: int | None = None,
+        confirmation_direction_102: int | None = None,
+        confirmation_position_103: int | None = None,
+        confirmation_endstop_104: int | None = None,
+        confirmation_alarm_107: int | None = None,
+        command_final_status: str = "pending",
+        command_retry_reason: str = "",
+    ) -> dict[str, object]:
+        return {
+            "command_name": command_name,
+            "axis": self._axis_name(slave),
+            "requested_motion": int(motion),
+            "requested_speed": self._axis_requested_speed_state.get(slave),
+            "modbus_write_ack": bool(modbus_write_ack),
+            "update1_consumed": bool(update1_consumed),
+            "motion_state_confirmed": bool(motion_state_confirmed),
+            "confirmation_attempt": int(attempt),
+            "confirmation_max_attempts": int(max_attempts),
+            "confirmation_read_mode": str(getattr(self.config, "command_confirm_status_read_mode", "block")),
+            "confirmation_301_value": confirmation_301_value,
+            "confirmation_motion_state_101": confirmation_motion_state_101,
+            "confirmation_direction_102": confirmation_direction_102,
+            "confirmation_position_103": confirmation_position_103,
+            "confirmation_endstop_104": confirmation_endstop_104,
+            "confirmation_alarm_107": confirmation_alarm_107,
+            "command_final_status": command_final_status,
+            "command_retry_reason": command_retry_reason,
+        }
+
+    def _log_command_confirmation(self, diag: dict[str, object]) -> None:
+        status = str(diag.get("command_final_status"))
+        log_method = self.logger.info if status in {"confirmed", "accepted_pending_stop_effect"} else self.logger.warning
+        log_method(
+            "AxisDriver %s %s: write %s, UPDATE1 %s, state=%s, dir=%s, status=%s attempt %s/%s%s",
+            diag.get("axis"),
+            diag.get("command_name"),
+            "OK" if diag.get("modbus_write_ack") else "FAIL",
+            "consumed" if diag.get("update1_consumed") else "pending",
+            diag.get("confirmation_motion_state_101"),
+            diag.get("confirmation_direction_102"),
+            status,
+            diag.get("confirmation_attempt"),
+            diag.get("confirmation_max_attempts"),
+            f", reason={diag.get('command_retry_reason')}" if diag.get("command_retry_reason") else "",
+        )
+
+    def _command_max_transmissions(self) -> int:
+        return max(1, int(getattr(self.config, "command_max_transmissions", 3)))
+
+    @staticmethod
+    def _command_name(motion: int) -> str:
+        if int(motion) == MOTION_STOP:
+            return "stop"
+        if int(motion) == MOTION_CW:
+            return "move_cw"
+        if int(motion) == MOTION_CCW:
+            return "move_ccw"
+        return f"motion_{motion}"
+
+    def _axis_name(self, slave: int) -> str:
+        if int(slave) == int(self.config.az_slave_address):
+            return "AZ"
+        if int(slave) == int(self.config.el_slave_address):
+            return "EL"
+        return str(slave)
+
+    @staticmethod
+    def _direction_for_motion(motion: int) -> int:
+        if int(motion) == MOTION_CW:
+            return 1
+        return 0
 
     @classmethod
     def _coerce_speed(cls, speed: float) -> int:
@@ -1016,14 +1383,14 @@ class AxisDriverBackend(BaseAntennaBackend):
         requested_position_interval = float(self.config.position_interval_s)
         requested_status_interval = float(self.config.status_interval_s)
         effective_position_interval = max(0.10, requested_position_interval)
-        effective_status_interval = max(0.5, requested_status_interval)
+        effective_status_interval = max(0.10, requested_status_interval)
         if requested_position_interval < 0.10:
             self.logger.warning(
                 "AxisDriver position interval %.3fs is too fast for current firmware; clamped to %.3fs",
                 requested_position_interval,
                 effective_position_interval,
             )
-        if requested_status_interval < 0.5:
+        if requested_status_interval < 0.10:
             self.logger.warning(
                 "AxisDriver status interval %.3fs is too fast for current firmware; clamped to %.3fs",
                 requested_status_interval,
@@ -1124,7 +1491,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         )
         return {
             "configured_position_interval_s": max(0.10, float(self.config.position_interval_s)),
-            "configured_status_interval_s": max(0.5, float(self.config.status_interval_s)),
+            "configured_status_interval_s": max(0.10, float(self.config.status_interval_s)),
             "position_last_update_monotonic_s": self._position_last_update_monotonic,
             "status_last_update_monotonic_s": self._status_last_update_monotonic,
             "backend_state": self.state.value if hasattr(self.state, "value") else str(self.state),
@@ -1154,6 +1521,10 @@ class AxisDriverBackend(BaseAntennaBackend):
             "stop_reinforce_scheduled": self._stop_reinforce_scheduled,
             "stop_reinforce_sent": self._stop_reinforce_sent,
             "stop_reinforce_canceled": self._stop_reinforce_canceled,
+            "last_command_diagnostics": {
+                str(slave): dict(payload)
+                for slave, payload in self._last_command_diagnostics.items()
+            },
             "modbus_requests": self._diag_total_requests,
             "modbus_fc03": self._diag_total_fc03,
             "modbus_fc06": self._diag_total_fc06,
