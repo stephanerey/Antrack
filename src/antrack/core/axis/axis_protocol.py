@@ -62,10 +62,10 @@ def raw_az_to_deg(raw: int) -> float:
 
 
 def raw_el_to_deg(raw: int) -> float:
-    value = raw_az_to_deg(raw)
-    if value > 180.0:
-        value -= 360.0
-    return value
+    """Decode the Axis elevation word as a signed 16-bit two's-complement position."""
+    word = int(raw) & 0xFFFF
+    signed_word = word if word < 0x8000 else word - 0x10000
+    return signed_word * 360.0 / 65535.0
 
 
 def deg_to_raw(deg: float) -> int:

@@ -33,3 +33,15 @@ def test_thread_manager_records_error():
     assert diag["status"] == TaskStatus.FAILED
     assert "boom" in (diag["last_error"] or "")
     assert diag["last_traceback"]
+
+
+def test_thread_manager_can_submit_coro_without_waiting_for_result():
+    tm = ThreadManager()
+
+    async def answer():
+        return 42
+
+    future = tm.submit_coro("TestAsyncLoop", answer)
+
+    assert future.result(timeout=1.0) == 42
+    tm.stop_thread("TestAsyncLoop")

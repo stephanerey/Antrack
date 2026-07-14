@@ -58,6 +58,8 @@ class AntennaTelemetry:
     index_el: Optional[int] = None
     motor_alarm_az: Optional[int] = None
     motor_alarm_el: Optional[int] = None
+    status_update_monotonic: Optional[float] = None
+    status_update_timestamp: Optional[float] = None
     signal: Optional[int] = None
     last_update_monotonic: Optional[float] = None
 
@@ -79,6 +81,8 @@ class AntennaTelemetry:
             "index_el": self.index_el,
             "motor_alarm_az": self.motor_alarm_az,
             "motor_alarm_el": self.motor_alarm_el,
+            "status_update_monotonic": self.status_update_monotonic,
+            "status_update_timestamp": self.status_update_timestamp,
             "signal": self.signal,
             "last_update_monotonic": self.last_update_monotonic,
         }

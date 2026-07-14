@@ -86,6 +86,22 @@ class SequenceSerial(FakeSerial):
         return super().read(size)
 
 
+class BlockingCountSerial(FakeSerial):
+    """Model pyserial's wait when more bytes are requested than available."""
+
+    def __init__(self, responses, **kwargs):
+        super().__init__(responses, **kwargs)
+        self.read_sizes = []
+        self.overrequests = 0
+
+    def read(self, size: int) -> bytes:
+        self.read_sizes.append(size)
+        if size > len(self.pending_response):
+            self.overrequests += 1
+            time.sleep(0.02)
+        return super().read(size)
+
+
 def _driver_responses():
     responses = {
         build_fc03_request(10, RELEASE_REGISTER, 1): _fc03_response(10, 150),
@@ -126,6 +142,7 @@ def _backend_and_serial():
     config = AxisDriverConnectionConfig(
         comport="COM7",
         legacy_accept_short_fc6_response=False,
+        use_fc16_for_motion_speed=True,
     )
     backend = AxisDriverBackend(config, serial_factory=lambda **kwargs: fake_serial)
     return backend, fake_serial
@@ -136,6 +153,7 @@ def _backend_and_serial_with_responses(responses):
     config = AxisDriverConnectionConfig(
         comport="COM7",
         legacy_accept_short_fc6_response=False,
+        use_fc16_for_motion_speed=True,
     )
     backend = AxisDriverBackend(config, serial_factory=lambda **kwargs: fake_serial)
     return backend, fake_serial
@@ -146,6 +164,7 @@ def _backend_and_sequence_serial(responses, read_sequences):
     config = AxisDriverConnectionConfig(
         comport="COM7",
         legacy_accept_short_fc6_response=False,
+        use_fc16_for_motion_speed=True,
     )
     backend = AxisDriverBackend(config, serial_factory=lambda **kwargs: fake_serial)
     return backend, fake_serial
@@ -168,6 +187,8 @@ def test_axis_driver_connect_reads_versions_and_status():
     assert backend.versions.driver_version_az == "1.50"
     assert backend.telemetry.index_az == 2
     assert backend.telemetry.index_el == 2
+    assert backend.telemetry.status_update_monotonic is not None
+    assert backend.telemetry.status_update_timestamp is not None
     assert fake_serial.is_open is True
 
 
@@ -197,6 +218,60 @@ def test_axis_driver_set_speed_and_move_emit_expected_frames():
         build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
         *_confirm_frames(10),
     ]
+
+
+def test_axis_driver_manual_jog_combines_motion_and_speed():
+    backend, fake_serial = _backend_and_serial()
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    ack = asyncio.run(backend.manual_jog("az", "CW", 300))
+
+    assert ack == 100
+    assert backend.telemetry.az_setrate == 300.0
+    assert backend.axis_status["azimuth"] == "CW"
+    assert fake_serial.writes == [
+        build_fc16_request(10, COMMAND_REGISTER, [100, 300]),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
+    ]
+
+
+def test_axis_driver_manual_jog_uses_reliable_fc06_sequence_by_default():
+    fake_serial = FakeSerial(_driver_responses())
+    config = AxisDriverConnectionConfig(
+        comport="COM7",
+        legacy_accept_short_fc6_response=False,
+    )
+    backend = AxisDriverBackend(config, serial_factory=lambda **_kwargs: fake_serial)
+    asyncio.run(backend.connect())
+    fake_serial.writes.clear()
+
+    asyncio.run(backend.manual_jog("az", "CW", 300))
+
+    assert fake_serial.writes == [
+        build_fc06_request(10, COMMAND_REGISTER, 100),
+        build_fc06_request(10, SPEED_REGISTER, 300),
+        build_fc06_request(10, COMMAND_TRIGGER_REGISTER, 1),
+        *_confirm_frames(10),
+    ]
+
+
+def test_axis_driver_reads_complete_frames_without_overrequesting():
+    fake_serial = BlockingCountSerial(_driver_responses())
+    config = AxisDriverConnectionConfig(
+        comport="COM7",
+        legacy_accept_short_fc6_response=False,
+        inter_request_gap_s=0.0,
+    )
+    backend = AxisDriverBackend(config, serial_factory=lambda **_kwargs: fake_serial)
+
+    asyncio.run(backend.connect())
+
+    assert backend.is_connected()
+    assert fake_serial.read_sizes
+    assert max(fake_serial.read_sizes) == 1
+    assert fake_serial.overrequests == 0
 
 
 def test_axis_driver_set_speed_while_moving_preserves_motion_state():

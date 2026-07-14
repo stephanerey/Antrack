@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Iterable
 
 import numpy as np
@@ -20,6 +21,158 @@ def _finite_float(value, default: float = 0.0) -> float:
 
 def _rounded_key(value: float) -> float:
     return round(float(value), 9)
+
+
+def project_peak_profile(samples: Iterable[dict], axis: str) -> tuple[list[float], list[float]]:
+    """Project a scan onto one axis by retaining the strongest value per coordinate."""
+    if axis not in {"az", "el"}:
+        raise ValueError(f"Unsupported scan profile axis: {axis}")
+    projected: dict[float, float] = {}
+    for sample in samples:
+        coordinate = _finite_float(sample.get(axis), float("nan"))
+        value = _finite_float(sample.get("value"), float("nan"))
+        if not (math.isfinite(coordinate) and math.isfinite(value)):
+            continue
+        key = _rounded_key(coordinate)
+        projected[key] = max(value, projected.get(key, float("-inf")))
+    coordinates = sorted(projected)
+    return [float(value) for value in coordinates], [float(projected[value]) for value in coordinates]
+
+
+def parabolic_profile_peak(coordinates: Iterable[float], values: Iterable[float]) -> dict | None:
+    """Estimate a local sub-step maximum, falling back safely to the grid maximum."""
+    xs = np.asarray(list(coordinates), dtype=np.float64)
+    ys = np.asarray(list(values), dtype=np.float64)
+    if xs.size == 0 or xs.size != ys.size or not (np.all(np.isfinite(xs)) and np.all(np.isfinite(ys))):
+        return None
+    peak_index = int(np.argmax(ys))
+    grid_position = float(xs[peak_index])
+    grid_value = float(ys[peak_index])
+    result = {
+        "grid_position": grid_position,
+        "grid_value": grid_value,
+        "interpolated_position": grid_position,
+        "interpolated_value": grid_value,
+        "interpolation_used": False,
+    }
+    if peak_index == 0 or peak_index == xs.size - 1:
+        return result
+    local_x = xs[peak_index - 1:peak_index + 2]
+    local_y = ys[peak_index - 1:peak_index + 2]
+    if len(set(float(value) for value in local_x)) != 3:
+        return result
+    local_dx = local_x - grid_position
+    try:
+        a, b, c = np.polyfit(local_dx, local_y, 2)
+    except (TypeError, ValueError, np.linalg.LinAlgError):
+        return result
+    scale = max(1.0, float(np.max(np.abs(local_y))))
+    if not math.isfinite(a) or not math.isfinite(b) or a >= 0.0 or abs(a) <= np.finfo(float).eps * scale:
+        return result
+    vertex_offset = float(-b / (2.0 * a))
+    vertex = grid_position + vertex_offset
+    lower = float(local_x[0])
+    upper = float(local_x[-1])
+    if not math.isfinite(vertex) or vertex < lower or vertex > upper:
+        return result
+    max_local_step = max(abs(grid_position - lower), abs(upper - grid_position))
+    if abs(vertex - grid_position) > max_local_step:
+        return result
+    vertex_value = float(a * vertex_offset * vertex_offset + b * vertex_offset + c)
+    if not math.isfinite(vertex_value):
+        return result
+    result.update(
+        {
+            "interpolated_position": vertex,
+            "interpolated_value": vertex_value,
+            "interpolation_used": True,
+        }
+    )
+    return result
+
+
+def estimate_separable_parabolic_peak(
+    samples: Iterable[dict], *, center_az_deg: float, center_el_deg: float
+) -> dict | None:
+    sample_list = list(samples)
+    if not sample_list:
+        return None
+    az_xs, az_ys = project_peak_profile(sample_list, "az")
+    el_xs, el_ys = project_peak_profile(sample_list, "el")
+    az_peak = parabolic_profile_peak(az_xs, az_ys)
+    el_peak = parabolic_profile_peak(el_xs, el_ys)
+    if az_peak is None or el_peak is None:
+        return None
+    best_sample = max(sample_list, key=lambda point: _finite_float(point.get("value"), float("-inf")))
+    peak = make_peak_estimate(
+        {
+            "az": az_peak["interpolated_position"],
+            "el": el_peak["interpolated_position"],
+            "value": max(float(az_peak["interpolated_value"]), float(el_peak["interpolated_value"])),
+            "timestamp": best_sample.get("timestamp", time.time()),
+        },
+        method="separable_parabolic" if az_peak["interpolation_used"] or el_peak["interpolation_used"] else "grid_peak",
+        theoretical_az_deg=center_az_deg,
+        theoretical_el_deg=center_el_deg,
+    )
+    peak.update(
+        {
+            "discrete_peak": {
+                "az": float(az_peak["grid_position"]),
+                "el": float(el_peak["grid_position"]),
+                "value": _finite_float(best_sample.get("value"), 0.0),
+            },
+            "interpolated_peak": {
+                "az": float(az_peak["interpolated_position"]),
+                "el": float(el_peak["interpolated_position"]),
+                "value": float(peak["value"]),
+            },
+            "interpolation_used": bool(az_peak["interpolation_used"] or el_peak["interpolation_used"]),
+            "interpolation_used_az": bool(az_peak["interpolation_used"]),
+            "interpolation_used_el": bool(el_peak["interpolation_used"]),
+        }
+    )
+    return peak
+
+
+def beam_width_at_minus_db(
+    coordinates: Iterable[float], values: Iterable[float], *, drop_db: float = 3.0
+) -> dict | None:
+    """Return linearly interpolated left/right crossings below the profile peak."""
+    xs = np.asarray(list(coordinates), dtype=np.float64)
+    ys = np.asarray(list(values), dtype=np.float64)
+    if xs.size < 3 or xs.size != ys.size or not (np.all(np.isfinite(xs)) and np.all(np.isfinite(ys))):
+        return None
+    peak_index = int(np.argmax(ys))
+    if peak_index == 0 or peak_index == xs.size - 1:
+        return None
+    level = float(ys[peak_index] - abs(float(drop_db)))
+
+    def crossing(first_index: int, second_index: int) -> float | None:
+        x0, x1 = float(xs[first_index]), float(xs[second_index])
+        y0, y1 = float(ys[first_index]), float(ys[second_index])
+        if math.isclose(y0, y1, rel_tol=0.0, abs_tol=1e-12):
+            return None
+        fraction = (level - y0) / (y1 - y0)
+        if fraction < 0.0 or fraction > 1.0:
+            return None
+        return x0 + fraction * (x1 - x0)
+
+    left = None
+    for index in range(peak_index, 0, -1):
+        if ys[index - 1] <= level <= ys[index] or ys[index] <= level <= ys[index - 1]:
+            left = crossing(index - 1, index)
+            if left is not None:
+                break
+    right = None
+    for index in range(peak_index, xs.size - 1):
+        if ys[index] >= level >= ys[index + 1] or ys[index] <= level <= ys[index + 1]:
+            right = crossing(index, index + 1)
+            if right is not None:
+                break
+    if left is None or right is None or right <= left:
+        return None
+    return {"level_db": level, "left_deg": left, "right_deg": right, "width_deg": right - left}
 
 
 def _corner_map(samples: Iterable[dict]) -> dict[tuple[float, float], dict]:

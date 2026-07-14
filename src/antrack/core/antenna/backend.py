@@ -98,6 +98,29 @@ class AntennaBackend(ABC):
     def supports_manual_jog(self) -> bool:
         return True
 
+    async def manual_jog(self, axis: str, direction: str, speed: float) -> int | None:
+        """Apply a manual speed and direction command.
+
+        Backends may override this to transmit both values atomically.  The
+        default keeps the existing two-command behaviour for transports that
+        do not offer a combined operation.
+        """
+        axis_name = str(axis).strip().lower()
+        direction_name = str(direction).strip().upper()
+        if axis_name == "az":
+            await self.set_az_speed(speed)
+            if direction_name == "CW":
+                return await self.move_cw()
+            if direction_name == "CCW":
+                return await self.move_ccw()
+        elif axis_name == "el":
+            await self.set_el_speed(speed)
+            if direction_name == "UP":
+                return await self.move_up()
+            if direction_name == "DOWN":
+                return await self.move_down()
+        raise ValueError(f"Unsupported manual jog: axis={axis!r}, direction={direction!r}")
+
     def supports_absolute_targets(self) -> bool:
         return False
 

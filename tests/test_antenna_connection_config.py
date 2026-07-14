@@ -10,6 +10,17 @@ def test_missing_antenna_connection_defaults_to_axis_server():
     assert config.axis_server.port == 10000
 
 
+def test_axis_driver_fc06_motion_speed_sequence_is_default():
+    config = load_antenna_connection_config(
+        {
+            "ANTENNA_CONNECTION": {"mode": "axis_driver"},
+            "AXIS_DRIVER": {"comport": "COM7"},
+        }
+    )
+
+    assert config.axis_driver.use_fc16_for_motion_speed is False
+
+
 def test_axis_driver_settings_are_parsed():
     config = load_antenna_connection_config(
         {

@@ -14,8 +14,8 @@ from PyQt5.QtCore import QObject, pyqtSignal
 
 from antrack.tracking.scan_cross import estimate_cross_offset, generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points
-from antrack.tracking.scan_peak import estimate_four_point_divergence_peak
-from antrack.tracking.scan_results import make_peak_estimate, make_scan_result, make_scan_sample
+from antrack.tracking.scan_peak import estimate_four_point_divergence_peak, estimate_separable_parabolic_peak
+from antrack.tracking.scan_results import make_scan_result, make_scan_sample
 from antrack.tracking.scan_spiral import generate_spiral_points, spiral_samples_to_grid
 
 
@@ -193,8 +193,15 @@ class ScanSession(QObject):
     def _estimate_peak(samples: list[dict], config: dict) -> dict | None:
         estimator = str(config.get("peak_estimator", "best_sample")).strip().lower()
         if estimator in {"4point", "four_point", "four_point_divergence", "divergence"}:
-            return estimate_four_point_divergence_peak(samples)
-        return None
+            peak = estimate_four_point_divergence_peak(samples)
+            if peak is not None:
+                return peak
+        best_sample = max(samples, key=lambda point: float(point.get("value", float("-inf"))))
+        return estimate_separable_parabolic_peak(
+            samples,
+            center_az_deg=float(best_sample.get("theoretical_az", config.get("center_az_deg", 0.0))),
+            center_el_deg=float(best_sample.get("theoretical_el", config.get("center_el_deg", 0.0))),
+        )
 
     def _measure_point(self, point: dict, config: dict) -> dict:
         self._wait_if_paused_or_stopped()
@@ -342,24 +349,13 @@ class ScanSession(QObject):
                 el_curve = [sample for sample in samples if sample.get("axis") == "el"]
                 cross_result = estimate_cross_offset(az_curve, el_curve, center_az, center_el)
                 best_point = max(samples, key=lambda point: point["value"])
-                peak_point = {
-                    "az": center_az + float(cross_result.get("az_offset_deg", 0.0)),
-                    "el": center_el + float(cross_result.get("el_offset_deg", 0.0)),
-                    "value": float(best_point["value"]),
-                    "timestamp": float(best_point["timestamp"]),
-                }
                 result = make_scan_result(
                     strategy=strategy,
                     samples=samples,
                     center_az_deg=center_az,
                     center_el_deg=center_el,
                     best_point=best_point,
-                    peak_estimate=make_peak_estimate(
-                        peak_point,
-                        method="cross_max",
-                        theoretical_az_deg=center_az,
-                        theoretical_el_deg=center_el,
-                    ),
+                    peak_estimate=self._estimate_peak(samples, config),
                 )
                 result.update(
                     {

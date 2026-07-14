@@ -1,7 +1,23 @@
+from types import SimpleNamespace
+
+import pytest
+
+from antrack.gui.scan_ui import ScanUiMixin
 from antrack.tracking.scan_cross import estimate_cross_offset, generate_cross_points
 from antrack.tracking.scan_grid import generate_grid_points
-from antrack.tracking.scan_peak import estimate_four_point_divergence_peak
-from antrack.tracking.scan_results import make_scan_result, make_scan_sample, scan_error_series
+from antrack.tracking.scan_peak import (
+    beam_width_at_minus_db,
+    estimate_four_point_divergence_peak,
+    estimate_separable_parabolic_peak,
+    parabolic_profile_peak,
+)
+from antrack.tracking.scan_results import (
+    ScanEtaEstimator,
+    make_peak_estimate,
+    make_scan_result,
+    make_scan_sample,
+    scan_error_series,
+)
 from antrack.tracking.scan_session import ScanSession
 from antrack.tracking.scan_spiral import generate_spiral_points, spiral_samples_to_grid
 
@@ -80,7 +96,8 @@ def test_scan_result_exposes_peak_estimate_and_error_trace():
     assert result["peak_estimate"]["method"] == "best_sample"
     assert result["az_offset_deg"] == 0.5
     assert result["el_offset_deg"] == 0.5
-    assert result["error_trace"][0]["angular_error_deg"] > 0.7
+    assert 0.68 < result["error_trace"][0]["angular_error_deg"] < 0.7
+    assert result["error_trace"][0]["cross_el_error_deg"] < 0.5
 
 
 def test_scan_result_offsets_follow_peak_theoretical_center():
@@ -92,6 +109,19 @@ def test_scan_result_offsets_follow_peak_theoretical_center():
 
     assert result["az_offset_deg"] == 1.0
     assert result["el_offset_deg"] == -1.0
+
+
+def test_total_pointing_error_projects_azimuth_at_scan_elevation():
+    peak = make_peak_estimate(
+        {"az": 12.0, "el": 61.0, "value": 1.0},
+        theoretical_az_deg=10.0,
+        theoretical_el_deg=60.0,
+    )
+
+    assert peak["az_error_deg"] == 2.0
+    assert peak["el_error_deg"] == 1.0
+    assert peak["cross_el_error_deg"] == pytest.approx(1.0)
+    assert peak["total_pointing_error_deg"] == pytest.approx(2.0 ** 0.5)
 
 
 def test_scan_error_series_prepares_plot_values():
@@ -154,11 +184,121 @@ def test_scan_session_recovers_synthetic_offset():
     assert result is not None
     assert abs(result["az_offset_deg"] - 1.0) <= 0.5
     assert abs(result["el_offset_deg"] + 0.5) <= 0.5
-    assert result["peak_estimate"]["method"] == "best_sample"
+    assert result["peak_estimate"]["method"] in {"grid_peak", "separable_parabolic"}
     assert result["error_trace"]
     assert all("theoretical_az" in sample for sample in result["samples"])
     assert all("offset_az" in sample for sample in result["samples"])
     assert all("relative_az_deg" in sample for sample in result["samples"])
+
+
+def test_parabolic_peak_recovers_known_sub_step_maximum():
+    peak = parabolic_profile_peak([-1.0, 0.0, 1.0], [-1.5625, -0.0625, -0.5625])
+
+    assert peak is not None
+    assert peak["interpolation_used"] is True
+    assert peak["interpolated_position"] == pytest.approx(0.25)
+
+
+def test_parabolic_peak_falls_back_at_grid_border():
+    peak = parabolic_profile_peak([0.0, 1.0, 2.0], [3.0, 2.0, 1.0])
+
+    assert peak is not None
+    assert peak["interpolation_used"] is False
+    assert peak["interpolated_position"] == 0.0
+
+
+def test_separable_peak_keeps_discrete_and_interpolated_coordinates():
+    samples = []
+    for az in (-1.0, 0.0, 1.0):
+        for el in (-1.0, 0.0, 1.0):
+            samples.append({"az": az, "el": el, "value": -((az - 0.25) ** 2) - ((el + 0.4) ** 2)})
+
+    peak = estimate_separable_parabolic_peak(samples, center_az_deg=0.0, center_el_deg=0.0)
+
+    assert peak is not None
+    assert peak["discrete_peak"] == {"az": 0.0, "el": 0.0, "value": pytest.approx(-0.2225)}
+    assert peak["az"] == pytest.approx(0.25)
+    assert peak["el"] == pytest.approx(-0.4)
+    assert peak["interpolation_used"] is True
+
+
+def test_beam_width_interpolates_both_minus_3_db_crossings():
+    beam = beam_width_at_minus_db([-2.0, -1.0, 0.0, 1.0, 2.0], [-8.0, -2.0, 0.0, -2.0, -8.0])
+
+    assert beam is not None
+    assert beam["left_deg"] == pytest.approx(-7.0 / 6.0)
+    assert beam["right_deg"] == pytest.approx(7.0 / 6.0)
+    assert beam["width_deg"] == pytest.approx(7.0 / 3.0)
+
+
+def test_beam_width_is_unavailable_when_profile_never_reaches_minus_3_db():
+    assert beam_width_at_minus_db([-1.0, 0.0, 1.0], [-2.0, 0.0, -2.0]) is None
+
+
+def test_scan_eta_uses_observed_point_intervals_and_resets():
+    estimator = ScanEtaEstimator()
+    first = estimator.point_completed(current=1, total=5, monotonic_s=10.0, wall_time_s=100.0)
+    second = estimator.point_completed(current=2, total=5, monotonic_s=12.0, wall_time_s=102.0)
+    third = estimator.point_completed(current=3, total=5, monotonic_s=15.0, wall_time_s=105.0)
+
+    assert first["remaining_s"] is None
+    assert second["remaining_s"] == 6.0
+    assert third["point_duration_s"] == 2.5
+    assert third["remaining_s"] == 5.0
+    estimator.reset(started_monotonic_s=20.0)
+    reset = estimator.point_completed(current=1, total=3, monotonic_s=21.0, wall_time_s=200.0)
+    assert reset["remaining_s"] is None
+
+
+def test_manual_scan_save_uses_autosave_sample_schema_without_overwrite(tmp_path):
+    result = {
+        "config": {"strategy": "grid", "center_mode": "current_position", "metric": "band_power"},
+        "samples": [
+            {
+                "az": 10.0,
+                "el": -0.35,
+                "value": -80.0,
+                "timestamp": 123.0,
+                "theoretical_az": 10.0,
+                "theoretical_el": 0.0,
+            }
+        ],
+    }
+    path = tmp_path / "completed_scan.csv"
+
+    saved = ScanUiMixin._write_completed_scan_csv(result, path, scan_id=4)
+
+    assert saved == path
+    text = path.read_text(encoding="utf-8")
+    assert "session_id,scan_id,sample_index,strategy" in text
+    assert ",4,1,grid,current_position,band_power" in text
+    assert ",-0.35,-80.0," in text
+    with pytest.raises(FileExistsError):
+        ScanUiMixin._write_completed_scan_csv(result, path, scan_id=4)
+
+
+def test_repeat_wait_and_pre_measure_stages_do_not_refresh_previous_heatmap():
+    refresh_calls = []
+
+    class LabelStub:
+        def setText(self, text):
+            self.text = text
+
+    ui = SimpleNamespace(
+        _scan_visual_reset_pending=True,
+        _scan_active_center_mode="fixed",
+        _refresh_scan_path_visuals=lambda: refresh_calls.append(True),
+        _scan_plot_coordinates=lambda _point: (10.0, 20.0),
+        scan_progress_label=LabelStub(),
+    )
+
+    ScanUiMixin._on_scan_progress_updated(
+        ui,
+        {"current": 1, "total": 9, "stage": "move", "point": {"az": 10.0, "el": 20.0}},
+    )
+
+    assert refresh_calls == []
+    assert ui._scan_current_stage == "move"
 
 
 def test_scan_session_emits_progress_stages_during_point_measurement():

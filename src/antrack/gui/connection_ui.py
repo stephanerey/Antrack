@@ -1,6 +1,7 @@
 """Connection and live-telemetry UI extraction for MainUi."""
 
 from __future__ import annotations
+from datetime import datetime
 from time import monotonic
 
 from PyQt5.QtCore import Qt
@@ -8,6 +9,15 @@ from PyQt5.QtWidgets import QComboBox, QFrame, QGridLayout, QLabel, QMessageBox,
 
 from antrack.core.antenna.config import load_antenna_connection_config
 from antrack.core.antenna.types import AntennaConnectionMode
+from antrack.core.antenna.operational_status import (
+    AxisIndexState,
+    AxisOperationalState,
+    TrackingPermission,
+    decode_axis_index_state,
+    decode_axis_operational_status,
+    evaluate_tracking_permission,
+    status_stale_timeout,
+)
 from antrack.core.antenna.controller_qt import AntennaControllerQt
 from antrack.core.axis.axis_client import AxisClientPollingAdapter
 from antrack.gui.ui_styles import (
@@ -120,6 +130,27 @@ def _axis_index_style(display_state: str) -> str:
     return lightgrey_label_color
 
 
+def _axis_operational_style(state: AxisOperationalState) -> str:
+    if state == AxisOperationalState.OK:
+        return green_label_color
+    if state == AxisOperationalState.ALARM:
+        return red_label_color
+    return lightgrey_label_color
+
+
+def format_axis_operational_tooltip(status) -> str:
+    lines = [f"{status.axis} axis status: {status.state.value}"]
+    if status.state == AxisOperationalState.UNKNOWN:
+        lines.append("No valid fresh status received.")
+    else:
+        lines.extend(status.active_flags)
+        lines.append(f"Raw endstop: {status.raw_endstop}")
+        lines.append(f"Raw motor alarm: {status.raw_motor_alarm}")
+    if isinstance(status.updated_timestamp, (int, float)):
+        lines.append(f"Last update: {datetime.fromtimestamp(status.updated_timestamp).strftime('%H:%M:%S.%f')[:-3]}")
+    return "\n".join(lines)
+
+
 class ConnectionUiMixin:
     """Own Axis connection, polling, and live telemetry UI glue."""
 
@@ -147,6 +178,9 @@ class ConnectionUiMixin:
         self.el_reference_latched = False
         self._az_index_blue_until = 0.0
         self._el_index_blue_until = 0.0
+        self._latest_antenna_status_payload = {}
+        self._axis_operational_signatures = {}
+        self._last_tracking_inhibit_signature = None
         self._setup_connection_link_panel()
         self._setup_reference_status_panel()
         self._refresh_connection_panel()
@@ -233,21 +267,36 @@ class ConnectionUiMixin:
 
     def _setup_reference_status_panel(self):
         group = getattr(self, "groupBox_5", None)
-        if group is None or hasattr(self, "label_antenna_index_az"):
+        if group is None:
             return
 
-        self.label_antenna_reference_title = QLabel("Index", group)
-        self.label_antenna_reference_title.setGeometry(10, 140, 91, 20)
-        self.label_antenna_reference_title.setStyleSheet("")
-        self.label_antenna_reference_title.setFrameShape(QFrame.NoFrame)
-        self.label_antenna_reference_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        if not hasattr(self, "label_antenna_index_az"):
+            self.label_antenna_reference_title = QLabel("Index", group)
+            self.label_antenna_reference_title.setGeometry(10, 140, 91, 20)
+            self.label_antenna_reference_title.setStyleSheet("")
+            self.label_antenna_reference_title.setFrameShape(QFrame.NoFrame)
+            self.label_antenna_reference_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        self.label_antenna_index_az = QLabel("", group)
-        self.label_antenna_index_el = QLabel("", group)
-        self.label_antenna_index_az.setGeometry(123, 143, 14, 14)
-        self.label_antenna_index_el.setGeometry(193, 143, 14, 14)
+            self.label_antenna_index_az = QLabel("", group)
+            self.label_antenna_index_el = QLabel("", group)
+            self.label_antenna_index_az.setGeometry(123, 143, 14, 14)
+            self.label_antenna_index_el.setGeometry(193, 143, 14, 14)
 
-        for widget in (self.label_antenna_index_az, self.label_antenna_index_el):
+        self.label_antenna_axis_status_title = QLabel("Status", group)
+        self.label_antenna_axis_status_title.setGeometry(10, 162, 91, 20)
+        self.label_antenna_axis_status_title.setFrameShape(QFrame.NoFrame)
+        self.label_antenna_axis_status_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.label_antenna_status_az = QLabel("", group)
+        self.label_antenna_status_el = QLabel("", group)
+        self.label_antenna_status_az.setGeometry(123, 165, 14, 14)
+        self.label_antenna_status_el.setGeometry(193, 165, 14, 14)
+
+        for widget in (
+            self.label_antenna_index_az,
+            self.label_antenna_index_el,
+            self.label_antenna_status_az,
+            self.label_antenna_status_el,
+        ):
             widget.setFrameShape(QFrame.Box)
             widget.setLineWidth(1)
             widget.setAlignment(Qt.AlignCenter)
@@ -257,7 +306,7 @@ class ConnectionUiMixin:
             widget.setAccessibleDescription("")
 
         if hasattr(self, "verticalLayoutWidget_2"):
-            self.verticalLayoutWidget_2.setGeometry(10, 168, 221, 353)
+            self.verticalLayoutWidget_2.setGeometry(10, 190, 221, 331)
             layout = self.verticalLayout_gauges.layout()
             layout.setContentsMargins(0, 0, 0, 0)
             layout.setSpacing(4)
@@ -324,6 +373,9 @@ class ConnectionUiMixin:
         self.el_reference_latched = False
         self._az_index_blue_until = 0.0
         self._el_index_blue_until = 0.0
+        self._latest_antenna_status_payload = {}
+        self._axis_operational_signatures = {}
+        self._last_tracking_inhibit_signature = None
 
     def _refresh_reference_status_panel(self, data: dict | None = None):
         if not hasattr(self, "label_antenna_index_az") or not hasattr(self, "label_antenna_index_el"):
@@ -389,6 +441,142 @@ class ConnectionUiMixin:
             self.label_antenna_reference_title.setToolTip(_AXIS_DRIVER_REFERENCE_WARNING)
         else:
             self.label_antenna_reference_title.setToolTip("")
+
+        self._refresh_axis_operational_panel(payload)
+
+    def _axis_status_stale_timeout(self) -> float:
+        status_period = 1.0
+        try:
+            status_period = float(getattr(self.axis_client, "polling_intervals", (0.2, 1.0))[1])
+        except Exception:
+            pass
+        return status_stale_timeout(status_period)
+
+    def _axis_safety_state(self, data: dict | None = None):
+        payload = data if isinstance(data, dict) else self._latest_antenna_status_payload
+        payload = payload if isinstance(payload, dict) else {}
+        stale_timeout_s = self._axis_status_stale_timeout()
+        common = {
+            "updated_monotonic": payload.get("status_update_monotonic"),
+            "updated_timestamp": payload.get("status_update_timestamp"),
+            "stale_timeout_s": stale_timeout_s,
+        }
+        az_status = decode_axis_operational_status(
+            "AZ",
+            endstop=payload.get("endstop_az"),
+            motor_alarm=payload.get("motor_alarm_az"),
+            modbus_status=payload.get("modbus_status_az", payload.get("modbus_az")),
+            **common,
+        )
+        el_status = decode_axis_operational_status(
+            "EL",
+            endstop=payload.get("endstop_el"),
+            motor_alarm=payload.get("motor_alarm_el"),
+            modbus_status=payload.get("modbus_status_el", payload.get("modbus_el")),
+            **common,
+        )
+        az_index = decode_axis_index_state(
+            payload.get("index_az"),
+            referenced_latched=bool(getattr(self, "az_reference_latched", False)),
+            status_is_fresh=az_status.is_fresh,
+        )
+        el_index = decode_axis_index_state(
+            payload.get("index_el"),
+            referenced_latched=bool(getattr(self, "el_reference_latched", False)),
+            status_is_fresh=el_status.is_fresh,
+        )
+        permission = evaluate_tracking_permission(
+            self.selected_antenna_mode(),
+            az_index=az_index,
+            el_index=el_index,
+            az_status=az_status,
+            el_status=el_status,
+        )
+        return az_index, el_index, az_status, el_status, permission
+
+    def tracking_permission(self) -> TrackingPermission:
+        """Central business check used by every automatic tracking start path."""
+        return self._axis_safety_state()[4]
+
+    def validate_tracking_start(self, *, show_message: bool = True) -> bool:
+        permission = self.tracking_permission()
+        if permission.allowed:
+            return True
+        message = permission.message()
+        self.status_bar.showMessage(message.replace("\n", " "), 6000)
+        if show_message:
+            QMessageBox.information(self, "Tracking", message)
+        return False
+
+    def _refresh_axis_operational_panel(self, data: dict | None = None):
+        if isinstance(data, dict) and data:
+            self._latest_antenna_status_payload = dict(data)
+        az_index, el_index, az_status, el_status, permission = self._axis_safety_state(data)
+
+        for index_state, widget_name in (
+            (az_index, "label_antenna_index_az"),
+            (el_index, "label_antenna_index_el"),
+        ):
+            if index_state == AxisIndexState.UNKNOWN:
+                widget = getattr(self, widget_name, None)
+                if widget is not None:
+                    widget.setStyleSheet(lightgrey_label_color)
+                    widget.setAccessibleDescription(AxisIndexState.UNKNOWN.value)
+                    widget.setToolTip("Axis index: UNKNOWN\nNo valid fresh status received.")
+
+        for status, widget_name in (
+            (az_status, "label_antenna_status_az"),
+            (el_status, "label_antenna_status_el"),
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setStyleSheet(_axis_operational_style(status.state))
+                widget.setToolTip(format_axis_operational_tooltip(status))
+                widget.setAccessibleDescription(status.state.value)
+            signature = (status.state.value, status.active_flags)
+            previous = self._axis_operational_signatures.get(status.axis)
+            if previous is not None and signature != previous:
+                if status.state == AxisOperationalState.ALARM:
+                    detail = status.primary_detail or "unknown fault"
+                    self.status_bar.showMessage(f"{status.axis} axis alarm: {detail}", 6000)
+                elif previous[0] == AxisOperationalState.ALARM.value and status.state == AxisOperationalState.OK:
+                    self.status_bar.showMessage(f"{status.axis} axis status returned to normal.", 5000)
+            self._axis_operational_signatures[status.axis] = signature
+
+        self._refresh_tracking_permission_ui(permission)
+        self._handle_active_tracking_permission(permission)
+
+    def _refresh_tracking_permission_ui(self, permission: TrackingPermission | None = None):
+        current_permission = permission or self.tracking_permission()
+        client = getattr(self, "axis_client", None)
+        setter = getattr(client, "set_tracking_permission_state", None)
+        if callable(setter):
+            setter(current_permission.allowed, current_permission.reasons)
+        button = getattr(self, "pushButton_antenna_track", None)
+        if button is None:
+            return
+        tracker_running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
+        positioner_running = bool(getattr(self, "positioner", None) and self.positioner.is_running())
+        can_stop_motion = tracker_running or positioner_running
+        button.setEnabled(bool(self.has_connection() and (can_stop_motion or current_permission.allowed)))
+        button.setToolTip("" if current_permission.allowed or can_stop_motion else current_permission.message())
+
+    def _handle_active_tracking_permission(self, permission: TrackingPermission):
+        tracker_running = bool(getattr(self, "tracker", None) and self.tracker.is_running())
+        if permission.allowed:
+            self._last_tracking_inhibit_signature = None
+            return
+        if not tracker_running:
+            return
+        signature = permission.reasons
+        if signature == self._last_tracking_inhibit_signature:
+            return
+        self._last_tracking_inhibit_signature = signature
+        self._auto_restart_tracking = False
+        message = "Tracking stopped: " + "; ".join(permission.reasons)
+        self.logger.warning(message)
+        self._stop_tracking_loop_from_ui()
+        self.status_bar.showMessage(message, 8000)
 
     def on_connect_button_clicked(self):
         if self._connect_toggle_in_progress:
@@ -633,8 +821,8 @@ class ConnectionUiMixin:
             except Exception:
                 pass
             if hasattr(self, "pushButton_antenna_track"):
-                self.pushButton_antenna_track.setEnabled(True)
                 self.pushButton_antenna_track.setText("Track")
+                self._refresh_tracking_permission_ui()
 
         except Exception as exc:
             self.logger.error(f"Impossible d'initialiser le tracker: {exc}")
@@ -759,6 +947,8 @@ class ConnectionUiMixin:
                 "label_antenna_endstop_el",
                 "label_antenna_index_az",
                 "label_antenna_index_el",
+                "label_antenna_status_az",
+                "label_antenna_status_el",
             ):
                 if hasattr(self, attr):
                     getattr(self, attr).setEnabled(enabled)
@@ -865,6 +1055,7 @@ class ConnectionUiMixin:
             if hasattr(self, "pushButton_antenna_track"):
                 self.pushButton_antenna_track.setEnabled(False)
                 self.pushButton_antenna_track.setText("Track")
+                self.pushButton_antenna_track.setToolTip("Tracking unavailable: antenna status unknown.")
 
         except Exception as exc:
             self.logger.error(f"Erreur ui_set_default_state: {exc}")
