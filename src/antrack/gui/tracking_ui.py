@@ -25,9 +25,8 @@ from antrack.gui.ui_styles import (
 from antrack.gui.event_countdown import format_next_event_countdown, next_event_tooltip
 from antrack.gui.widgets.multi_track_card import MultiTrackStrip
 from antrack.tracking.positioning import PositioningController
-from antrack.tracking.tracking import Tracker
+from antrack.tracking.tracking import Tracker, automatic_tracking_elevation_allowed
 from antrack.tracking.tracking_diagnostics import load_tracking_diagnostics_config
-from antrack.utils.settings_loader import update_and_persist_setting
 
 
 class TrackingUiMixin:
@@ -37,6 +36,14 @@ class TrackingUiMixin:
         """Wire the manual-control panel and initialize it in Auto mode."""
         self._manual_control_mode = False
         self._manual_jog_state = {"az": None, "el": None}
+
+        command_signal = getattr(getattr(self, "axis_client", None), "manual_command_finished", None)
+        if command_signal is not None:
+            try:
+                command_signal.disconnect(self._on_manual_command_finished)
+            except Exception:
+                pass
+            command_signal.connect(self._on_manual_command_finished)
 
         manual_btn = getattr(self, "pushButton_antenna_manual", None)
         if manual_btn is not None:
@@ -72,31 +79,14 @@ class TrackingUiMixin:
             return {}
         return self.settings.get("ANTENNA", self.settings.get("antenna", {})) or {}
 
-    def _session_tracking_offset(self) -> tuple[float, float]:
-        az = float(getattr(self, "_scan_session_offset_az_deg", 0.0) or 0.0)
-        el = float(getattr(self, "_scan_session_offset_el_deg", 0.0) or 0.0)
-        return az, el
-
-    def _persistent_tracking_offset(self) -> tuple[float, float]:
-        antenna = self._antenna_settings()
-        az = float(antenna.get("scan_offset_az_deg", antenna.get("SCAN_OFFSET_AZ_DEG", 0.0)) or 0.0)
-        el = float(antenna.get("scan_offset_el_deg", antenna.get("SCAN_OFFSET_EL_DEG", 0.0)) or 0.0)
-        return az, el
-
-    def _current_tracking_offset(self) -> tuple[float, float]:
-        session_az, session_el = self._session_tracking_offset()
-        persistent_az, persistent_el = self._persistent_tracking_offset()
-        return session_az + persistent_az, session_el + persistent_el
-
     def _scan_probe_tracking_offset(self) -> tuple[float, float]:
         az = float(getattr(self, "_scan_probe_offset_az_deg", 0.0) or 0.0)
         el = float(getattr(self, "_scan_probe_offset_el_deg", 0.0) or 0.0)
         return az, el
 
     def _apply_tracking_offset_to_pointing(self, az_deg: float, el_deg: float) -> tuple[float, float]:
-        offset_az, offset_el = self._current_tracking_offset()
         probe_az, probe_el = self._scan_probe_tracking_offset()
-        return float(az_deg) + offset_az + probe_az, float(el_deg) + offset_el + probe_el
+        return float(az_deg) + probe_az, float(el_deg) + probe_el
 
     def _tracking_theoretical_pointing(self) -> tuple[float, float] | None:
         tracked_object = getattr(self, "tracked_object", None)
@@ -117,37 +107,12 @@ class TrackingUiMixin:
         self.tracked_object.el_set = float(el_set)
         return True
 
-    def _format_tracking_offset(self) -> str:
-        offset_az, offset_el = self._current_tracking_offset()
-        return f"dAZ={offset_az:+.3f} dEL={offset_el:+.3f}"
-
     def _update_selected_target_snr_display(self, snr_db: float, mode: str) -> None:
         if hasattr(self, "target_snr_label"):
             if isinstance(snr_db, (int, float)):
                 self.target_snr_label.setText(f"{float(snr_db):.2f} dB ({mode})")
             else:
                 self.target_snr_label.setText("-")
-
-    def _update_selected_target_scan_offset_display(self) -> None:
-        text = self._format_tracking_offset()
-        if hasattr(self, "target_scan_offset_label"):
-            self.target_scan_offset_label.setText(text)
-        if hasattr(self, "tracked_object"):
-            total_az, total_el = self._current_tracking_offset()
-            self.tracked_object.scan_offset_az_deg = float(total_az)
-            self.tracked_object.scan_offset_el_deg = float(total_el)
-
-    def apply_scan_offset(self, az_offset_deg: float, el_offset_deg: float, *, persist: bool = False) -> None:
-        if persist:
-            self._scan_session_offset_az_deg = 0.0
-            self._scan_session_offset_el_deg = 0.0
-            update_and_persist_setting(self.settings, "ANTENNA", "SCAN_OFFSET_AZ_DEG", float(az_offset_deg))
-            update_and_persist_setting(self.settings, "ANTENNA", "SCAN_OFFSET_EL_DEG", float(el_offset_deg))
-        else:
-            self._scan_session_offset_az_deg = float(az_offset_deg)
-            self._scan_session_offset_el_deg = float(el_offset_deg)
-        self._refresh_tracking_setpoints_from_theoretical()
-        self._update_selected_target_scan_offset_display()
 
     def _set_scan_probe_offset_state(self, az_offset_deg: float, el_offset_deg: float) -> None:
         self._scan_probe_offset_az_deg = float(az_offset_deg)
@@ -303,29 +268,14 @@ class TrackingUiMixin:
             pass
 
         try:
-            if axis == "az":
-                ack = self.axis_client.set_az_speed(rate)
-                if ack is not None:
-                    self.axis_client.antenna.az_setrate = rate
-                if direction == "CW":
-                    self.axis_client.move_cw()
-                else:
-                    self.axis_client.move_ccw()
-                self._manual_jog_state["az"] = direction
-            else:
-                ack = self.axis_client.set_el_speed(rate)
-                if ack is not None:
-                    self.axis_client.antenna.el_setrate = rate
-                if direction == "UP":
-                    self.axis_client.move_up()
-                else:
-                    self.axis_client.move_down()
-                self._manual_jog_state["el"] = direction
+            self._manual_jog_state[axis] = direction
+            self.axis_client.manual_jog_async(axis, direction, rate)
 
             if hasattr(self, "label_antenna_status"):
                 self.label_antenna_status.setText("Manual")
                 self.label_antenna_status.setStyleSheet(orange_label_color)
         except Exception as exc:
+            self._manual_jog_state[axis] = None
             self.logger.error(f"_start_manual_jog error: {exc}")
 
     def _stop_manual_jog(self, axis: str):
@@ -333,11 +283,11 @@ class TrackingUiMixin:
             return
         try:
             if axis == "az" and self._manual_jog_state.get("az") is not None:
-                self.axis_client.stop_az()
                 self._manual_jog_state["az"] = None
+                self.axis_client.stop_manual_axis_async("az")
             elif axis == "el" and self._manual_jog_state.get("el") is not None:
-                self.axis_client.stop_el()
                 self._manual_jog_state["el"] = None
+                self.axis_client.stop_manual_axis_async("el")
         except Exception as exc:
             self.logger.error(f"_stop_manual_jog error: {exc}")
 
@@ -348,6 +298,14 @@ class TrackingUiMixin:
                     self.label_antenna_status.setStyleSheet(orange_label_color)
             except Exception:
                 pass
+
+    def _on_manual_command_finished(self, command_name: str, success: bool, message: str):
+        if success:
+            return
+        self.logger.error("Manual command %s failed: %s", command_name, message)
+        if hasattr(self, "label_antenna_status"):
+            self.label_antenna_status.setText("Manual command error")
+            self.label_antenna_status.setStyleSheet(red_label_color)
 
     def on_manual_goto_clicked(self):
         if not getattr(self, "_manual_control_mode", False):
@@ -632,7 +590,6 @@ class TrackingUiMixin:
         add_row(13, "Max EL @", "target_max_el_time_label")
 
         self.target_max_el_time_label.setWordWrap(True)
-        self._update_selected_target_scan_offset_display()
         self._selected_target_info_panel = panel
         return True
 
@@ -640,6 +597,19 @@ class TrackingUiMixin:
         az = getattr(self.tracked_object, "az_set", None)
         el = getattr(self.tracked_object, "el_set", None)
         return isinstance(az, (int, float)) and isinstance(el, (int, float))
+
+    def _tracking_target_below_horizon(self) -> bool:
+        elevation = getattr(getattr(self, "tracked_object", None), "el_set", None)
+        return isinstance(elevation, (int, float)) and not automatic_tracking_elevation_allowed(elevation)
+
+    def _show_tracking_below_horizon_message(self, *, dialog: bool) -> None:
+        message = "Tracking unavailable: target elevation is below 0 degrees."
+        self.status_bar.showMessage(message, 5000)
+        if hasattr(self, "label_antenna_status"):
+            self.label_antenna_status.setText("Tracking suspended: below horizon")
+            self.label_antenna_status.setStyleSheet(red_label_color)
+        if dialog:
+            QMessageBox.information(self, "Tracking", message)
 
     def setup_tracker_tab(self):
         """
@@ -1003,7 +973,7 @@ class TrackingUiMixin:
             az_ok = isinstance(self.tracked_object.az_set, (int, float))
             el_ok = isinstance(self.tracked_object.el_set, (int, float))
             if self.telemetry_ready and az_ok and el_ok and hasattr(self, "pushButton_antenna_track"):
-                self.pushButton_antenna_track.setEnabled(True)
+                self._refresh_tracking_permission_ui()
 
             try:
                 if hasattr(self, "calib_plots") and self.calib_plots is not None:
@@ -1262,6 +1232,9 @@ class TrackingUiMixin:
         Wait until telemetry and setpoints are ready, then start the tracker.
         """
         try:
+            if not self.validate_tracking_start(show_message=False):
+                self._auto_restart_tracking = False
+                return
             absolute_backend = bool(
                 getattr(getattr(self, "axis_client", None), "supports_absolute_targets", lambda: False)()
             )
@@ -1269,6 +1242,11 @@ class TrackingUiMixin:
             az_set = getattr(self.tracked_object, "az_set", None)
             el_set = getattr(self.tracked_object, "el_set", None)
             set_ok = isinstance(az_set, (int, float)) and isinstance(el_set, (int, float))
+
+            if set_ok and not automatic_tracking_elevation_allowed(el_set):
+                self._auto_restart_tracking = False
+                self._show_tracking_below_horizon_message(dialog=True)
+                return
 
             if tel_ok and set_ok:
                 try:
@@ -1333,7 +1311,10 @@ class TrackingUiMixin:
             positioner_running = bool(getattr(self, "positioner", None) and self.positioner.is_running())
             running = tracker_running or positioner_running
             if hasattr(self, "label_antenna_status"):
-                if tracker_running:
+                if tracker_running and self._tracking_target_below_horizon():
+                    self.label_antenna_status.setText("Tracking suspended: below horizon")
+                    self.label_antenna_status.setStyleSheet(red_label_color)
+                elif tracker_running:
                     self.label_antenna_status.setText("Tracking")
                     self.label_antenna_status.setStyleSheet(green_label_color)
                 elif positioner_running:
@@ -1504,6 +1485,13 @@ class TrackingUiMixin:
                         "Tracking",
                         "Selectionnez un objet puis cliquez sur 'Appliquer la selection' pour calculer les consignes.",
                     )
+                    return
+                if self._tracking_target_below_horizon():
+                    self._auto_restart_tracking = False
+                    self._show_tracking_below_horizon_message(dialog=True)
+                    return
+                if not self.validate_tracking_start(show_message=True):
+                    self._auto_restart_tracking = False
                     return
 
                 try:

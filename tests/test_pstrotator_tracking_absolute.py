@@ -47,3 +47,18 @@ def test_tracker_sends_absolute_target_without_local_telemetry():
     tracker.step()
 
     assert (123.4, 45.6, None) in client.commands
+
+
+def test_tracker_never_sends_negative_absolute_tracking_target():
+    client = AbsoluteTargetClient()
+    tracked = TrackedObject()
+    tracked.az_set = 123.4
+    tracked.el_set = -0.35
+    tracker = Tracker(client, settings={}, thread_manager=DummyThreadManager(), tracked_object=tracked)
+
+    tracker.step()
+    tracker.step()
+
+    assert not any(isinstance(command, tuple) and command[:2] == (123.4, -0.35) for command in client.commands)
+    assert client.commands.count(("stop_az", None)) == 1
+    assert client.commands.count(("stop_el", None)) == 1

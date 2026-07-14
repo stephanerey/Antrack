@@ -57,6 +57,8 @@ class AxisServerBackend(BaseAntennaBackend):
         return self.axis.server_status == ServerStatus.CONNECTED
 
     async def connect(self) -> None:
+        self.telemetry.status_update_monotonic = None
+        self.telemetry.status_update_timestamp = None
         self.state = AntennaConnectionState.CONNECTING
         self.last_error = None
         self.axis.set_disconnect_callback(self._handle_core_disconnect)
@@ -81,6 +83,8 @@ class AxisServerBackend(BaseAntennaBackend):
             pass
         await self._measure_call("disconnect", self.axis.disconnect)
         self._sync_from_axis(force_state=AntennaConnectionState.DISCONNECTED)
+        self.telemetry.status_update_monotonic = None
+        self.telemetry.status_update_timestamp = None
 
     async def set_az_speed(self, speed: float) -> int | None:
         ack = await self._measure_call("set_az_speed", lambda: self.axis.set_az_speed(speed))
@@ -138,6 +142,8 @@ class AxisServerBackend(BaseAntennaBackend):
         status = await self._measure_call("get_status", self.axis.get_status)
         self._status_last_update_monotonic = time.monotonic()
         self._sync_from_axis()
+        self.telemetry.status_update_monotonic = self._status_last_update_monotonic
+        self.telemetry.status_update_timestamp = time.time()
         return status
 
     async def get_versions(self) -> AntennaVersions:

@@ -7,7 +7,7 @@ import datetime
 import logging
 from enum import Enum
 
-from antrack.core.axis.axis_protocol import AxisCommand, pack_axis_request, parse_axis_response
+from antrack.core.axis.axis_protocol import AxisCommand, pack_axis_request, parse_axis_response, raw_az_to_deg, raw_el_to_deg
 
 
 class ServerStatus(Enum):
@@ -561,8 +561,8 @@ class Axis:
             el_raw = await self.send_command(AxisCommand.QUERY_EL)
 
             # Convertir les valeurs brutes 16-bit (0..65535) en degrés (0..360)
-            az_f = (az_raw / 65535.0 * 360.0) % 360.0 if az_raw is not None else None
-            el_f = (el_raw / 65535.0 * 360.0) % 360.0 if el_raw is not None else None
+            az_f = raw_az_to_deg(az_raw) if az_raw is not None else None
+            el_f = raw_el_to_deg(el_raw) if el_raw is not None else None
 
             # Calcul des vitesses
             now = datetime.datetime.now()

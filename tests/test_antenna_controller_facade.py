@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import Future
 
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.backend import BaseAntennaBackend
@@ -21,6 +22,17 @@ class RecordingThreadManager:
         self.timeouts.append(timeout)
         coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
         return asyncio.run(coro)
+
+
+class SubmittingThreadManager(DummyThreadManager):
+    def submit_coro(self, _loop_name, coro_or_factory):
+        future = Future()
+        coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
+        try:
+            future.set_result(asyncio.run(coro))
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
 
 
 class FakeBackend(BaseAntennaBackend):
@@ -144,6 +156,23 @@ def test_controller_methods_map_to_backend_calls():
     assert ("set_az_speed", 42) in backend.calls
     assert "move_cw" in backend.calls
     assert "stop_az" in backend.calls
+
+
+def test_controller_manual_commands_are_submitted_without_blocking_api():
+    backend = FakeBackend()
+    backend.state = AntennaConnectionState.CONNECTED
+    controller = AntennaControllerQt(backend, thread_manager=SubmittingThreadManager())
+    results = []
+    controller.manual_command_finished.connect(lambda name, ok, error: results.append((name, ok, error)))
+
+    jog_future = controller.manual_jog_async("az", "CW", 42)
+    stop_future = controller.stop_manual_axis_async("az")
+
+    assert jog_future.done()
+    assert stop_future.done()
+    assert backend.calls == [("set_az_speed", 42), "move_cw", "stop_az"]
+    assert controller.antenna.az_setrate == 42.0
+    assert results == [("jog_az_cw", True, ""), ("stop_az", True, "")]
 
 
 def test_axis_driver_controller_uses_extended_poll_timeouts():

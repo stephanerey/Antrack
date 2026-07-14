@@ -54,7 +54,9 @@ class AxisDriverConnectionConfig:
     confirm_update1_reset: bool = True
     confirm_move_by_motion_state: bool = True
     confirm_stop_by_motion_state: bool = True
-    use_fc16_for_motion_speed: bool = True
+    # Axis acknowledges FC16 but some firmware revisions do not reliably
+    # apply a simultaneous direction change. FC06 is the safe default.
+    use_fc16_for_motion_speed: bool = False
     command_confirm_status_read_mode: str = "block"
     command_confirm_status_block_start: int = 101
     command_confirm_status_block_length: int = 7
@@ -221,7 +223,7 @@ def load_antenna_connection_config(settings: Dict[str, Dict[str, Any]]) -> Anten
                 _get(axis_driver_section, "confirm_stop_by_motion_state", True),
                 True,
             ),
-            use_fc16_for_motion_speed=_as_bool(_get(axis_driver_section, "use_fc16_for_motion_speed", True), True),
+            use_fc16_for_motion_speed=_as_bool(_get(axis_driver_section, "use_fc16_for_motion_speed", False), False),
             command_confirm_status_read_mode=_axis_driver_status_read_mode(
                 _get(axis_driver_section, "command_confirm_status_read_mode", "block"),
                 "block",

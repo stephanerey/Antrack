@@ -435,6 +435,11 @@ class ThreadManager:
 
     def run_coro(self, loop_name: str, coro_or_factory, timeout: float = None):
         """Run a coroutine on a persistent asyncio loop and return its result."""
+        fut = self.submit_coro(loop_name, coro_or_factory)
+        return fut.result(timeout=timeout) if timeout is not None else fut.result()
+
+    def submit_coro(self, loop_name: str, coro_or_factory):
+        """Schedule a coroutine on a persistent loop without blocking the caller."""
         import asyncio as _asyncio
 
         self.ensure_asyncio_loop(loop_name)
@@ -445,8 +450,7 @@ class ThreadManager:
             coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
         except Exception:
             raise
-        fut = _asyncio.run_coroutine_threadsafe(coro, loop)
-        return fut.result(timeout=timeout) if timeout is not None else fut.result()
+        return _asyncio.run_coroutine_threadsafe(coro, loop)
 
     def stop_asyncio_loop(self, loop_name: str) -> None:
         """Request shutdown of a persistent asyncio loop."""

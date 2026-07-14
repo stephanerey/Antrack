@@ -168,6 +168,14 @@ class AxisDriverBackend(BaseAntennaBackend):
         await self._ensure_async_primitives()
         if self.is_connected():
             return
+        self.telemetry.index_az = None
+        self.telemetry.index_el = None
+        self.telemetry.endstop_az = None
+        self.telemetry.endstop_el = None
+        self.telemetry.motor_alarm_az = None
+        self.telemetry.motor_alarm_el = None
+        self.telemetry.status_update_monotonic = None
+        self.telemetry.status_update_timestamp = None
         self.state = AntennaConnectionState.CONNECTING
         self.last_error = None
         self._log_startup_config()
@@ -230,6 +238,8 @@ class AxisDriverBackend(BaseAntennaBackend):
                     pass
         finally:
             self._close_serial()
+            self.telemetry.status_update_monotonic = None
+            self.telemetry.status_update_timestamp = None
             self.state = AntennaConnectionState.DISCONNECTED
 
     async def set_az_speed(self, speed: float) -> int | None:
@@ -243,6 +253,29 @@ class AxisDriverBackend(BaseAntennaBackend):
         await self._apply_axis_state(self.config.el_slave_address, speed=applied_speed, force_speed_write=True)
         self.telemetry.el_setrate = float(applied_speed)
         return int(applied_speed)
+
+    async def manual_jog(self, axis: str, direction: str, speed: float) -> int | None:
+        """Send motion and speed in one AxisDriver command sequence."""
+        axis_name = str(axis).strip().lower()
+        direction_name = str(direction).strip().upper()
+        applied_speed = self._coerce_speed(speed)
+        if axis_name == "az" and direction_name in {"CW", "CCW"}:
+            slave = self.config.az_slave_address
+            motion = MOTION_CW if direction_name == "CW" else MOTION_CCW
+            status_key = "azimuth"
+            telemetry_key = "az_setrate"
+        elif axis_name == "el" and direction_name in {"UP", "DOWN"}:
+            slave = self.config.el_slave_address
+            motion = MOTION_CW if direction_name == "UP" else MOTION_CCW
+            status_key = "elevation"
+            telemetry_key = "el_setrate"
+        else:
+            raise ValueError(f"Unsupported manual jog: axis={axis!r}, direction={direction!r}")
+
+        await self._apply_axis_state(slave, motion=motion, speed=applied_speed)
+        setattr(self.telemetry, telemetry_key, float(applied_speed))
+        self.axis_status[status_key] = direction_name
+        return motion
 
     async def move_cw(self) -> int | None:
         await self._apply_axis_state(self.config.az_slave_address, motion=MOTION_CW)
@@ -386,6 +419,8 @@ class AxisDriverBackend(BaseAntennaBackend):
             self._update_rate_estimate(now_monotonic)
             self.telemetry.last_update_monotonic = now_monotonic
         self._status_last_update_monotonic = now_monotonic
+        self.telemetry.status_update_monotonic = now_monotonic
+        self.telemetry.status_update_timestamp = time.time()
         self._safety_status_poll_finished_monotonic = now_monotonic
         self._background_status_skip_reason = None
         payload = {
@@ -841,7 +876,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         use_fc16: bool,
     ) -> None:
         if write_motion and speed is not None:
-            if use_fc16 and bool(getattr(self.config, "use_fc16_for_motion_speed", True)):
+            if use_fc16 and bool(getattr(self.config, "use_fc16_for_motion_speed", False)):
                 try:
                     self._write_registers_locked(slave, COMMAND_REGISTER, [int(motion), int(speed)])
                 except Exception as exc:
@@ -1125,7 +1160,16 @@ class AxisDriverBackend(BaseAntennaBackend):
 
             while time.monotonic() < deadline and len(buffer) < max_buffer_length:
                 remaining = max_buffer_length - len(buffer)
-                chunk = self.serial_port.read(remaining)
+                # A pyserial read waits for the requested byte count or for its
+                # timeout.  Request only bytes already buffered, or one byte
+                # while waiting for the frame to start, so a complete short
+                # response is never followed by an artificial serial timeout.
+                try:
+                    available = max(0, int(getattr(self.serial_port, "in_waiting", 0) or 0))
+                except Exception:
+                    available = 0
+                read_size = min(remaining, max(1, available))
+                chunk = self.serial_port.read(read_size)
                 if chunk:
                     buffer += chunk
                 parsed, last_error = self._scan_for_valid_frame(buffer, candidate_lengths, parser)
@@ -1401,7 +1445,8 @@ class AxisDriverBackend(BaseAntennaBackend):
             "serial_timeout_s=%.3f command_timeout_s=%.3f position_interval_s=%.3f "
             "status_interval_s=%.3f health_interval_s=%.3f status_read_mode=%s "
             "status_include_position=%s inter_request_gap_s=%.3f move_refresh_mode=%s "
-            "move_refresh_interval_s=%.3f stop_reinforce_enabled=%s stop_reinforce_delay_s=%.3f",
+            "move_refresh_interval_s=%.3f motion_speed_write=%s stop_reinforce_enabled=%s "
+            "stop_reinforce_delay_s=%.3f",
             self.config.comport,
             self.config.baudrate,
             self.config.az_slave_address,
@@ -1416,6 +1461,7 @@ class AxisDriverBackend(BaseAntennaBackend):
             float(getattr(self.config, "inter_request_gap_s", 0.0)),
             str(getattr(self.config, "move_refresh_mode", "edge_only")).strip().lower(),
             float(getattr(self.config, "move_refresh_interval_s", 0.0)),
+            "fc16" if bool(getattr(self.config, "use_fc16_for_motion_speed", False)) else "fc06_sequence",
             bool(getattr(self.config, "stop_reinforce_enabled", True)),
             float(getattr(self.config, "stop_reinforce_delay_s", 0.12)),
         )

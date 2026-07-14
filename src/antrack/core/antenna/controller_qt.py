@@ -33,6 +33,7 @@ class AntennaControllerQt(QObject):
     antenna_telemetry_updated = pyqtSignal(dict)
     versions_updated = pyqtSignal(dict)
     telemetry_updated = pyqtSignal(object)
+    manual_command_finished = pyqtSignal(str, bool, str)
 
     def __init__(
         self,
@@ -50,6 +51,8 @@ class AntennaControllerQt(QObject):
         self.polling_intervals = polling_intervals
         self.connection_state = AntennaConnectionState.DISCONNECTED
         self.server_status = self.connection_state
+        self.tracking_permission_allowed = False
+        self.tracking_permission_reasons: tuple[str, ...] = ("antenna status unknown",)
         self.axis_status = {
             "antenna": "STOPPED",
             "azimuth": "STOP",
@@ -70,6 +73,8 @@ class AntennaControllerQt(QObject):
             index_el=None,
             motor_alarm_az=None,
             motor_alarm_el=None,
+            status_update_monotonic=None,
+            status_update_timestamp=None,
             signal=None,
         )
         self.axisClient = self
@@ -109,6 +114,11 @@ class AntennaControllerQt(QObject):
 
     def supports_absolute_targets(self) -> bool:
         return self.backend.supports_absolute_targets()
+
+    def set_tracking_permission_state(self, allowed: bool, reasons=()) -> None:
+        """Cache the GUI-decoded safety state for tracking workers."""
+        self.tracking_permission_allowed = bool(allowed)
+        self.tracking_permission_reasons = tuple(str(reason) for reason in reasons)
 
     def connect(self) -> bool:
         try:
@@ -269,6 +279,58 @@ class AntennaControllerQt(QObject):
         self.axis_status["elevation"] = "STOP"
         self._refresh_from_backend()
         return result
+
+    def manual_jog_async(self, axis: str, direction: str, speed: float):
+        """Queue a manual jog without blocking the Qt event loop."""
+        axis_name = str(axis).strip().lower()
+        direction_name = str(direction).strip().upper()
+        if axis_name == "az":
+            if direction_name not in {"CW", "CCW"}:
+                raise ValueError(f"Unsupported azimuth direction: {direction!r}")
+            self.antenna.az_setrate = float(speed)
+            self.axis_status["azimuth"] = direction_name
+        elif axis_name == "el":
+            if direction_name not in {"UP", "DOWN"}:
+                raise ValueError(f"Unsupported elevation direction: {direction!r}")
+            self.antenna.el_setrate = float(speed)
+            self.axis_status["elevation"] = direction_name
+        else:
+            raise ValueError(f"Unsupported manual axis: {axis!r}")
+        return self._submit_manual_command(
+            f"jog_{axis_name}_{direction_name.lower()}",
+            lambda: self.backend.manual_jog(axis_name, direction_name, speed),
+        )
+
+    def stop_manual_axis_async(self, axis: str):
+        """Queue a manual stop without blocking the Qt event loop."""
+        axis_name = str(axis).strip().lower()
+        if axis_name == "az":
+            coro_factory = self.backend.stop_az
+            self.axis_status["azimuth"] = "STOP"
+        elif axis_name == "el":
+            coro_factory = self.backend.stop_el
+            self.axis_status["elevation"] = "STOP"
+        else:
+            raise ValueError(f"Unsupported manual axis: {axis!r}")
+        return self._submit_manual_command(f"stop_{axis_name}", coro_factory)
+
+    def _submit_manual_command(self, command_name: str, coro_factory):
+        if not getattr(self, "thread_manager", None):
+            raise RuntimeError("ThreadManager is required for antenna controller operations")
+        future = self.thread_manager.submit_coro(self.loop_name, coro_factory)
+
+        def command_done(completed_future) -> None:
+            try:
+                completed_future.result()
+            except Exception as exc:
+                message = str(exc)
+                self.logger.error("Manual antenna command %s failed: %s", command_name, message)
+                self.manual_command_finished.emit(command_name, False, message)
+            else:
+                self.manual_command_finished.emit(command_name, True, "")
+
+        future.add_done_callback(command_done)
+        return future
 
     def _run_backend_call(self, coro_factory, timeout: float | None = None):
         if not getattr(self, "thread_manager", None):

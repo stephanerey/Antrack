@@ -56,6 +56,15 @@ def decimal_degrees_to_dms(decimal_degrees: float) -> Tuple[int, int, float]:
     return sign * d, m, s
 
 
+def automatic_tracking_elevation_allowed(elevation_deg: object) -> bool:
+    """Return whether an automatic tracking setpoint is finite and on/above the horizon."""
+    try:
+        elevation = float(elevation_deg)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(elevation) and elevation >= 0.0
+
+
 # --- Minimal RA/DEC structures ---
 @dataclass
 class Ra:
@@ -144,6 +153,8 @@ class Tracker:
         )
         self._tracking_diag_enabled = self._tracking_diag.enabled
         self._repeated_command_timeouts = 0
+        self._below_horizon_active = False
+        self._last_below_horizon_log_monotonic = 0.0
 
     def mark_speeds_dirty(self):
         """Request re-applying AZ/EL speeds on the next cycle."""
@@ -396,6 +407,13 @@ class Tracker:
 
     def start(self):
         """Start the tracking loop in a QThread (idempotent and robust to stale workers)."""
+        if getattr(self.axis_client_qt, "tracking_permission_allowed", True) is False:
+            reasons = getattr(self.axis_client_qt, "tracking_permission_reasons", ())
+            logging.getLogger("Tracker").warning(
+                "Tracking start rejected by antenna safety state: %s",
+                "; ".join(str(reason) for reason in reasons) or "unknown reason",
+            )
+            return
         if self.tracking_manager is not None:
             self._must_apply_speeds = True
             self._kickstart_pending = True
@@ -454,6 +472,8 @@ class Tracker:
 
     def step(self, interval: Optional[float] = None) -> None:
         """Run one cooperative tracking iteration."""
+        if getattr(self.axis_client_qt, "tracking_permission_allowed", True) is False:
+            return
         ant = self._antenna_settings()
         az_err_th = float(ant.get('az_tracking_error_threshold', ant.get('az_error_threshold', 0.05)))
         el_err_th = float(ant.get('el_tracking_error_threshold', ant.get('el_error_threshold', 0.05)))
@@ -681,6 +701,19 @@ class Tracker:
                     ]
                 )
             return
+
+        if not automatic_tracking_elevation_allowed(self.tracked_object.el_set):
+            now = time.monotonic()
+            if not self._below_horizon_active:
+                self._stop_motors(force=True)
+            if not self._below_horizon_active or now - self._last_below_horizon_log_monotonic >= 30.0:
+                log.warning("Tracking unavailable: target elevation is below 0 degrees.")
+                self._last_below_horizon_log_monotonic = now
+            self._below_horizon_active = True
+            return
+        if self._below_horizon_active:
+            log.info("Automatic tracking resumed: target elevation is on/above the horizon.")
+            self._below_horizon_active = False
 
         if self._set_state_prev is None or self._set_state_prev is False:
             log.info("SET_STATE change -> set_ok=True (az_set=%.3f, el_set=%.3f)", self.tracked_object.az_set, self.tracked_object.el_set)

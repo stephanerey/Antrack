@@ -42,11 +42,14 @@ def test_noise_measurement_state_captures_reference_and_cycles_windows():
     assert ys == [0.0, 3.5]
     assert state.relative_db == 3.5
     assert state.cycle_window() == 60.0
-    assert state.cycle_window() == 10.0
+    assert state.cycle_window() == 600.0
+    assert state.cycle_window() == 3600.0
+    assert state.cycle_window() == 86400.0
+    assert state.cycle_window() == 30.0
 
 
 def test_noise_measurement_state_prunes_old_history_and_clears():
-    state = NoiseMeasurementState(history_retention_s=120.0)
+    state = NoiseMeasurementState(window_options_s=(30.0, 60.0), history_retention_s=120.0)
 
     state.update_absolute(-95.0, timestamp_s=0.0)
     state.append_history_point(timestamp_s=0.0)
@@ -87,3 +90,68 @@ def test_noise_measurement_state_deduplicates_fast_identical_history_points():
     xs, ys = state.plot_series(now_s=101.0)
     assert xs == [100.0, 100.2]
     assert ys == [-90.0, -90.0]
+
+
+def test_noise_measurement_statistics_are_incremental_and_ignore_invalid_values():
+    state = NoiseMeasurementState()
+
+    assert state.update_absolute(-90.0, timestamp_s=10.0)
+    assert state.update_absolute(float("nan"), timestamp_s=11.0) is False
+    assert state.update_absolute(float("inf"), timestamp_s=12.0) is False
+    assert state.update_absolute(-84.0, timestamp_s=13.0)
+    assert state.update_absolute(-87.0, timestamp_s=14.0)
+
+    statistics = state.statistics()
+    assert statistics == {
+        "count": 3,
+        "min": -90.0,
+        "mean": -87.0,
+        "max": -84.0,
+        "min_timestamp": 10.0,
+        "max_timestamp": 13.0,
+    }
+
+
+def test_noise_measurement_statistics_reset_without_clearing_visual_history():
+    state = NoiseMeasurementState()
+    state.update_absolute(-90.0, timestamp_s=10.0)
+    state.append_history_point(timestamp_s=10.0)
+
+    state.reset_statistics()
+
+    assert state.statistics()["count"] == 0
+    assert state.plot_series(now_s=10.0) == ([10.0], [-90.0])
+    state.update_absolute(-80.0, timestamp_s=11.0)
+    assert state.statistics()["mean"] == -80.0
+
+
+def test_noise_measurement_statistics_are_independent_from_visible_window():
+    state = NoiseMeasurementState()
+    state.update_absolute(-100.0, timestamp_s=0.0)
+    state.append_history_point(timestamp_s=0.0)
+    state.update_absolute(-80.0, timestamp_s=1000.0)
+    state.append_history_point(timestamp_s=1000.0)
+
+    assert state.plot_series(now_s=1000.0) == ([1000.0], [-80.0])
+    assert state.statistics()["mean"] == -90.0
+
+
+def test_noise_measurement_history_is_bounded_and_plot_is_decimated():
+    state = NoiseMeasurementState(max_history_points=100, max_plot_points=100)
+    for index in range(250):
+        state.update_absolute(float(index), timestamp_s=float(index))
+        state.append_history_point(timestamp_s=float(index))
+
+    xs, ys = state.plot_series(now_s=250.0)
+    assert len(state._history) <= 100
+    assert len(xs) <= 101
+    assert xs[-1] == 249.0
+    assert ys[-1] == 249.0
+    assert state.statistics()["count"] == 250
+
+
+def test_noise_measurement_manual_y_range_validation():
+    assert NoiseMeasurementState.valid_y_range(-120.0, -20.0)
+    assert not NoiseMeasurementState.valid_y_range(-20.0, -120.0)
+    assert not NoiseMeasurementState.valid_y_range(10.0, 10.0)
+    assert not NoiseMeasurementState.valid_y_range(float("nan"), 10.0)

@@ -9,7 +9,17 @@ import time
 import pyqtgraph as pg
 from PyQt5.QtCore import QIODevice, QSettings, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QComboBox, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from antrack.gui.noise_measurement_state import NoiseMeasurementState
 
@@ -256,6 +266,15 @@ class NoiseMeasurementWidget(QWidget):
         self._audio_error_message = ""
         self._audio_devices: list[dict[str, object]] = []
         self._selected_audio_device_id = str(self._settings.value("noise_monitor/audio_device_id", _DEFAULT_AUDIO_DEVICE_ID))
+        self._auto_scale_y = self._settings.value("noise_monitor/auto_scale_y", True, type=bool)
+        try:
+            saved_y_min = float(self._settings.value("noise_monitor/y_min", -120.0))
+            saved_y_max = float(self._settings.value("noise_monitor/y_max", -20.0))
+        except (TypeError, ValueError):
+            saved_y_min, saved_y_max = -120.0, -20.0
+        if not self._state.valid_y_range(saved_y_min, saved_y_max):
+            saved_y_min, saved_y_max = -120.0, -20.0
+        self._last_valid_y_range = (saved_y_min, saved_y_max)
         self._active_audio_device_id: str | None = None
         self._last_invalid_log_monotonic = 0.0
         self._axis_mode = "absolute"
@@ -296,6 +315,7 @@ class NoiseMeasurementWidget(QWidget):
         self._latest_absolute_db = numeric_value
         self._latest_timestamp_s = timestamp
         self._has_pending_measurement = True
+        self._state.record_statistics(numeric_value, timestamp_s=timestamp)
 
     def clear_measurement(self) -> None:
         self._latest_absolute_db = None
@@ -319,6 +339,9 @@ class NoiseMeasurementWidget(QWidget):
         self.absolute_value_label = QLabel("--", band)
         self.relative_value_label = QLabel("--", band)
         self.reference_value_label = QLabel("Reference: --", band)
+        self.statistics_min_label = QLabel("--", band)
+        self.statistics_mean_label = QLabel("--", band)
+        self.statistics_max_label = QLabel("--", band)
         self.absolute_value_label.setStyleSheet("font-size: 16px; font-weight: 600;")
         relative_font = QFont(self.relative_value_label.font())
         relative_font.setPointSize(max(relative_font.pointSize() + 6, 18))
@@ -330,6 +353,9 @@ class NoiseMeasurementWidget(QWidget):
         absolute_column = self._metric_column("Absolute", self.absolute_value_label, band)
         relative_column = self._metric_column("Relative", self.relative_value_label, band)
         reference_column = self._metric_column("Reference", self.reference_value_label, band)
+        statistics_min_column = self._metric_column("Min", self.statistics_min_label, band)
+        statistics_mean_column = self._metric_column("Mean", self.statistics_mean_label, band)
+        statistics_max_column = self._metric_column("Max", self.statistics_max_label, band)
 
         self.monitor_button = QPushButton(band)
         self.monitor_button.setCheckable(True)
@@ -343,6 +369,17 @@ class NoiseMeasurementWidget(QWidget):
         self.test_tone_button = QPushButton("Test Tone", band)
         self.window_button = QPushButton(band)
         self.clear_button = QPushButton("Clear", band)
+        self.reset_statistics_button = QPushButton("Reset statistics", band)
+        self.auto_scale_y_checkbox = QCheckBox("Auto scale Y", band)
+        self.auto_scale_y_checkbox.setChecked(bool(self._auto_scale_y))
+        self.y_min_spin = QDoubleSpinBox(band)
+        self.y_max_spin = QDoubleSpinBox(band)
+        for spin in (self.y_min_spin, self.y_max_spin):
+            spin.setRange(-1_000_000.0, 1_000_000.0)
+            spin.setDecimals(2)
+            spin.setSuffix(" dB")
+        self.y_min_spin.setValue(self._last_valid_y_range[0])
+        self.y_max_spin.setValue(self._last_valid_y_range[1])
         self.audio_status_label = QLabel("Audio: -", band)
         self.audio_status_label.setStyleSheet("color: #808080; font-size: 11px;")
 
@@ -354,6 +391,10 @@ class NoiseMeasurementWidget(QWidget):
         self.test_tone_button.clicked.connect(self._on_test_tone_clicked)
         self.window_button.clicked.connect(self._on_cycle_window_clicked)
         self.clear_button.clicked.connect(self._on_clear_clicked)
+        self.reset_statistics_button.clicked.connect(self._on_reset_statistics_clicked)
+        self.auto_scale_y_checkbox.toggled.connect(self._on_auto_scale_y_toggled)
+        self.y_min_spin.valueChanged.connect(self._on_manual_y_range_changed)
+        self.y_max_spin.valueChanged.connect(self._on_manual_y_range_changed)
 
         monitor_controls_row = QWidget(band)
         monitor_controls_layout = QHBoxLayout(monitor_controls_row)
@@ -364,7 +405,23 @@ class NoiseMeasurementWidget(QWidget):
         monitor_controls_layout.addWidget(self.sound_button)
         monitor_controls_layout.addWidget(self.window_button)
         monitor_controls_layout.addWidget(self.clear_button)
+        monitor_controls_layout.addWidget(self.reset_statistics_button)
         monitor_controls_layout.addStretch(1)
+
+        scale_controls_row = QWidget(band)
+        scale_controls_layout = QHBoxLayout(scale_controls_row)
+        scale_controls_layout.setContentsMargins(0, 0, 0, 0)
+        scale_controls_layout.setSpacing(8)
+        scale_controls_layout.addWidget(self.auto_scale_y_checkbox)
+        scale_controls_layout.addWidget(QLabel("Y min", scale_controls_row))
+        scale_controls_layout.addWidget(self.y_min_spin)
+        scale_controls_layout.addWidget(QLabel("Y max", scale_controls_row))
+        scale_controls_layout.addWidget(self.y_max_spin)
+        scale_controls_layout.addSpacing(12)
+        scale_controls_layout.addWidget(statistics_min_column)
+        scale_controls_layout.addWidget(statistics_mean_column)
+        scale_controls_layout.addWidget(statistics_max_column)
+        scale_controls_layout.addStretch(1)
 
         audio_controls_row = QWidget(band)
         audio_controls_layout = QHBoxLayout(audio_controls_row)
@@ -382,6 +439,7 @@ class NoiseMeasurementWidget(QWidget):
         band_layout.setColumnStretch(3, 1)
         band_layout.addWidget(monitor_controls_row, 1, 0, 1, 4)
         band_layout.addWidget(audio_controls_row, 2, 0, 1, 4)
+        band_layout.addWidget(scale_controls_row, 3, 0, 1, 4)
 
         self.plot = pg.PlotWidget(axisItems={"bottom": pg.DateAxisItem(orientation="bottom")}, parent=self)
         self.plot.showGrid(x=True, y=True, alpha=0.25)
@@ -390,6 +448,19 @@ class NoiseMeasurementWidget(QWidget):
         self.plot.setLabel("bottom", "Time")
         self.plot.setLabel("left", "Noise Power (dB)")
         self.plot_curve = self.plot.plot(pen=pg.mkPen(80, 200, 255, width=2))
+        statistics_pen = pg.mkPen(255, 210, 80, width=1, style=Qt.DashLine)
+        self.statistics_mean_line = pg.InfiniteLine(angle=0, movable=False, pen=statistics_pen)
+        self.statistics_min_marker = pg.ScatterPlotItem(
+            size=10, symbol="t", pen=pg.mkPen(80, 220, 140), brush=pg.mkBrush(80, 220, 140)
+        )
+        self.statistics_max_marker = pg.ScatterPlotItem(
+            size=10, symbol="t1", pen=pg.mkPen(255, 110, 90), brush=pg.mkBrush(255, 110, 90)
+        )
+        self.statistics_text = pg.TextItem(anchor=(0.0, 0.0), color=(230, 230, 230), fill=pg.mkBrush(20, 20, 20, 180))
+        self.plot.addItem(self.statistics_mean_line, ignoreBounds=True)
+        self.plot.addItem(self.statistics_min_marker, ignoreBounds=True)
+        self.plot.addItem(self.statistics_max_marker, ignoreBounds=True)
+        self.plot.addItem(self.statistics_text, ignoreBounds=True)
 
         root_layout.addWidget(band)
         root_layout.addWidget(self.plot, 1)
@@ -398,6 +469,7 @@ class NoiseMeasurementWidget(QWidget):
         self.sound_button.setEnabled(False)
         self.window_button.setEnabled(False)
         self.clear_button.setEnabled(False)
+        self._on_auto_scale_y_toggled(self.auto_scale_y_checkbox.isChecked())
 
     @staticmethod
     def _metric_column(title: str, value_label: QLabel, parent: QWidget) -> QWidget:
@@ -501,6 +573,37 @@ class NoiseMeasurementWidget(QWidget):
         self._state.cycle_window()
         self._update_button_text()
         self._refresh_plot(force=True)
+
+    def _on_reset_statistics_clicked(self) -> None:
+        self._state.reset_statistics()
+        self._update_statistics_display()
+        self._refresh_plot(force=True)
+
+    def _on_auto_scale_y_toggled(self, checked: bool) -> None:
+        self._auto_scale_y = bool(checked)
+        self.y_min_spin.setEnabled(not checked)
+        self.y_max_spin.setEnabled(not checked)
+        self._settings.setValue("noise_monitor/auto_scale_y", bool(checked))
+        self.plot.enableAutoRange(y=bool(checked))
+        if not checked:
+            self._apply_manual_y_range()
+
+    def _on_manual_y_range_changed(self, *_args) -> None:
+        minimum = float(self.y_min_spin.value())
+        maximum = float(self.y_max_spin.value())
+        if not self._state.valid_y_range(minimum, maximum):
+            self._set_status("Noise monitor Y range ignored: Y min must be lower than Y max.", 3000)
+            return
+        self._last_valid_y_range = (minimum, maximum)
+        self._settings.setValue("noise_monitor/y_min", minimum)
+        self._settings.setValue("noise_monitor/y_max", maximum)
+        if not self.auto_scale_y_checkbox.isChecked():
+            self._apply_manual_y_range()
+
+    def _apply_manual_y_range(self) -> None:
+        minimum, maximum = self._last_valid_y_range
+        self.plot.enableAutoRange(y=False)
+        self.plot.setYRange(minimum, maximum, padding=0.0)
 
     def _on_audio_output_changed(self, index: int) -> None:
         device_id = self.audio_output_combo.itemData(index)
@@ -640,10 +743,14 @@ class NoiseMeasurementWidget(QWidget):
         else:
             self.sound_button.setText("Sound ON" if self.sound_button.isChecked() else "Sound OFF")
         window_s = self._state.current_window_s
-        if math.isclose(window_s, 60.0, rel_tol=0.0, abs_tol=1e-9):
-            window_text = "1 min"
-        else:
-            window_text = f"{int(round(window_s))} s"
+        window_labels = {
+            30.0: "30 s",
+            60.0: "1 min",
+            600.0: "10 min",
+            3600.0: "1 h",
+            86400.0: "24 h",
+        }
+        window_text = window_labels.get(window_s, f"{int(round(window_s))} s")
         self.window_button.setText(f"Window: {window_text}")
         self.sound_button.setEnabled(self._monitor_active and self._can_attempt_audio())
         self.test_tone_button.setEnabled(self._can_attempt_audio())
@@ -655,12 +762,47 @@ class NoiseMeasurementWidget(QWidget):
         self.relative_value_label.setText("--" if relative_db is None else f"{relative_db:+.2f} dB")
         reference_db = self._state.reference_absolute_db
         self.reference_value_label.setText("Reference: --" if reference_db is None else f"Reference: {reference_db:.2f} dB")
+        self._update_statistics_display()
+
+    def _update_statistics_display(self) -> None:
+        statistics = self._state.statistics()
+        values = (statistics["min"], statistics["mean"], statistics["max"])
+        labels = (self.statistics_min_label, self.statistics_mean_label, self.statistics_max_label)
+        for label, value in zip(labels, values):
+            label.setText("--" if value is None else f"{float(value):.2f} dB")
+
+    def _update_statistics_plot_items(self) -> None:
+        statistics = self._state.statistics()
+        if not statistics["count"]:
+            self.statistics_mean_line.setVisible(False)
+            self.statistics_min_marker.setData([])
+            self.statistics_max_marker.setData([])
+            self.statistics_text.setText("Min --   Mean --   Max --")
+        else:
+            minimum = float(statistics["min"])
+            mean = float(statistics["mean"])
+            maximum = float(statistics["max"])
+            self.statistics_mean_line.setPos(mean)
+            self.statistics_mean_line.setVisible(True)
+            self.statistics_min_marker.setData(
+                [float(statistics["min_timestamp"])], [minimum]
+            )
+            self.statistics_max_marker.setData(
+                [float(statistics["max_timestamp"])], [maximum]
+            )
+            self.statistics_text.setText(f"Min {minimum:.2f}   Mean {mean:.2f}   Max {maximum:.2f} dB")
+        view_range = self.plot.getViewBox().viewRange()
+        self.statistics_text.setPos(float(view_range[0][0]), float(view_range[1][1]))
 
     def _on_refresh_timer(self) -> None:
         if not self._monitor_active:
             return
         if self._has_pending_measurement:
-            applied = self._state.update_absolute(self._latest_absolute_db, timestamp_s=self._latest_timestamp_s)
+            applied = self._state.update_absolute(
+                self._latest_absolute_db,
+                timestamp_s=self._latest_timestamp_s,
+                record_statistics=False,
+            )
             self._has_pending_measurement = False
             if applied:
                 self._state.append_history_point(timestamp_s=self._latest_timestamp_s)
@@ -674,23 +816,17 @@ class NoiseMeasurementWidget(QWidget):
         if not self._monitor_active:
             self.plot_curve.setData([], [])
             self.plot.setXRange(now_s - self._state.current_window_s, now_s, padding=0.0)
-            self.plot.setYRange(-1.0, 1.0, padding=0.0)
+            self._update_statistics_plot_items()
             return
         xs, ys = self._state.plot_series(now_s=now_s)
         if not xs or not ys:
             self.plot_curve.setData([], [])
             self.plot.setXRange(now_s - self._state.current_window_s, now_s, padding=0.0)
-            self.plot.setYRange(-1.0, 1.0, padding=0.0)
+            self._update_statistics_plot_items()
             return
         self.plot_curve.setData(xs, ys)
         self.plot.setXRange(now_s - self._state.current_window_s, now_s, padding=0.0)
-        y_min = min(ys)
-        y_max = max(ys)
-        if math.isclose(y_min, y_max, rel_tol=0.0, abs_tol=1e-9):
-            padding = max(0.25, abs(y_min) * 0.05, 0.1)
-        else:
-            padding = max(0.25, (y_max - y_min) * 0.08)
-        self.plot.setYRange(y_min - padding, y_max + padding, padding=0.0)
+        self._update_statistics_plot_items()
 
     def _update_plot_axis_label(self) -> None:
         new_mode = "relative" if self._state.relative_mode else "absolute"

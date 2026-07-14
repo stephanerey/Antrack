@@ -6,7 +6,9 @@ from antrack.gui.connection_ui import (
     format_antenna_endpoint_summary,
     format_axis_index_status,
     format_axis_index_tooltip,
+    format_axis_operational_tooltip,
 )
+from antrack.core.antenna.operational_status import decode_axis_operational_status
 
 
 def test_format_axis_index_status_for_axis_driver():
@@ -117,3 +119,24 @@ def test_antenna_telemetry_to_dict_includes_index_fields():
 
     assert payload["index_az"] == 1
     assert payload["index_el"] == 2
+
+
+def test_axis_operational_tooltip_contains_raw_details_and_timestamp():
+    status = decode_axis_operational_status(
+        "AZ",
+        endstop=4,
+        motor_alarm=20,
+        modbus_status=1,
+        updated_monotonic=10.0,
+        updated_timestamp=1_700_000_000.0,
+        now_monotonic=10.5,
+        stale_timeout_s=2.0,
+    )
+
+    tooltip = format_axis_operational_tooltip(status)
+
+    assert "AZ axis status: ALARM" in tooltip
+    assert "Endstop active (raw code 4)" in tooltip
+    assert "Motor alarm active (raw code 20)" in tooltip
+    assert "Raw endstop: 4" in tooltip
+    assert "Last update:" in tooltip

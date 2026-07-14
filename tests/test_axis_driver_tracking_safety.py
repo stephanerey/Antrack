@@ -2,7 +2,7 @@ import time
 from types import SimpleNamespace
 
 from antrack.core.antenna.types import AntennaConnectionMode
-from antrack.tracking.tracking import Tracker, TrackedObject
+from antrack.tracking.tracking import Tracker, TrackedObject, automatic_tracking_elevation_allowed
 
 
 class DummyThreadManager:
@@ -98,6 +98,26 @@ def _tracking_settings():
             "el_forbidden_ranges": "",
         }
     }
+
+
+def test_automatic_tracking_horizon_rule_allows_zero_but_not_negative():
+    assert automatic_tracking_elevation_allowed(0.0)
+    assert automatic_tracking_elevation_allowed(0.01)
+    assert not automatic_tracking_elevation_allowed(-0.01)
+
+
+def test_tracker_suspends_negative_elevation_without_repeated_stop_commands():
+    client = AxisDriverClient()
+    tracked = _tracked_object()
+    tracked.el_set = -0.35
+    tracker = Tracker(client, settings=_tracking_settings(), thread_manager=DummyThreadManager(), tracked_object=tracked)
+    tracker._stop_motors = lambda force=False: client.commands.append("below_horizon_stop") or {"AZ": [], "EL": []}
+
+    tracker.step()
+    tracker.step()
+
+    assert client.commands == ["below_horizon_stop"]
+    assert tracker._below_horizon_active is True
 
 
 def test_tracker_axis_driver_stale_telemetry_safety_stop():
