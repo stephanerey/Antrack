@@ -6,6 +6,7 @@ from PyQt5.QtWidgets import QAction, QDialog, QMessageBox, QVBoxLayout
 
 from antrack.app_info import version
 from antrack.gui.diagnostics.diagnostics_ui import ThreadDiagnosticsUI
+from antrack.gui.diagnostics.rs485_monitor import Rs485MonitorDialog
 from antrack.gui.dialogs.log_viewer_ui import LogViewerDialog
 
 
@@ -25,6 +26,9 @@ class DiagnosticsUiMixin:
         thread_diag_action = QAction("Threads diagnosis", self)
         thread_diag_action.triggered.connect(self.show_thread_diagnostics)
         tools_menu.addAction(thread_diag_action)
+        rs485_monitor_action = QAction("RS485 Monitor", self)
+        rs485_monitor_action.triggered.connect(self.show_rs485_monitor)
+        tools_menu.addAction(rs485_monitor_action)
 
         help_menu = menu_bar.addMenu("Help")
         view_log_action = QAction("Display logs...", self)
@@ -50,6 +54,20 @@ class DiagnosticsUiMixin:
                 "Erreur",
                 f"Impossible d'afficher le diagnostic des threads: {str(exc)}",
             )
+
+    def show_rs485_monitor(self):
+        """Show or raise the single non-modal RS485 monitor instance."""
+        try:
+            monitor = getattr(self, "_rs485_monitor", None)
+            if monitor is None:
+                monitor = Rs485MonitorDialog(self)
+                self._rs485_monitor = monitor
+            monitor.show()
+            monitor.raise_()
+            monitor.activateWindow()
+        except Exception as exc:
+            self.logger.error("Unable to display RS485 monitor: %s", exc)
+            QMessageBox.warning(self, "RS485 Monitor", f"Unable to display RS485 monitor: {exc}")
 
     def show_about(self):
         """Display the About dialog."""

@@ -125,6 +125,25 @@ def test_status_stale_timeout_uses_multiple_poll_periods():
     assert status_stale_timeout(1.0) == 4.0
 
 
+def test_connection_ui_rejects_out_of_order_status_payloads():
+    harness = type(
+        "Harness",
+        (),
+        {"_latest_antenna_status_payload": {"status_update_monotonic": 20.0}},
+    )()
+
+    assert ConnectionUiMixin._accept_antenna_telemetry_payload(
+        harness, {"status_update_monotonic": 19.0}
+    ) is False
+    assert ConnectionUiMixin._accept_antenna_telemetry_payload(harness, {}) is False
+    assert ConnectionUiMixin._accept_antenna_telemetry_payload(
+        harness, {"status_update_monotonic": 20.0}
+    ) is True
+    assert ConnectionUiMixin._accept_antenna_telemetry_payload(
+        harness, {"status_update_monotonic": 21.0}
+    ) is True
+
+
 def test_central_start_gate_rejects_internal_tracking_start():
     class Harness:
         _auto_restart_tracking = True

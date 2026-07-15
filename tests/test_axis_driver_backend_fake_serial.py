@@ -6,7 +6,7 @@ import pytest
 from antrack.core.antenna.config import AxisDriverConnectionConfig
 from antrack.core.antenna.types import AntennaConnectionState
 from antrack.core.axis.axis_driver_backend import AxisDriverBackend
-from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, ENDSTOP_REGISTER, MOTION_STATE_REGISTER, PARAMETER_TRIGGER_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
+from antrack.core.axis.axis_driver_constants import COMMAND_REGISTER, COMMAND_TRIGGER_REGISTER, ENDSTOP_REGISTER, MODBUS_FAIL, MODBUS_OK, MOTION_STATE_REGISTER, PARAMETER_TRIGGER_REGISTER, RAW_POSITION_REGISTER, RELEASE_REGISTER, SPEED_REGISTER
 from antrack.core.axis.modbus_rtu import append_crc, build_fc03_request, build_fc06_request, build_fc16_request
 
 
@@ -525,6 +525,52 @@ def test_axis_driver_success_clears_stale_diag_last_error():
     backend._record_modbus_success(0x03, latency_s=0.01)
 
     assert backend._diag_last_error is None
+
+
+def test_axis_driver_isolated_failure_keeps_last_good_axis_status():
+    backend, _fake_serial = _backend_and_serial()
+    backend.telemetry.modbus_status_az = MODBUS_OK
+    backend.telemetry.modbus_status_el = MODBUS_OK
+
+    backend._record_modbus_failure(
+        0x03,
+        TimeoutError("isolated timeout"),
+        background=True,
+        context="EL position",
+        latency_s=0.2,
+        axis="EL",
+    )
+
+    assert backend.telemetry.modbus_status_az == MODBUS_OK
+    assert backend.telemetry.modbus_status_el == MODBUS_OK
+    assert backend._axis_failure_counts == {"AZ": 0, "EL": 1}
+
+
+def test_axis_driver_marks_only_affected_axis_after_failure_threshold():
+    backend, _fake_serial = _backend_and_serial()
+    backend.telemetry.modbus_status_az = MODBUS_OK
+    backend.telemetry.modbus_status_el = MODBUS_OK
+
+    for failure_number in range(backend._FAILURE_THRESHOLD):
+        backend._record_modbus_failure(
+            0x03,
+            TimeoutError(f"timeout {failure_number}"),
+            background=True,
+            context="EL position",
+            latency_s=0.2,
+            axis="EL",
+        )
+        backend._record_modbus_success(0x03, latency_s=0.01, axis="AZ")
+
+    assert backend.telemetry.modbus_status_az == MODBUS_OK
+    assert backend.telemetry.modbus_status_el == MODBUS_FAIL
+    assert backend._axis_failure_counts == {"AZ": 0, "EL": backend._FAILURE_THRESHOLD}
+    assert backend.state == AntennaConnectionState.DEGRADED
+
+    backend._record_modbus_success(0x03, latency_s=0.01, axis="EL")
+
+    assert backend.telemetry.modbus_status_el == MODBUS_OK
+    assert backend._axis_failure_counts == {"AZ": 0, "EL": 0}
 
 
 def test_axis_driver_snapshot_exposes_configured_and_observed_intervals():

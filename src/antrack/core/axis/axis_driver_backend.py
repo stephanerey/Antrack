@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import Callable
 
 from antrack.core.antenna.backend import BaseAntennaBackend
@@ -38,6 +39,14 @@ from antrack.core.axis.modbus_rtu import (
     parse_fc03_response,
     parse_fc06_response,
     parse_fc16_response,
+)
+from antrack.core.axis.rs485_diagnostics import (
+    RS485_DIAGNOSTICS,
+    Rs485Direction,
+    Rs485Result,
+    classify_exception,
+    request_details,
+    response_decoded,
 )
 
 try:
@@ -83,6 +92,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._io_lock = None
         self._last_status_payload = self._empty_status_payload()
         self._consecutive_failures = 0
+        self._axis_failure_counts = {"AZ": 0, "EL": 0}
         self._diag_window_started_monotonic = time.monotonic()
         self._diag_requests = 0
         self._diag_fc03 = 0
@@ -176,6 +186,8 @@ class AxisDriverBackend(BaseAntennaBackend):
         self.telemetry.motor_alarm_el = None
         self.telemetry.status_update_monotonic = None
         self.telemetry.status_update_timestamp = None
+        self._consecutive_failures = 0
+        self._axis_failure_counts = {"AZ": 0, "EL": 0}
         self.state = AntennaConnectionState.CONNECTING
         self.last_error = None
         self._log_startup_config()
@@ -192,12 +204,21 @@ class AxisDriverBackend(BaseAntennaBackend):
                 dsrdtr=False,
                 write_timeout=float(self.config.command_timeout_s),
             )
+            self._publish_port_event("OPEN", f"Serial port {self.config.comport} opened")
             self.state = AntennaConnectionState.CONNECTED
             await self.get_versions()
             await self.get_status()
         except Exception as exc:
             self.state = AntennaConnectionState.ERROR
             self.last_error = str(exc)
+            result, error_code = classify_exception(exc)
+            self._publish_port_event(
+                "ERROR",
+                f"Serial port {self.config.comport}: {exc}",
+                result=result,
+                error_code=error_code,
+                error_text=str(exc),
+            )
             self.logger.error("AxisDriver connect failed: %s", exc)
             self._close_serial()
             raise
@@ -828,6 +849,17 @@ class AxisDriverBackend(BaseAntennaBackend):
                     attempt + 1,
                     max_attempts,
                 )
+                RS485_DIAGNOSTICS.publish(
+                    direction=Rs485Direction.EVENT.value,
+                    axis=self._axis_name(slave),
+                    category="Retry",
+                    attempt=attempt + 1,
+                    decoded=f"Retry {attempt + 1}/{max_attempts}: {command_name}",
+                    result=Rs485Result.RETRY.value,
+                    error_code="command_retry",
+                    error_text=retry_reason or "Command not confirmed",
+                    metadata={"command": command_name, "max_attempts": max_attempts},
+                )
 
         if not confirmed:
             raise TimeoutError(
@@ -1146,16 +1178,55 @@ class AxisDriverBackend(BaseAntennaBackend):
         context: str,
     ):
         started = time.monotonic()
+        transaction_id = RS485_DIAGNOSTICS.next_transaction_id()
+        buffer = b""
+        tx_monotonic_ns: int | None = None
+        details = request_details(
+            request,
+            context=context,
+            az_slave=self.config.az_slave_address,
+            el_slave=self.config.el_slave_address,
+        )
         try:
             self._wait_inter_request_gap_locked()
             reset_input = getattr(self.serial_port, "reset_input_buffer", None)
             if callable(reset_input):
+                try:
+                    discarded = max(0, int(getattr(self.serial_port, "in_waiting", 0) or 0))
+                except Exception:
+                    discarded = 0
                 reset_input()
+                if discarded:
+                    RS485_DIAGNOSTICS.publish(
+                        direction=Rs485Direction.EVENT.value,
+                        axis=str(details["axis"]),
+                        category="Port",
+                        transaction_id=transaction_id,
+                        raw_frame=b"",
+                        decoded=f"Input buffer purged ({discarded} byte(s))",
+                        result=Rs485Result.INFO.value,
+                        metadata={"discarded_bytes": discarded, "state": "OPEN"},
+                    )
+            tx_wall = datetime.now().astimezone()
+            tx_monotonic_ns = time.perf_counter_ns()
             self.serial_port.write(request)
+            RS485_DIAGNOSTICS.publish(
+                timestamp_wall=tx_wall,
+                timestamp_monotonic_ns=tx_monotonic_ns,
+                direction=Rs485Direction.TX.value,
+                axis=str(details["axis"]),
+                category=str(details["category"]),
+                function_code=func_code,
+                transaction_id=transaction_id,
+                logical_request_id=transaction_id,
+                raw_frame=bytes(request),
+                decoded=str(details["decoded"]),
+                result=Rs485Result.OK.value,
+                metadata={"context": context, "register": details["register"], "value": details["value"]},
+            )
             deadline = time.monotonic() + max(0.0, float(timeout_s))
             max_frame_length = max(int(length) for length in candidate_lengths)
             max_buffer_length = len(request) + max_frame_length
-            buffer = b""
             last_error = None
 
             while time.monotonic() < deadline and len(buffer) < max_buffer_length:
@@ -1172,10 +1243,34 @@ class AxisDriverBackend(BaseAntennaBackend):
                 chunk = self.serial_port.read(read_size)
                 if chunk:
                     buffer += chunk
-                parsed, last_error = self._scan_for_valid_frame(buffer, candidate_lengths, parser)
+                parsed, response_frame, last_error = self._scan_for_valid_frame(buffer, candidate_lengths, parser)
                 if parsed is not None:
+                    completed_ns = time.perf_counter_ns()
+                    legacy_short = func_code == 0x06 and response_frame is not None and len(response_frame) == 7
+                    RS485_DIAGNOSTICS.publish(
+                        timestamp_monotonic_ns=completed_ns,
+                        direction=Rs485Direction.RX.value,
+                        axis=str(details["axis"]),
+                        category=str(details["category"]),
+                        function_code=func_code,
+                        transaction_id=transaction_id,
+                        logical_request_id=transaction_id,
+                        raw_frame=bytes(response_frame or b""),
+                        decoded=response_decoded(request, response_frame or b"", legacy_short=legacy_short),
+                        latency_ms=(completed_ns - tx_monotonic_ns) / 1_000_000.0,
+                        result=(
+                            Rs485Result.LEGACY_SHORT_ACCEPTED.value
+                            if legacy_short
+                            else Rs485Result.OK.value
+                        ),
+                        metadata={"context": context},
+                    )
                     self._last_request_completed_monotonic = time.monotonic()
-                    self._record_modbus_success(func_code, latency_s=max(0.0, time.monotonic() - started))
+                    self._record_modbus_success(
+                        func_code,
+                        axis=str(details["axis"]),
+                        latency_s=max(0.0, time.monotonic() - started),
+                    )
                     return parsed
                 if not chunk:
                     remaining_time_s = deadline - time.monotonic()
@@ -1189,12 +1284,35 @@ class AxisDriverBackend(BaseAntennaBackend):
                 f"Expected valid Modbus response ({candidate_lengths}), got {len(buffer)} bytes | raw={raw}"
             )
         except Exception as exc:
+            failed_ns = time.perf_counter_ns()
+            result, error_code = classify_exception(exc)
+            RS485_DIAGNOSTICS.publish(
+                timestamp_monotonic_ns=failed_ns,
+                direction=Rs485Direction.EVENT.value,
+                axis=str(details["axis"]),
+                category=("Timeout" if result == Rs485Result.TIMEOUT.value else "Error"),
+                function_code=func_code,
+                transaction_id=transaction_id,
+                logical_request_id=transaction_id,
+                raw_frame=bytes(buffer),
+                decoded=f"{context}: {result}",
+                latency_ms=(
+                    (failed_ns - tx_monotonic_ns) / 1_000_000.0
+                    if tx_monotonic_ns is not None
+                    else None
+                ),
+                result=result,
+                error_code=error_code,
+                error_text=str(exc),
+                metadata={"context": context, "candidate_lengths": tuple(candidate_lengths)},
+            )
             self._last_request_completed_monotonic = time.monotonic()
             self._record_modbus_failure(
                 func_code,
                 exc,
                 background=background,
                 context=context,
+                axis=str(details["axis"]),
                 latency_s=max(0.0, time.monotonic() - started),
             )
             raise
@@ -1204,7 +1322,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         buffer: bytes,
         candidate_lengths: tuple[int, ...],
         parser: Callable[[bytes], object],
-    ) -> tuple[object | None, Exception | None]:
+    ) -> tuple[object | None, bytes | None, Exception | None]:
         last_error = None
         for frame_length in sorted({int(length) for length in candidate_lengths}):
             if len(buffer) < frame_length:
@@ -1212,10 +1330,10 @@ class AxisDriverBackend(BaseAntennaBackend):
             for start in range(0, len(buffer) - frame_length + 1):
                 frame = buffer[start:start + frame_length]
                 try:
-                    return parser(frame), None
+                    return parser(frame), frame, None
                 except Exception as exc:
                     last_error = exc
-        return None, last_error
+        return None, None, last_error
 
     def _ensure_serial_open(self) -> None:
         if not self.is_connected():
@@ -1290,7 +1408,18 @@ class AxisDriverBackend(BaseAntennaBackend):
             return self.STATUS_READ_MODE_MINIMAL_SINGLE_REGISTER
         return mode
 
-    def _record_modbus_success(self, func_code: int, *, latency_s: float) -> None:
+    @staticmethod
+    def _normalized_axis(axis: str | None) -> str | None:
+        normalized = str(axis or "").strip().upper()
+        return normalized if normalized in {"AZ", "EL"} else None
+
+    def _record_modbus_success(
+        self,
+        func_code: int,
+        *,
+        latency_s: float,
+        axis: str | None = None,
+    ) -> None:
         self._diag_requests += 1
         self._diag_total_requests += 1
         if func_code == 0x03:
@@ -1300,14 +1429,22 @@ class AxisDriverBackend(BaseAntennaBackend):
             self._diag_fc06 += 1
             self._diag_total_fc06 += 1
         self._record_latency(latency_s)
-        if self._consecutive_failures and self.state == AntennaConnectionState.DEGRADED:
-            self.logger.info("AxisDriver Modbus recovered after %d consecutive failures", self._consecutive_failures)
-        self._consecutive_failures = 0
-        if self.is_connected():
-            self.state = AntennaConnectionState.CONNECTED
-        self.last_error = None
-        self.telemetry.modbus_status_az = MODBUS_OK
-        self.telemetry.modbus_status_el = MODBUS_OK
+        normalized_axis = self._normalized_axis(axis)
+        recovered_count = self._consecutive_failures
+        if normalized_axis is None:
+            self._axis_failure_counts = {"AZ": 0, "EL": 0}
+            self.telemetry.modbus_status_az = MODBUS_OK
+            self.telemetry.modbus_status_el = MODBUS_OK
+        else:
+            self._axis_failure_counts[normalized_axis] = 0
+            setattr(self.telemetry, f"modbus_status_{normalized_axis.lower()}", MODBUS_OK)
+        self._consecutive_failures = max(self._axis_failure_counts.values(), default=0)
+        if self._consecutive_failures == 0:
+            if recovered_count and self.state == AntennaConnectionState.DEGRADED:
+                self.logger.info("AxisDriver Modbus recovered after %d consecutive failures", recovered_count)
+            if self.is_connected():
+                self.state = AntennaConnectionState.CONNECTED
+            self.last_error = None
         if self._diag_failures == 0:
             self._diag_last_error = None
         self._maybe_log_diagnostics()
@@ -1320,6 +1457,7 @@ class AxisDriverBackend(BaseAntennaBackend):
         background: bool,
         context: str,
         latency_s: float,
+        axis: str | None = None,
     ) -> None:
         self._diag_requests += 1
         self._diag_total_requests += 1
@@ -1337,9 +1475,13 @@ class AxisDriverBackend(BaseAntennaBackend):
         self._record_latency(latency_s)
         self._diag_last_error = str(exc)
         self.last_error = str(exc)
-        self.telemetry.modbus_status_az = MODBUS_FAIL
-        self.telemetry.modbus_status_el = MODBUS_FAIL
-        self._consecutive_failures += 1
+        normalized_axis = self._normalized_axis(axis)
+        affected_axes = (normalized_axis,) if normalized_axis is not None else ("AZ", "EL")
+        for affected_axis in affected_axes:
+            self._axis_failure_counts[affected_axis] += 1
+            if self._axis_failure_counts[affected_axis] >= self._FAILURE_THRESHOLD:
+                setattr(self.telemetry, f"modbus_status_{affected_axis.lower()}", MODBUS_FAIL)
+        self._consecutive_failures = max(self._axis_failure_counts.values(), default=0)
         if self._consecutive_failures >= self._FAILURE_THRESHOLD:
             self.state = AntennaConnectionState.DEGRADED
             self.logger.warning(
@@ -1599,6 +1741,33 @@ class AxisDriverBackend(BaseAntennaBackend):
             return
         try:
             self.serial_port.close()
+            self._publish_port_event("CLOSED", f"Serial port {self.config.comport} closed")
         except Exception:
             pass
         self.serial_port = None
+
+    def _publish_port_event(
+        self,
+        state: str,
+        decoded: str,
+        *,
+        result: str = Rs485Result.INFO.value,
+        error_code: str = "",
+        error_text: str = "",
+    ) -> None:
+        RS485_DIAGNOSTICS.publish(
+            direction=Rs485Direction.EVENT.value,
+            axis="Broadcast",
+            category="Port",
+            decoded=decoded,
+            result=result,
+            error_code=error_code,
+            error_text=error_text,
+            metadata={
+                "state": state,
+                "port": self.config.comport,
+                "baudrate": self.config.baudrate,
+                "serial_timeout_s": self.config.serial_timeout_s,
+                "command_timeout_s": self.config.command_timeout_s,
+            },
+        )

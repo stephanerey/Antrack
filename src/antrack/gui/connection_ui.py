@@ -377,6 +377,21 @@ class ConnectionUiMixin:
         self._axis_operational_signatures = {}
         self._last_tracking_inhibit_signature = None
 
+    def _accept_antenna_telemetry_payload(self, data: dict) -> bool:
+        """Reject queued telemetry snapshots older than the latest displayed status."""
+        if not isinstance(data, dict):
+            return False
+        previous = self._latest_antenna_status_payload
+        if not isinstance(previous, dict) or not previous:
+            return True
+        previous_update = previous.get("status_update_monotonic")
+        incoming_update = data.get("status_update_monotonic")
+        if not isinstance(previous_update, (int, float)):
+            return True
+        if not isinstance(incoming_update, (int, float)):
+            return False
+        return incoming_update >= previous_update
+
     def _refresh_reference_status_panel(self, data: dict | None = None):
         if not hasattr(self, "label_antenna_index_az") or not hasattr(self, "label_antenna_index_el"):
             return
@@ -1079,6 +1094,8 @@ class ConnectionUiMixin:
         """Unified live update of antenna labels and gauges."""
         try:
             if not isinstance(data, dict):
+                return
+            if not self._accept_antenna_telemetry_payload(data):
                 return
             az = data.get("az")
             el = data.get("el")
